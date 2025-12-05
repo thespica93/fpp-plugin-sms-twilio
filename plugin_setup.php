@@ -2,7 +2,7 @@
 // Plugin Name: SMS Twilio Integration
 // Plugin Description: Allow viewers to text names that appear on your display
 // Plugin Version: 2.5
-// Plugin Author: Nick Spica
+// Plugin Author: Nick
 // Plugin URL: https://github.com/YOUR_USERNAME/fpp-plugin-sms-twilio
 
 // This file is required by FPP to recognize and install the plugin
