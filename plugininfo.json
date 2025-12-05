@@ -1,0 +1,14 @@
+{
+  "name": "fpp-plugin-sms-twilio",
+  "description": "SMS Twilio Integration - Allow viewers to text names that appear on your display",
+  "homeUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio",
+  "srcUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio.git",
+  "bugUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio/issues",
+  "sha": "",
+  "branch": "main",
+  "author": "thespica93",
+  "version": "2.5",
+  "lastUpdate": "2024-12-05",
+  "requires": [],
+  "allowUpdates": 1
+}
