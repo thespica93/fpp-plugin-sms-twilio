@@ -66,12 +66,25 @@ function isPluginRunning() {
 
 // Install dependencies
 function installDependencies() {
-    // Install Python packages
-    exec("pip3 install --break-system-packages flask==3.0.0 2>&1", $output, $return);
-    exec("pip3 install --break-system-packages twilio==8.10.0 2>&1", $output, $return);
-    exec("pip3 install --break-system-packages requests==2.31.0 2>&1", $output, $return);
+    global $pluginDirectory;
     
-    return true;
+    // Run the install.sh script which handles everything
+    $installScript = $pluginDirectory . "/install.sh";
+    
+    if (file_exists($installScript)) {
+        // Make it executable
+        exec("chmod +x " . escapeshellarg($installScript));
+        
+        // Run the installer
+        exec("bash " . escapeshellarg($installScript) . " 2>&1", $output, $return);
+        
+        // Log the output
+        error_log("FPP SMS Plugin Install: " . implode("\n", $output));
+        
+        return $return === 0;
+    }
+    
+    return false;
 }
 
 // Create default configuration files if they don't exist
