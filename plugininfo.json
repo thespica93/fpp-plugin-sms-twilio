@@ -1,8 +1,8 @@
 {
 	"repoName": "fpp-plugin-sms-twilio",
 	"name": "SMS Twilio Integration",
-	"author": "Nick (thespica93)",
-	"description": "Allow viewers to text names that appear on your Christmas light display using Twilio SMS. Features include message queueing system with no interruptions, comprehensive profanity filtering with customizable blacklist, optional name whitelist for pre-approved names, automatic SMS responses to confirm message receipt, phone number blocking and rate limiting, duplicate message detection, and full FPP integration with playlist switching and text overlays. Messages are queued and displayed one at a time with configurable duration. Web-based configuration interface accessible at port 5000 provides real-time queue monitoring, message history, testing tools, and complete control over all settings.",
+	"author": "Nick Spica (thespica93)",
+	"description": "Allow viewers to text names that appear on your Christmas light display using Twilio SMS. Features include message queueing system with no interruptions, comprehensive profanity filtering with customizable blacklist, optional name whitelist for pre-approved names, automatic SMS responses to confirm message receipt, phone number blocking and rate limiting, duplicate message detection, and full FPP integration with playlist switching and text overlays. Messages are queued and displayed one at a time with configurable duration. Web-based configuration interface accessible at port 5000 provides real-time queue monitoring, message history, testing tools, and complete control over all settings. **NOTE: Code is still in testing and may not operate as expected**",
 	"homeURL": "https://github.com/thespica93/fpp-plugin-sms-twilio",
 	"srcURL": "https://github.com/thespica93/fpp-plugin-sms-twilio.git",
 	"bugURL": "https://github.com/thespica93/fpp-plugin-sms-twilio/issues",
@@ -10,7 +10,7 @@
 	"requires": [],
 	"versions": [
 		{
-			"minFPPVersion": "6.0",
+			"minFPPVersion": "9.0",
 			"maxFPPVersion": "0",
 			"branch": "main",
 			"sha": ""
