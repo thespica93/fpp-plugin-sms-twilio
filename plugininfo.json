@@ -1,14 +1,15 @@
 {
-  "name": "fpp-plugin-sms-twilio",
-  "description": "SMS Twilio Integration - Allow viewers to text names that appear on your display",
-  "homeUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio",
-  "srcUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio.git",
-  "bugUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio/issues",
-  "sha": "",
-  "branch": "main",
-  "author": "thespica93",
-  "version": "2.5",
-  "lastUpdate": "2024-12-05",
-  "requires": [],
-  "allowUpdates": 1
+    "repoName": "fpp-plugin-sms-twilio",
+    "name": "SMS Twilio Integration",
+    "author": "Nick (thespica93)",
+    "description": "Allow viewers to text names that appear on your Christmas light display using Twilio SMS",
+    "homeUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio",
+    "srcUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio.git",
+    "bugUrl": "https://github.com/thespica93/fpp-plugin-sms-twilio/issues",
+    "sha": "",
+    "branch": "main",
+    "version": "2.5.0",
+    "lastUpdate": "2024-12-05",
+    "requires": [],
+    "allowUpdates": 1
 }
