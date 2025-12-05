@@ -23,9 +23,11 @@ fi
 
 # STEP 2: Install Python packages
 echo "Installing Python packages..." | tee -a $LOG_FILE
-pip3 install --break-system-packages flask==3.0.0 >> $LOG_FILE 2>&1
-pip3 install --break-system-packages twilio==8.10.0 >> $LOG_FILE 2>&1
-pip3 install --break-system-packages requests==2.31.0 >> $LOG_FILE 2>&1
+pip3 install --break-system-packages flask==3.0.0 >> $LOG_FILE 2>&1 || echo "Flask install failed" | tee -a $LOG_FILE
+sleep 1
+pip3 install --break-system-packages twilio==8.10.0 >> $LOG_FILE 2>&1 || echo "Twilio install failed" | tee -a $LOG_FILE
+sleep 1
+pip3 install --break-system-packages requests==2.31.0 >> $LOG_FILE 2>&1 || echo "Requests install failed" | tee -a $LOG_FILE
 
 # STEP 3: Create directories
 echo "Creating directories..." | tee -a $LOG_FILE
@@ -60,20 +62,43 @@ fi
 chown -R fpp:fpp /home/fpp/media/config 2>/dev/null || true
 chown -R fpp:fpp /home/fpp/media/logs 2>/dev/null || true
 
-# STEP 6: Start the service
+# STEP 6: Verify packages installed
+echo "Verifying Python packages..." | tee -a $LOG_FILE
+FLASK_OK=$(pip3 list 2>/dev/null | grep -i flask || echo "")
+TWILIO_OK=$(pip3 list 2>/dev/null | grep -i twilio || echo "")
+REQUESTS_OK=$(pip3 list 2>/dev/null | grep -i requests || echo "")
+
+if [ -z "$FLASK_OK" ]; then
+    echo "❌ Flask not installed!" | tee -a $LOG_FILE
+    exit 1
+fi
+if [ -z "$TWILIO_OK" ]; then
+    echo "❌ Twilio not installed!" | tee -a $LOG_FILE
+    exit 1
+fi
+if [ -z "$REQUESTS_OK" ]; then
+    echo "❌ Requests not installed!" | tee -a $LOG_FILE
+    exit 1
+fi
+
+echo "✅ All packages verified" | tee -a $LOG_FILE
+
+# STEP 7: Start the service
 echo "Starting service..." | tee -a $LOG_FILE
 pkill -f sms_plugin.py 2>/dev/null || true
 sleep 2
 
 # Create log file with proper permissions
 touch /home/fpp/media/logs/sms_plugin.log
+chmod 666 /home/fpp/media/logs/sms_plugin.log
 chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
 
 # Start service as fpp user
-su -c "nohup python3 '$PLUGIN_DIR/sms_plugin.py' > /home/fpp/media/logs/sms_plugin.log 2>&1 &" fpp
+cd "$PLUGIN_DIR"
+su -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &" fpp
 sleep 3
 
-# STEP 7: Verify
+# STEP 8: Verify
 if ps aux | grep -v grep | grep sms_plugin.py > /dev/null; then
     echo "✅ Installation complete! Service running on port 5000" | tee -a $LOG_FILE
     exit 0
