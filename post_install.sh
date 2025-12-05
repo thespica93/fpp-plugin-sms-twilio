@@ -4,12 +4,16 @@
 # FPP automatically runs this after cloning the repository
 ###############################################################################
 
-echo "Running post-install setup for FPP SMS Twilio Plugin..."
-
 # Get the directory where this script is located
 PLUGIN_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 cd "$PLUGIN_DIR"
+
+echo "Running post-install setup for FPP SMS Twilio Plugin..."
+
+# Make scripts executable (in case Git stripped permissions)
+chmod +x post_install.sh
+chmod +x install.sh
 
 # Run the main installer
 if [ -f "install.sh" ]; then
