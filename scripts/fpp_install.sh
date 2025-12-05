@@ -1,41 +1,59 @@
 #!/bin/bash
 ###############################################################################
-# FPP SMS Twilio Plugin - FPP Installation Script
-# FPP automatically calls this from scripts/fpp_install.sh
+# FPP SMS Twilio Plugin - Installation Script
 ###############################################################################
-
-# Make this script executable (in case Git stripped permissions)
-chmod +x "$0" 2>/dev/null || true
 
 PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
 LOG_FILE="/home/fpp/media/logs/sms_plugin_install.log"
 
-echo "================================" | tee $LOG_FILE
-echo "FPP SMS Twilio Plugin Installer" | tee -a $LOG_FILE
-echo "================================" | tee -a $LOG_FILE
+exec > >(tee -a $LOG_FILE) 2>&1
 
-# STEP 1: Install pip3
-echo "Installing pip3..." | tee -a $LOG_FILE
+echo "========================================"
+echo "FPP SMS Twilio Plugin Installer"
+echo "========================================"
+
+# Install pip3
 if ! command -v pip3 &> /dev/null; then
-    apt-get update -qq >> $LOG_FILE 2>&1
-    apt-get install -y python3-pip >> $LOG_FILE 2>&1
+    echo "Installing pip3..."
+    apt-get update -qq
+    apt-get install -y python3-pip
 fi
 
-# STEP 2: Install Python packages
-echo "Installing Python packages..." | tee -a $LOG_FILE
-pip3 install --break-system-packages flask==3.0.0 >> $LOG_FILE 2>&1 || echo "Flask install failed" | tee -a $LOG_FILE
-sleep 1
-pip3 install --break-system-packages twilio==8.10.0 >> $LOG_FILE 2>&1 || echo "Twilio install failed" | tee -a $LOG_FILE
-sleep 1
-pip3 install --break-system-packages requests==2.31.0 >> $LOG_FILE 2>&1 || echo "Requests install failed" | tee -a $LOG_FILE
+# Install packages one at a time with retries
+install_package() {
+    local package=$1
+    local max_attempts=3
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        echo "Installing $package (attempt $attempt/$max_attempts)..."
+        
+        if timeout 120 pip3 install --break-system-packages --no-cache-dir $package; then
+            echo "✅ $package installed successfully"
+            return 0
+        fi
+        
+        echo "⚠️  $package install failed, retrying..."
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    
+    echo "❌ Failed to install $package after $max_attempts attempts"
+    return 1
+}
 
-# STEP 3: Create directories
-echo "Creating directories..." | tee -a $LOG_FILE
+# Install each package
+install_package "flask==3.0.0" || exit 1
+install_package "twilio==8.10.0" || exit 1
+install_package "requests==2.31.0" || exit 1
+
+# Create directories
+echo "Creating directories..."
 mkdir -p /home/fpp/media/config
 mkdir -p /home/fpp/media/logs
 
-# STEP 4: Create config files
-echo "Creating config files..." | tee -a $LOG_FILE
+# Create config files
+echo "Creating config files..."
 if [ ! -f "/home/fpp/media/config/blacklist.txt" ]; then
     cat > /home/fpp/media/config/blacklist.txt << 'EOF'
 fuck
@@ -50,59 +68,40 @@ piss
 EOF
 fi
 
-if [ ! -f "/home/fpp/media/config/whitelist.txt" ]; then
-    touch /home/fpp/media/config/whitelist.txt
-fi
+[ ! -f "/home/fpp/media/config/whitelist.txt" ] && touch /home/fpp/media/config/whitelist.txt
+[ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json
 
-if [ ! -f "/home/fpp/media/config/blocked_phones.json" ]; then
-    echo "[]" > /home/fpp/media/config/blocked_phones.json
-fi
-
-# STEP 5: Set permissions
+# Set permissions
 chown -R fpp:fpp /home/fpp/media/config 2>/dev/null || true
 chown -R fpp:fpp /home/fpp/media/logs 2>/dev/null || true
 
-# STEP 6: Verify packages installed
-echo "Verifying Python packages..." | tee -a $LOG_FILE
-FLASK_OK=$(pip3 list 2>/dev/null | grep -i flask || echo "")
-TWILIO_OK=$(pip3 list 2>/dev/null | grep -i twilio || echo "")
-REQUESTS_OK=$(pip3 list 2>/dev/null | grep -i requests || echo "")
-
-if [ -z "$FLASK_OK" ]; then
-    echo "❌ Flask not installed!" | tee -a $LOG_FILE
-    exit 1
-fi
-if [ -z "$TWILIO_OK" ]; then
-    echo "❌ Twilio not installed!" | tee -a $LOG_FILE
-    exit 1
-fi
-if [ -z "$REQUESTS_OK" ]; then
-    echo "❌ Requests not installed!" | tee -a $LOG_FILE
-    exit 1
-fi
-
-echo "✅ All packages verified" | tee -a $LOG_FILE
-
-# STEP 7: Start the service
-echo "Starting service..." | tee -a $LOG_FILE
+# Stop any existing service
+echo "Stopping any existing service..."
 pkill -f sms_plugin.py 2>/dev/null || true
 sleep 2
 
-# Create log file with proper permissions
+# Prepare log file
 touch /home/fpp/media/logs/sms_plugin.log
 chmod 666 /home/fpp/media/logs/sms_plugin.log
 chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
 
-# Start service as fpp user
+# Start service
+echo "Starting SMS Twilio service..."
 cd "$PLUGIN_DIR"
-su -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &" fpp
-sleep 3
+su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &"
+sleep 5
 
-# STEP 8: Verify
-if ps aux | grep -v grep | grep sms_plugin.py > /dev/null; then
-    echo "✅ Installation complete! Service running on port 5000" | tee -a $LOG_FILE
+# Verify
+if pgrep -f sms_plugin.py > /dev/null; then
+    echo "========================================"
+    echo "✅ Installation complete!"
+    echo "Service is running on port 5000"
+    echo "========================================"
     exit 0
 else
-    echo "❌ Service failed to start. Check /home/fpp/media/logs/sms_plugin.log" | tee -a $LOG_FILE
+    echo "========================================"
+    echo "❌ Service failed to start"
+    echo "Check: /home/fpp/media/logs/sms_plugin.log"
+    echo "========================================"
     exit 1
 fi
