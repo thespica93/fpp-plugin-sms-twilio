@@ -68,14 +68,11 @@ function isPluginRunning() {
 function installDependencies() {
     global $pluginDirectory;
     
-    // Run the install.sh script which handles everything
-    $installScript = $pluginDirectory . "/install.sh";
+    // Run the fpp_install.sh script in scripts directory
+    $installScript = $pluginDirectory . "/scripts/fpp_install.sh";
     
     if (file_exists($installScript)) {
-        // Make it executable
-        exec("chmod +x " . escapeshellarg($installScript));
-        
-        // Run the installer
+        // Run the installer using bash (doesn't need to be executable)
         exec("bash " . escapeshellarg($installScript) . " 2>&1", $output, $return);
         
         // Log the output
