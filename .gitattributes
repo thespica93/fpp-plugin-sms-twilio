@@ -1,0 +1,3 @@
+*.sh binary
+post_install.sh binary
+install.sh binary
