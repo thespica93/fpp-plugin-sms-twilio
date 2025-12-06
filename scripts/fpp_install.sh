@@ -25,13 +25,20 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y python3-twilio 2>&1 || {
     # If apt fails, try pip with different flags
     pip3 install --no-input --break-system-packages twilio==8.10.0 < /dev/null
 }
+sleep 2
+echo "Waiting for Twilio install to complete..."
+wait
 
 # Install other packages
 echo "Installing Flask..."
 pip3 install --break-system-packages flask==3.0.0
+sleep 1
+wait
 
 echo "Installing Requests..."
 pip3 install --break-system-packages requests==2.31.0
+sleep 1
+wait
 
 # Create directories
 mkdir -p /home/fpp/media/config /home/fpp/media/logs
