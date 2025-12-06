@@ -18,12 +18,17 @@ if ! command -v pip3 &> /dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip
 fi
 
-# Install packages - simple approach, no retries or timeouts
+# Try installing Twilio via apt first (more reliable)
+echo "Installing Twilio via apt..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3-twilio 2>&1 || {
+    echo "Apt install failed, trying pip3..."
+    # If apt fails, try pip with different flags
+    pip3 install --no-input --break-system-packages twilio==8.10.0 < /dev/null
+}
+
+# Install other packages
 echo "Installing Flask..."
 pip3 install --break-system-packages flask==3.0.0
-
-echo "Installing Twilio..."  
-pip3 install --break-system-packages twilio==8.10.0
 
 echo "Installing Requests..."
 pip3 install --break-system-packages requests==2.31.0
