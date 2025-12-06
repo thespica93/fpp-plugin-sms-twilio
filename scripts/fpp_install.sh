@@ -18,27 +18,24 @@ if ! command -v pip3 &> /dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip
 fi
 
-# Try installing Twilio via apt first (more reliable)
-echo "Installing Twilio via apt..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3-twilio 2>&1 || {
-    echo "Apt install failed, trying pip3..."
-    # If apt fails, try pip with different flags
-    pip3 install --no-input --break-system-packages twilio==8.10.0 < /dev/null
-}
-sleep 2
-echo "Waiting for Twilio install to complete..."
-wait
-
-# Install other packages
+# Install packages with explicit waits
 echo "Installing Flask..."
-pip3 install --break-system-packages flask==3.0.0
-sleep 1
-wait
+pip3 install --break-system-packages --no-cache-dir flask==3.0.0
+echo "Flask complete"
+
+echo "Installing Twilio (this may take 60+ seconds)..."
+# Twilio has many dependencies, run without timeout
+pip3 install --break-system-packages --no-cache-dir twilio==8.10.0 2>&1 | tee -a "$LOG"
+TWILIO_EXIT=$?
+if [ $TWILIO_EXIT -ne 0 ]; then
+    echo "ERROR: Twilio installation failed with exit code $TWILIO_EXIT"
+    exit 1
+fi
+echo "Twilio complete"
 
 echo "Installing Requests..."
-pip3 install --break-system-packages requests==2.31.0
-sleep 1
-wait
+pip3 install --break-system-packages --no-cache-dir requests==2.31.0
+echo "Requests complete"
 
 # Create directories
 mkdir -p /home/fpp/media/config /home/fpp/media/logs
@@ -63,6 +60,11 @@ fi
 
 # Set permissions
 chown -R fpp:fpp /home/fpp/media/config /home/fpp/media/logs 2>/dev/null
+
+# Create service log file with proper permissions
+touch /home/fpp/media/logs/sms_plugin.log
+chmod 666 /home/fpp/media/logs/sms_plugin.log
+chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
 
 echo "========================================"
 echo "Installation complete!"
