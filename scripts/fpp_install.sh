@@ -3,12 +3,15 @@
 # FPP SMS Twilio Plugin - Installation Script
 ###############################################################################
 
-# Make this script executable (GitHub strips permissions)
-chmod +x "$0" 2>/dev/null || true
+# Source FPP common functions and set FPPDIR environment
+. ${FPPDIR}/scripts/common
+
+# Create directories FIRST before any logging to files
+mkdir -p /home/fpp/media/config /home/fpp/media/logs
 
 LOG="/home/fpp/media/logs/sms_plugin_install.log"
 
-# Function to log and display
+# Log to both file and stdout so FPP UI shows progress
 log_and_show() {
     echo "$1" | tee -a "$LOG"
 }
@@ -25,13 +28,12 @@ if ! command -v pip3 &> /dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip >> "$LOG" 2>&1
 fi
 
-# Install packages with explicit waits
+# Install packages
 log_and_show "Installing Flask..."
 pip3 install --break-system-packages --no-cache-dir flask==3.0.0 >> "$LOG" 2>&1
 log_and_show "Flask complete"
 
 log_and_show "Installing Twilio (this may take 60+ seconds)..."
-# Twilio has many dependencies, run without timeout
 pip3 install --break-system-packages --no-cache-dir twilio==8.10.0 >> "$LOG" 2>&1
 TWILIO_EXIT=$?
 if [ $TWILIO_EXIT -ne 0 ]; then
@@ -43,9 +45,6 @@ log_and_show "Twilio complete"
 log_and_show "Installing Requests..."
 pip3 install --break-system-packages --no-cache-dir requests==2.31.0 >> "$LOG" 2>&1
 log_and_show "Requests complete"
-
-# Create directories
-mkdir -p /home/fpp/media/config /home/fpp/media/logs
 
 # Create config files if they don't exist
 if [ ! -f "/home/fpp/media/config/blacklist.txt" ]; then
@@ -67,8 +66,6 @@ fi
 
 # Set permissions
 chown -R fpp:fpp /home/fpp/media/config /home/fpp/media/logs 2>/dev/null
-
-# Create service log file with proper permissions
 touch /home/fpp/media/logs/sms_plugin.log
 chmod 666 /home/fpp/media/logs/sms_plugin.log
 chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
