@@ -68,8 +68,8 @@ function isPluginRunning() {
 function installDependencies() {
     global $pluginDirectory;
     
-    // Run the fpp_install.sh script in plugin root directory
-    $installScript = $pluginDirectory . "/fpp_install.sh";
+    // Run the fpp_install.sh script in scripts directory
+    $installScript = $pluginDirectory . "/scripts/fpp_install.sh";
     
     if (file_exists($installScript)) {
         // Run the installer using bash (doesn't need to be executable)
