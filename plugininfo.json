@@ -2,7 +2,7 @@
 	"repoName": "fpp-plugin-sms-twilio",
 	"name": "SMS Twilio Integration",
 	"author": "Nick Spica (thespica93)",
-	"description": "Allow viewers to text names that will appear on your light display using Twilio SMS. Features include message queueing, comprehensive profanity filtering with customizable blacklist, optional name whitelist for pre-approved names, automatic SMS responses to confirm message receipt, phone number blocking and rate limiting, duplicate message detection, and full FPP integration with playlist switching and text overlays. **NOTE: Code is still in testing and may not operate as expected**",
+	"description": "Allow viewers to text names that will appear on your light display using Twilio SMS. Features include message queueing, profanity filtering with customizable blacklist, name whitelist, automatic SMS responses, phone number blocking and rate limiting, and duplicate message detection. **NOTE: Code is still in testing and may not operate as expected**",
 	"homeURL": "https://github.com/thespica93/fpp-plugin-sms-twilio",
 	"srcURL": "https://github.com/thespica93/fpp-plugin-sms-twilio.git",
 	"bugURL": "https://github.com/thespica93/fpp-plugin-sms-twilio/issues",
