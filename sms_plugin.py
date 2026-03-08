@@ -2442,7 +2442,7 @@ def view_messages():
                 </td>
                 <td>
                     {% if msg.status != 'blocked' %}
-                    <button class="block-btn" onclick="blockPhone('{{ msg.phone_full }}')">🚫 Block</button>
+                    <button class="block-btn" onclick="showBlockModal('{{ msg.phone_full }}', '{{ msg.extracted_name }}')">🚫 Block</button>
                     {% endif %}
                 </td>
             </tr>
@@ -2453,21 +2453,50 @@ def view_messages():
         <script>
             setTimeout(function() { location.reload(); }, 5000);
             
+            function showBlockModal(phone, name) {
+                document.getElementById('modal-phone').textContent = phone;
+                document.getElementById('modal-name-text').textContent = name || '(no name)';
+                document.getElementById('modal-block-name-btn').disabled = !name;
+                document.getElementById('modal-block-name-btn').style.opacity = name ? '1' : '0.4';
+                document.getElementById('block-modal').dataset.phone = phone;
+                document.getElementById('block-modal').dataset.name = name || '';
+                document.getElementById('block-modal').style.display = 'flex';
+            }
+
+            function closeBlockModal() {
+                document.getElementById('block-modal').style.display = 'none';
+            }
+
             function blockPhone(phone) {
-                if (confirm('Block ' + phone + ' from sending messages?')) {
-                    fetch('/api/phone/block', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({phone: phone})
-                    })
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.success) {
-                            alert('✅ Phone number blocked!');
-                            location.reload();
-                        }
-                    });
-                }
+                closeBlockModal();
+                fetch('/api/phone/block', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone: phone})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('✅ Phone number blocked!');
+                        location.reload();
+                    }
+                });
+            }
+
+            function blockNameFromDisplay() {
+                const modal = document.getElementById('block-modal');
+                const name = modal.dataset.name;
+                closeBlockModal();
+                fetch('/api/whitelist/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: name})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    alert(data.success ? '✅ "' + name + '" blocked from display!' : '❌ ' + data.error);
+                    location.reload();
+                });
             }
             
             function clearHistory() {
@@ -2483,6 +2512,30 @@ def view_messages():
                 }
             }
         </script>
+
+        <!-- Block action modal -->
+        <div id="block-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+            <div style="background:#fff; border-radius:8px; padding:28px; max-width:420px; width:90%; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
+                <h3 style="margin-top:0; color:#333;">🚫 Block Action</h3>
+                <p style="color:#555; margin-bottom:6px;">Phone: <strong id="modal-phone"></strong></p>
+                <p style="color:#555; margin-bottom:20px;">Name: <strong id="modal-name-text"></strong></p>
+                <p style="color:#333; font-weight:bold; margin-bottom:16px;">What would you like to block?</p>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    <button style="background:#f44336; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer; font-size:14px;"
+                            onclick="blockPhone(document.getElementById('block-modal').dataset.phone)">
+                        📵 Block this number from texting again
+                    </button>
+                    <button id="modal-block-name-btn" style="background:#FF9800; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer; font-size:14px;"
+                            onclick="blockNameFromDisplay()">
+                        🚫 Block this name from being displayed
+                    </button>
+                    <button style="background:#aaa; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer; font-size:13px;"
+                            onclick="closeBlockModal()">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
     </body>
     </html>
     """
