@@ -1,7 +1,13 @@
 <?php
-// Redirect to the SMS plugin Flask UI on port 5000
-// Uses the same hostname so it works regardless of IP address
 $host = preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST']);
-header("Location: http://$host:5000/");
-exit;
+$pluginUrl = "http://$host:5000/";
 ?>
+<style>
+    #sms-plugin-frame {
+        width: 100%;
+        height: calc(100vh - 120px);
+        border: none;
+        display: block;
+    }
+</style>
+<iframe id="sms-plugin-frame" src="<?php echo htmlspecialchars($pluginUrl); ?>"></iframe>

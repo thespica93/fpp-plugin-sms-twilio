@@ -5,7 +5,7 @@ $menuEntries = Array(
 		'text' => 'SMS Twilio',
 		'type' => 'content',
 		'page' => 'ui.php',
-		'wrap' => 0
+		'wrap' => 1
 	)
 );
 
