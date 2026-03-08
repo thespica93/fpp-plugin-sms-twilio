@@ -79,6 +79,16 @@ log_and_show "Installation complete!"
 log_and_show "Restart FPPD to start the service"
 log_and_show "========================================"
 
+# Restart the plugin service if it's already running (e.g. during an update)
+if pgrep -f sms_plugin.py > /dev/null 2>&1; then
+    log_and_show "Restarting SMS plugin service..."
+    pkill -f sms_plugin.py 2>/dev/null || true
+    sleep 1
+    PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
+    su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &"
+    log_and_show "SMS plugin service restarted"
+fi
+
 # Trigger the "FPPD Restart Required" banner in FPP's UI
 setSetting "restartFlag" "1"
 
