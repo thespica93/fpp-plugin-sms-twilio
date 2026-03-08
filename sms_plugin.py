@@ -1113,7 +1113,7 @@ def index():
             .tab-content.active { display: block; }
         </style>
     </head>
-    <body>
+    <body onload="window.scrollTo(0,0)">
 
         <!-- Top action bar -->
         <div class="top-actions">
@@ -1219,7 +1219,6 @@ def index():
 
                         <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
                         <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
-                        <p class="help-text">ℹ️ Rejects messages containing words from blacklist.txt</p>
                         <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
@@ -1227,8 +1226,13 @@ def index():
                         <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
                         <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
                         <p class="help-text">ℹ️ When enabled, only names on the approved list are accepted.</p>
-                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 10px;">📋 Manage Whitelist</button>
-                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top: 6px;">🚫 View Blocklist</button>
+                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 6px;">📋 Manage Whitelist</button>
+
+                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+
+                        <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
+                        <p class="help-text" style="margin-top:0;">📵 Numbers on this list are permanently blocked from sending messages</p>
+                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top: 4px;">🚫 View Blocklist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">Text Display Options</h2>
@@ -1935,19 +1939,34 @@ def view_whitelist():
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body>
+    <body onload="window.scrollTo(0,0)">
         <h1>📋 Name Whitelist</h1>
         <div class="info">
             Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
         {% if not config.get('use_whitelist', False) %}
-        <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px;">
-            ⚠️ <strong>Whitelist is not enabled</strong> — All names will be shown regardless of this list.
-            <a href="/" style="color:#856404; margin-left:8px;">Enable it in Config →</a>
+        <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <span>⚠️ <strong>Whitelist is not enabled</strong> — All names will be shown regardless of this list.</span>
+            <button onclick="toggleSetting('use_whitelist', true)" style="background:#4CAF50; color:white; border:none; padding:6px 14px; border-radius:4px; cursor:pointer; font-size:13px; white-space:nowrap;">✓ Enable Whitelist</button>
+        </div>
+        {% else %}
+        <div style="background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <span>✅ <strong>Whitelist is enabled</strong></span>
+            <button onclick="toggleSetting('use_whitelist', false)" style="background:#f44336; color:white; border:none; padding:6px 14px; border-radius:4px; cursor:pointer; font-size:13px; white-space:nowrap;">✗ Disable Whitelist</button>
         </div>
         {% endif %}
         <button onclick="location.href='/'">← Back to Config</button>
+
+        <script>
+        function toggleSetting(key, value) {
+            fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({[key]: value})
+            }).then(() => location.reload());
+        }
+        </script>
 
         <h3>Add a Name</h3>
         <div class="add-row">
@@ -2099,19 +2118,34 @@ def view_blacklist_page():
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body>
+    <body onload="window.scrollTo(0,0)">
         <h1>🚫 Profanity Blacklist</h1>
         <div class="info">
             ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
         {% if not config.get('profanity_filter', True) %}
-        <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px;">
-            ⚠️ <strong>Blacklist is not enabled</strong> — Words on this list will still be shown.
-            <a href="/" style="color:#856404; margin-left:8px;">Enable it in Config →</a>
+        <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <span>⚠️ <strong>Blacklist is not enabled</strong> — Words on this list will still be shown.</span>
+            <button onclick="toggleSetting('profanity_filter', true)" style="background:#4CAF50; color:white; border:none; padding:6px 14px; border-radius:4px; cursor:pointer; font-size:13px; white-space:nowrap;">✓ Enable Profanity Filter</button>
+        </div>
+        {% else %}
+        <div style="background:#e8f5e9; border:1px solid #a5d6a7; color:#2e7d32; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <span>✅ <strong>Profanity Filter is enabled</strong></span>
+            <button onclick="toggleSetting('profanity_filter', false)" style="background:#f44336; color:white; border:none; padding:6px 14px; border-radius:4px; cursor:pointer; font-size:13px; white-space:nowrap;">✗ Disable Profanity Filter</button>
         </div>
         {% endif %}
         <button onclick="location.href='/'">← Back to Config</button>
+
+        <script>
+        function toggleSetting(key, value) {
+            fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({[key]: value})
+            }).then(() => location.reload());
+        }
+        </script>
 
         <h3>Add a Word</h3>
         <div class="add-row">
@@ -2253,7 +2287,7 @@ def view_blocklist():
             .no-blocked { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body>
+    <body onload="window.scrollTo(0,0)">
         <h1>🚫 Blocked Phone Numbers</h1>
         <div class="info">
             ℹ️ Blocked numbers cannot send messages | Total Blocked: {{ blocklist|length }}
@@ -2319,7 +2353,7 @@ def status_page():
             button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
-    <body>
+    <body onload="window.scrollTo(0,0)">
         <h1>🔧 FPP SMS Plugin Status v2.5</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
@@ -2375,7 +2409,7 @@ def view_messages():
             .queue-item { background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
         </style>
     </head>
-    <body>
+    <body onload="window.scrollTo(0,0)">
         <h1>📋 Message History & Queue Status</h1>
 
         <div class="queue-info">
