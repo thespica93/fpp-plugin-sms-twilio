@@ -1135,27 +1135,18 @@ def index():
                     </div>
 
                     <div class="section">
-                        <h2>Profanity Filter</h2>
+                        <h2>Filters</h2>
                         <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
                         <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
-                        <p class="help-text">ℹ️ Rejects messages with profanity (uses blacklist.txt, one word per line)</p>
-                    </div>
+                        <p class="help-text">ℹ️ Rejects messages containing words from blacklist.txt</p>
 
-                    <div class="section">
-                        <h2>Name Whitelist</h2>
+                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+
                         <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
-                        <label class="checkbox-label">✓ Enable — only allow approved names</label><br>
-                        <p class="help-text">ℹ️ When enabled, only names on this list are accepted.</p>
+                        <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
+                        <p class="help-text">ℹ️ When enabled, only names on the approved list are accepted.</p>
 
-                        <h3>Manage Whitelist</h3>
-                        <div style="display: flex; gap: 8px; margin: 8px 0;">
-                            <input type="text" id="whitelist_add_name" placeholder="Type a name to add..." style="margin-bottom: 0; flex: 1;" onkeydown="if(event.key==='Enter') addToWhitelist()">
-                            <button onclick="addToWhitelist()" style="margin: 0; white-space: nowrap; padding: 8px 14px;">+ Add</button>
-                        </div>
-                        <div id="whitelist_list" style="max-height: 200px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px; background: #fff; margin-top: 4px;">
-                            <p style="color: #999; font-size: 12px; margin: 0;">Loading...</p>
-                        </div>
-                        <p class="help-text">ℹ️ Names are stored lowercase. Names texted in are added automatically.</p>
+                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 10px;">📋 Manage Whitelist</button>
                     </div>
                 </div>
             </div>
@@ -1333,7 +1324,6 @@ def index():
         <script>
             window.onload = function() {
                 loadFPPData();
-                loadWhitelist();
             };
 
             function showTab(tabName, btn) {
@@ -1514,55 +1504,6 @@ def index():
                         }
                     }
                 });
-            }
-
-            function loadWhitelist() {
-                fetch('/api/whitelist')
-                .then(r => r.json())
-                .then(data => {
-                    const listDiv = document.getElementById('whitelist_list');
-                    if (!listDiv) return;
-                    if (!data.whitelist || data.whitelist.length === 0) {
-                        listDiv.innerHTML = '<p style="color: #999; font-size: 12px; margin: 0;">No names in whitelist yet.</p>';
-                        return;
-                    }
-                    listDiv.innerHTML = data.whitelist.map(name =>
-                        `<div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #eee;">
-                            <span style="text-transform: capitalize; font-size: 14px;">${name}</span>
-                            <button onclick="removeFromWhitelist('${name}')" style="background: #f44336; padding: 2px 10px; font-size: 12px; margin: 0;">✕</button>
-                        </div>`
-                    ).join('');
-                });
-            }
-
-            function addToWhitelist() {
-                const input = document.getElementById('whitelist_add_name');
-                const name = input.value.trim();
-                if (!name) return;
-                fetch('/api/whitelist/add', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({name: name})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        input.value = '';
-                        loadWhitelist();
-                    } else {
-                        alert('Error: ' + data.error);
-                    }
-                });
-            }
-
-            function removeFromWhitelist(name) {
-                fetch('/api/whitelist/remove', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({name: name})
-                })
-                .then(r => r.json())
-                .then(() => loadWhitelist());
             }
 
             function sendTestSMS() {
@@ -1844,6 +1785,113 @@ def api_remove_whitelist():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/whitelist')
+def view_whitelist():
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Name Whitelist</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
+            h1 { color: #4CAF50; }
+            table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+            th { background: #4CAF50; color: white; }
+            tr:nth-child(even) { background: #f5f5f5; }
+            button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 5px 5px 5px 0; }
+            button:hover { background: #45a049; }
+            .remove-btn { background: #f44336; padding: 5px 12px; font-size: 12px; }
+            .remove-btn:hover { background: #d32f2f; }
+            .info { background: #e8f5e9; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #c8e6c9; color: #333; }
+            .add-row { display: flex; gap: 10px; margin: 15px 0; }
+            .add-row input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+            .add-btn { background: #2196F3; white-space: nowrap; }
+            .add-btn:hover { background: #0b7dda; }
+            .empty { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
+            .error { color: #f44336; font-size: 13px; margin: 5px 0; }
+            .success { color: #4CAF50; font-size: 13px; margin: 5px 0; }
+        </style>
+    </head>
+    <body>
+        <h1>📋 Name Whitelist</h1>
+        <div class="info">
+            ℹ️ Only names on this list will be accepted when the whitelist is enabled. Names are case-insensitive. | <span id="count">Loading...</span>
+        </div>
+        <button onclick="location.href='/'">← Back to Config</button>
+        <button onclick="location.href='/messages'">📬 View Messages</button>
+
+        <h3>Add a Name</h3>
+        <div class="add-row">
+            <input type="text" id="add_name" placeholder="Enter a name to approve..." onkeydown="if(event.key==='Enter') addName()">
+            <button class="add-btn" onclick="addName()">+ Add Name</button>
+        </div>
+        <div id="add_result"></div>
+
+        <div id="list_area"></div>
+
+        <script>
+            function loadWhitelist() {
+                fetch('/api/whitelist')
+                .then(r => r.json())
+                .then(data => {
+                    const names = data.whitelist || [];
+                    document.getElementById('count').textContent = 'Total: ' + names.length;
+                    const area = document.getElementById('list_area');
+                    if (names.length === 0) {
+                        area.innerHTML = '<div class="empty"><h2>No names in whitelist yet</h2><p>Add names above to approve them.</p></div>';
+                        return;
+                    }
+                    area.innerHTML = '<table><tr><th>Approved Name</th><th>Action</th></tr>' +
+                        names.map(name =>
+                            `<tr><td style="text-transform: capitalize;">${name}</td>` +
+                            `<td><button class="remove-btn" onclick="removeName('${name}')">✕ Remove</button></td></tr>`
+                        ).join('') +
+                        '</table>';
+                });
+            }
+
+            function addName() {
+                const input = document.getElementById('add_name');
+                const name = input.value.trim();
+                const result = document.getElementById('add_result');
+                if (!name) return;
+                fetch('/api/whitelist/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: name})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        result.innerHTML = '<p class="success">✅ Added: ' + name + '</p>';
+                        input.value = '';
+                        loadWhitelist();
+                    } else {
+                        result.innerHTML = '<p class="error">❌ ' + data.error + '</p>';
+                    }
+                    setTimeout(() => result.innerHTML = '', 3000);
+                });
+            }
+
+            function removeName(name) {
+                if (!confirm('Remove "' + name + '" from the whitelist?')) return;
+                fetch('/api/whitelist/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: name})
+                })
+                .then(r => r.json())
+                .then(() => loadWhitelist());
+            }
+
+            loadWhitelist();
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
+
 @app.route('/blocklist')
 def view_blocklist():
     blocklist = load_blocklist()
@@ -1994,6 +2042,7 @@ def view_messages():
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
         <button onclick="location.reload()">🔄 Refresh</button>
+        <button onclick="location.href='/whitelist'" style="background: #4CAF50;">📋 Manage Whitelist</button>
         <button onclick="location.href='/blocklist'" style="background: #f44336;">🚫 View Blocklist</button>
         <button class="clear-btn" onclick="clearHistory()">🗑️ Clear All Messages</button>
         
