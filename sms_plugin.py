@@ -1100,8 +1100,10 @@ def index():
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
-            .columns { display: flex; gap: 20px; margin: 0; }
-            .column { flex: 1; min-width: 0; }
+            .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
+            .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+            .column .section { flex: 0 0 auto; }
+            .column .section:last-child { flex: 1; }
             .top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 15px 0; padding: 15px; background: #f8f8f8; border-radius: 5px; border: 1px solid #ddd; }
             .tabs { display: flex; gap: 0; margin: 20px 0 0 0; border-bottom: 2px solid #4CAF50; }
             .tab-btn { background: #f0f0f0; color: #555; padding: 10px 24px; border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 14px; font-weight: bold; margin-right: 4px; }
