@@ -1648,6 +1648,15 @@ def test_twilio():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/api/messages')
+def get_messages():
+    try:
+        with open(MESSAGE_LOG, 'r') as f:
+            messages = json.load(f)
+    except:
+        messages = []
+    return jsonify(list(reversed(messages)))
+
 @app.route('/api/messages/clear', methods=['POST'])
 def clear_messages():
     try:
@@ -1996,6 +2005,7 @@ def view_whitelist():
                     document.getElementById('count').textContent = allNames.length.toLocaleString() + ' approved names';
                     document.getElementById('filepath').textContent = 'File: ' + data.file_path + (data.file_exists ? ' ✓' : ' ✗ NOT FOUND');
                     renderTable();
+                    window.scrollTo(0, 0);
                 })
                 .catch(() => {
                     document.getElementById('count').textContent = 'Error loading';
@@ -2005,6 +2015,20 @@ def view_whitelist():
             var visibleCount = 100;
             var currentFiltered = [];
             var PAGE_SIZE = 100;
+            var sentinel = null;
+            var observer = null;
+
+            function setupSentinel() {
+                if (observer) observer.disconnect();
+                if (sentinel) sentinel.remove();
+                sentinel = document.createElement('div');
+                sentinel.style.height = '1px';
+                document.getElementById('list_area').after(sentinel);
+                observer = new IntersectionObserver(function(entries) {
+                    if (entries[0].isIntersecting) appendRows();
+                }, { rootMargin: '200px' });
+                observer.observe(sentinel);
+            }
 
             function renderTable() {
                 const query = document.getElementById('search').value.trim().toLowerCase();
@@ -2031,8 +2055,8 @@ def view_whitelist():
 
                 updateHint();
                 const showing = currentFiltered.slice(0, visibleCount);
-                let rows = buildRows(showing);
-                area.innerHTML = '<table id="names_table"><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + rows + '</table>';
+                area.innerHTML = '<table id="names_table"><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + buildRows(showing) + '</table>';
+                setupSentinel();
             }
 
             function appendRows() {
@@ -2042,6 +2066,7 @@ def view_whitelist():
                 const showing = currentFiltered.slice(0, visibleCount);
                 const area = document.getElementById('list_area');
                 area.innerHTML = '<table id="names_table"><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + buildRows(showing) + '</table>';
+                setupSentinel();
             }
 
             function buildRows(items) {
@@ -2073,12 +2098,6 @@ def view_whitelist():
                         (showing < allNames.length ? ' — scroll down to load more' : '');
                 }
             }
-
-            window.addEventListener('scroll', function() {
-                if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 400) {
-                    appendRows();
-                }
-            });
 
             function addName() {
                 const input = document.getElementById('add_name');
@@ -2207,6 +2226,7 @@ def view_blacklist_page():
                     document.getElementById('count').textContent = allWords.length.toLocaleString() + ' blocked words';
                     document.getElementById('filepath').textContent = 'File: ' + data.file_path + (data.file_exists ? ' ✓' : ' ✗ NOT FOUND');
                     renderTable();
+                    window.scrollTo(0, 0);
                 })
                 .catch(() => {
                     document.getElementById('count').textContent = 'Error loading';
@@ -2216,6 +2236,20 @@ def view_blacklist_page():
             var visibleCount = 100;
             var currentFiltered = [];
             var PAGE_SIZE = 100;
+            var sentinel = null;
+            var observer = null;
+
+            function setupSentinel() {
+                if (observer) observer.disconnect();
+                if (sentinel) sentinel.remove();
+                sentinel = document.createElement('div');
+                sentinel.style.height = '1px';
+                document.getElementById('list_area').after(sentinel);
+                observer = new IntersectionObserver(function(entries) {
+                    if (entries[0].isIntersecting) appendRows();
+                }, { rootMargin: '200px' });
+                observer.observe(sentinel);
+            }
 
             function renderTable() {
                 const query = document.getElementById('search').value.trim().toLowerCase();
@@ -2242,8 +2276,8 @@ def view_blacklist_page():
 
                 updateHint();
                 const showing = currentFiltered.slice(0, visibleCount);
-                let rows = buildRows(showing);
-                area.innerHTML = '<table id="words_table"><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + rows + '</table>';
+                area.innerHTML = '<table id="words_table"><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + buildRows(showing) + '</table>';
+                setupSentinel();
             }
 
             function appendRows() {
@@ -2253,6 +2287,7 @@ def view_blacklist_page():
                 const showing = currentFiltered.slice(0, visibleCount);
                 const area = document.getElementById('list_area');
                 area.innerHTML = '<table id="words_table"><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + buildRows(showing) + '</table>';
+                setupSentinel();
             }
 
             function buildRows(items) {
@@ -2284,12 +2319,6 @@ def view_blacklist_page():
                         (showing < allWords.length ? ' — scroll down to load more' : '');
                 }
             }
-
-            window.addEventListener('scroll', function() {
-                if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 400) {
-                    appendRows();
-                }
-            });
 
             function addWord() {
                 const input = document.getElementById('add_word');
@@ -2483,144 +2512,21 @@ def view_messages():
             • Each message displays for the full display duration<br>
             • View real-time queue status
         </div>
-        
+
         <div class="info">
-            Auto-refreshes every 5 seconds | Total Messages: {{ messages|length }}
+            Auto-refreshes every 5 seconds | Total Messages: <span id="msg-count">—</span>
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
-        <button onclick="location.reload()">🔄 Refresh</button>
+        <button onclick="refreshData()">🔄 Refresh</button>
         <button class="clear-btn" onclick="clearHistory()">🗑️ Clear All Messages</button>
-        
+
         <div class="queue-box">
             <h2>🎬 Current Display Queue</h2>
-            {% if queue_status.currently_displaying %}
-            <div class="current-display">
-                🎄 NOW DISPLAYING: {{ queue_status.currently_displaying.name }} 
-                (from ***{{ queue_status.currently_displaying.phone_last4 }})
-            </div>
-            {% else %}
-            <div class="current-display" style="background: #bdbdbd; color: #333;">
-                💤 Nothing currently displaying
-            </div>
-            {% endif %}
-            
-            {% if queue_status.queue_length > 0 %}
-            <h3 style="color: #FF9800; margin-top: 20px;">📋 Queue ({{ queue_status.queue_length }} waiting):</h3>
-            {% for item in queue_status.queue %}
-            <div class="queue-item">
-                <strong>Queue Position {{ loop.index }}:</strong> {{ item.name }} 
-                (from ***{{ item.phone_last4 }})
-            </div>
-            {% endfor %}
-            {% else %}
-            <p style="color: #aaa; font-style: italic; margin-top: 15px;">Queue is empty - waiting for messages</p>
-            {% endif %}
+            <div id="queue-box-content"><p style="color:#aaa;">Loading...</p></div>
         </div>
-        
+
         <h2>📜 Complete Message History</h2>
-        {% if messages|length == 0 %}
-        <div style="background: #333; padding: 40px; text-align: center; border-radius: 5px;">
-            <h3>No messages yet</h3>
-        </div>
-        {% else %}
-        <table>
-            <tr>
-                <th>Timestamp</th>
-                <th>Phone</th>
-                <th>Message</th>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Action</th>
-            </tr>
-            {% for msg in messages %}
-            <tr class="{{ msg.status }}">
-                <td>{{ msg.timestamp }}</td>
-                <td>{{ msg.phone }}</td>
-                <td>{{ msg.message }}</td>
-                <td>{{ msg.extracted_name }}</td>
-                <td class="{{ msg.status }}">
-                    {% if msg.status == 'displaying' %}
-                        🎬 DISPLAYING NOW
-                    {% elif msg.status == 'queued' %}
-                        📋 Queued
-                    {% elif msg.status == 'displayed' %}
-                        ✅ Displayed
-                    {% else %}
-                        {{ msg.status }}
-                    {% endif %}
-                </td>
-                <td>
-                    {% if msg.status != 'blocked' %}
-                    <button class="block-btn" data-phone="{{ msg.phone_full | e }}" data-name="{{ msg.extracted_name | e }}" onclick="showBlockModal(this.dataset.phone, this.dataset.name)">🚫 Block</button>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% endif %}
-        
-        <script>
-            setTimeout(function() { location.reload(); }, 5000);
-            
-            function showBlockModal(phone, name) {
-                document.getElementById('modal-phone').textContent = phone;
-                document.getElementById('modal-name-text').textContent = name || '(no name)';
-                document.getElementById('modal-block-name-btn').disabled = !name;
-                document.getElementById('modal-block-name-btn').style.opacity = name ? '1' : '0.4';
-                document.getElementById('block-modal').dataset.phone = phone;
-                document.getElementById('block-modal').dataset.name = name || '';
-                document.getElementById('block-modal').style.display = 'flex';
-            }
-
-            function closeBlockModal() {
-                document.getElementById('block-modal').style.display = 'none';
-            }
-
-            function blockPhone(phone) {
-                closeBlockModal();
-                fetch('/api/phone/block', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone: phone})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('✅ Phone number blocked!');
-                        location.reload();
-                    }
-                });
-            }
-
-            function blockNameFromDisplay() {
-                const modal = document.getElementById('block-modal');
-                const name = modal.dataset.name;
-                closeBlockModal();
-                fetch('/api/whitelist/remove', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({name: name})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    alert(data.success ? '✅ "' + name + '" blocked from display!' : '❌ ' + data.error);
-                    location.reload();
-                });
-            }
-            
-            function clearHistory() {
-                if (confirm('Clear all message history?')) {
-                    fetch('/api/messages/clear', { method: 'POST' })
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.success) {
-                            alert('✅ Message history cleared!');
-                            location.reload();
-                        }
-                    });
-                }
-            }
-        </script>
+        <div id="messages-content"><p style="color:#aaa;">Loading...</p></div>
 
         <!-- Block action modal -->
         <div id="block-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
@@ -2638,11 +2544,9 @@ def view_messages():
                             onclick="blockNameFromDisplay()">
                         🚫 Block this name from being displayed
                     </button>
-                    {% if not config.get('use_whitelist', False) %}
-                    <p id="whitelist-warning" style="color:#f44336; font-size:12px; margin:0; padding:4px 0;">
+                    <p id="whitelist-warning" style="color:#f44336; font-size:12px; margin:0; padding:4px 0; display:none;">
                         ⚠️ Whitelist is not enabled — this name will still show again
                     </p>
-                    {% endif %}
                     <button style="background:#aaa; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer; font-size:13px;"
                             onclick="closeBlockModal()">
                         Cancel
@@ -2650,10 +2554,145 @@ def view_messages():
                 </div>
             </div>
         </div>
+
+        <script>
+            var useWhitelist = {{ config.get('use_whitelist', False) | tojson }};
+            var modalOpen = false;
+            var refreshTimer = null;
+
+            function scheduleRefresh() {
+                clearTimeout(refreshTimer);
+                refreshTimer = setTimeout(function() {
+                    if (!modalOpen) refreshData();
+                    else scheduleRefresh();
+                }, 5000);
+            }
+
+            function esc(s) {
+                return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            }
+
+            function refreshData() {
+                Promise.all([
+                    fetch('/api/queue/status').then(r => r.json()),
+                    fetch('/api/messages').then(r => r.json())
+                ]).then(function(results) {
+                    renderQueue(results[0]);
+                    renderMessages(results[1]);
+                    scheduleRefresh();
+                }).catch(scheduleRefresh);
+            }
+
+            function renderQueue(status) {
+                var html = '';
+                if (status.currently_displaying) {
+                    html += '<div class="current-display">🎄 NOW DISPLAYING: ' + esc(status.currently_displaying.name) +
+                            ' (from ***' + esc(status.currently_displaying.phone_last4) + ')</div>';
+                } else {
+                    html += '<div class="current-display" style="background:#bdbdbd;color:#333;">💤 Nothing currently displaying</div>';
+                }
+                if (status.queue_length > 0) {
+                    html += '<h3 style="color:#FF9800;margin-top:20px;">📋 Queue (' + status.queue_length + ' waiting):</h3>';
+                    status.queue.forEach(function(item, i) {
+                        html += '<div class="queue-item"><strong>Queue Position ' + (i+1) + ':</strong> ' +
+                                esc(item.name) + ' (from ***' + esc(item.phone_last4) + ')</div>';
+                    });
+                } else {
+                    html += '<p style="color:#aaa;font-style:italic;margin-top:15px;">Queue is empty - waiting for messages</p>';
+                }
+                document.getElementById('queue-box-content').innerHTML = html;
+            }
+
+            function renderMessages(messages) {
+                document.getElementById('msg-count').textContent = messages.length;
+                if (messages.length === 0) {
+                    document.getElementById('messages-content').innerHTML =
+                        '<div style="background:#333;padding:40px;text-align:center;border-radius:5px;"><h3>No messages yet</h3></div>';
+                    return;
+                }
+                var statusLabel = {'displaying':'🎬 DISPLAYING NOW','queued':'📋 Queued','displayed':'✅ Displayed'};
+                var rows = messages.map(function(msg) {
+                    var label = statusLabel[msg.status] || esc(msg.status);
+                    var btn = '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
+                              '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
+                    return '<tr class="' + esc(msg.status) + '">' +
+                        '<td>' + esc(msg.timestamp) + '</td>' +
+                        '<td>' + esc(msg.phone) + '</td>' +
+                        '<td>' + esc(msg.message) + '</td>' +
+                        '<td>' + esc(msg.extracted_name) + '</td>' +
+                        '<td class="' + esc(msg.status) + '">' + label + '</td>' +
+                        '<td>' + btn + '</td>' +
+                        '</tr>';
+                }).join('');
+                document.getElementById('messages-content').innerHTML =
+                    '<table><tr><th>Timestamp</th><th>Phone</th><th>Message</th><th>Name</th><th>Status</th><th>Action</th></tr>' + rows + '</table>';
+            }
+
+            function showBlockModal(phone, name) {
+                modalOpen = true;
+                document.getElementById('modal-phone').textContent = phone;
+                document.getElementById('modal-name-text').textContent = name || '(no name)';
+                document.getElementById('modal-block-name-btn').disabled = !name;
+                document.getElementById('modal-block-name-btn').style.opacity = name ? '1' : '0.4';
+                document.getElementById('whitelist-warning').style.display = useWhitelist ? 'none' : 'block';
+                document.getElementById('block-modal').dataset.phone = phone;
+                document.getElementById('block-modal').dataset.name = name || '';
+                document.getElementById('block-modal').style.display = 'flex';
+            }
+
+            function closeBlockModal() {
+                modalOpen = false;
+                document.getElementById('block-modal').style.display = 'none';
+                scheduleRefresh();
+            }
+
+            function blockPhone(phone) {
+                closeBlockModal();
+                fetch('/api/phone/block', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({phone: phone})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) alert('✅ Phone number blocked!');
+                    refreshData();
+                });
+            }
+
+            function blockNameFromDisplay() {
+                const modal = document.getElementById('block-modal');
+                const name = modal.dataset.name;
+                closeBlockModal();
+                fetch('/api/whitelist/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: name})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    alert(data.success ? '✅ "' + name + '" blocked from display!' : '❌ ' + data.error);
+                    refreshData();
+                });
+            }
+
+            function clearHistory() {
+                if (confirm('Clear all message history?')) {
+                    fetch('/api/messages/clear', { method: 'POST' })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.success) alert('✅ Message history cleared!');
+                        refreshData();
+                    });
+                }
+            }
+
+            refreshData();
+        </script>
     </body>
     </html>
     """
-    return render_template_string(html, messages=list(reversed(messages)), queue_status=queue_status, config=config)
+    return render_template_string(html, config=config)
 
 if __name__ == '__main__':
     load_config()
