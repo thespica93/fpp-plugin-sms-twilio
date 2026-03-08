@@ -2450,7 +2450,7 @@ def status_page():
             button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){{window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🔧 FPP SMS Plugin Status v2.5</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
