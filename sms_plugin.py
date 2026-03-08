@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FPP SMS Plugin v2.4 - Twilio Integration
+FPP SMS Plugin v2.5 - Twilio Integration
 Features:
 - Message queueing
 - Display duration controls how long each message shows
@@ -1023,11 +1023,11 @@ def index():
     <head>
         <title>FPP SMS Plugin Configuration</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #4CAF50; }
-            .section { background: #2a2a2a; padding: 20px; margin: 20px 0; border-radius: 5px; border: 1px solid #444; }
+            .section { background: #f8f8f8; padding: 20px; margin: 20px 0; border-radius: 5px; border: 1px solid #ddd; }
             label { display: block; margin: 10px 0 5px; font-weight: bold; }
-            input, select, textarea { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #555; border-radius: 4px; background: #333; color: #fff; }
+            input, select, textarea { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; background: #fff; color: #333; box-sizing: border-box; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }
             button:hover { background: #45a049; }
             .test-btn { background: #2196F3; }
@@ -1040,16 +1040,25 @@ def index():
             input[type="checkbox"] { width: auto; }
             .success { color: #4CAF50; }
             .error { color: #f44336; }
-            .info { background: #1565C0; padding: 15px; border-radius: 5px; margin: 20px 0; }
-            .queue-info { background: #7B1FA2; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #90caf9; color: #333; }
+            .queue-info { background: #f3e5f5; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
-            .help-text { font-size: 12px; color: #aaa; margin-top: 5px; }
+            .help-text { font-size: 12px; color: #666; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
+            .columns { display: flex; gap: 20px; margin: 0; }
+            .column { flex: 1; min-width: 0; }
+            .top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 15px 0; padding: 15px; background: #f8f8f8; border-radius: 5px; border: 1px solid #ddd; }
+            .tabs { display: flex; gap: 0; margin: 20px 0 0 0; border-bottom: 2px solid #4CAF50; }
+            .tab-btn { background: #f0f0f0; color: #555; padding: 10px 24px; border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 14px; font-weight: bold; margin-right: 4px; }
+            .tab-btn.active { background: #4CAF50; color: white; border-color: #4CAF50; }
+            .tab-btn:hover:not(.active) { background: #e8e8e8; }
+            .tab-content { display: none; }
+            .tab-content.active { display: block; }
         </style>
     </head>
     <body>
-        <h1>🎄 FPP SMS Plugin Configuration v2.4</h1>
-        
+        <h1>🎄 FPP SMS Plugin Configuration v2.5</h1>
+
         <div class="info">
             <strong>ℹ️ Plugin Features:</strong><br>
             • Message queueing system (no cut-offs!)<br>
@@ -1059,233 +1068,264 @@ def index():
             • Multi-line message templates with proper case conversion<br>
             • FPP playlist switching and text overlay integration
         </div>
-        
+
         <div class="queue-info">
             <strong>🎬 Queue System:</strong><br>
             • Messages are queued and displayed one at a time<br>
             • Each message displays for the full duration (no interruptions)<br>
             • View real-time queue status on the Messages page
         </div>
-        
-        <div class="section">
-            <h2>FPP Connection</h2>
-            <label>FPP Host URL:</label>
-            <input type="text" id="fpp_host" value="{{ config.fpp_host }}" placeholder="http://127.0.0.1">
-            <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
-            
-            <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
-            <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
-            <div id="fpp_status"></div>
+
+        <!-- Top action bar -->
+        <div class="top-actions">
+            <button onclick="saveConfig()">💾 Save Configuration</button>
+            <button class="view-btn" onclick="viewMessages()">📋 View Message Queue</button>
+            <div id="message"></div>
         </div>
-        
-        <div class="section">
-            <h2>FPP Display Settings</h2>
-            
-            <label>Default "Waiting" Playlist:</label>
-            <select id="default_playlist">
-                <option value="">-- None (Manual Control) --</option>
-            </select>
-            <p class="help-text">📺 This playlist loops while waiting for text messages</p>
-            
-            <label>Name Display Playlist:</label>
-            <select id="name_display_playlist">
-                <option value="">-- None (No Playlist Change) --</option>
-            </select>
-            <p class="help-text">🎬 This playlist plays when displaying a name (should run for ~30 seconds)</p>
-            
-            <label>Overlay Model Name:</label>
-            <select id="overlay_model_name">
-                <option value="">-- None --</option>
-            </select>
-            <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
-            
-            <h3>Text Display Options</h3>
-            <label>Message Template:</label>
-            <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-            <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines. Use spaces to shift text position.</p>
-            
-            <label>Text Color:</label>
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <input type="color" id="text_color" value="{{ config.get('text_color', '#FF0000') }}" 
-                       style="width: 60px; height: 40px; padding: 2px; cursor: pointer;">
-                <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}" 
-                       placeholder="#FF0000" style="width: 100px;"
-                       onchange="document.getElementById('text_color').value = this.value">
-                <span id="color_preview" style="padding: 8px 20px; border-radius: 4px; background: {{ config.get('text_color', '#FF0000') }}; color: white; font-weight: bold;">Preview</span>
+
+        <!-- Tab navigation -->
+        <div class="tabs">
+            <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
+            <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
+        </div>
+
+        <!-- Settings Tab -->
+        <div id="tab-settings" class="tab-content active">
+
+            <!-- Two-column: Twilio + FPP Connection -->
+            <div class="columns">
+                <div class="column">
+                    <div class="section">
+                        <h2>Twilio Settings</h2>
+                        <label>Enable Plugin:</label>
+                        <input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}>
+                        <label class="checkbox-label">Enable SMS polling</label>
+
+                        <label>Twilio Account SID:</label>
+                        <input type="text" id="account_sid" value="{{ config.twilio_account_sid }}" placeholder="Starts with AC...">
+
+                        <label>Twilio Auth Token:</label>
+                        <input type="password" id="auth_token" value="{{ config.twilio_auth_token }}">
+
+                        <label>Twilio Phone Number:</label>
+                        <input type="text" id="phone_number" value="{{ config.twilio_phone_number }}" placeholder="+18555551234">
+
+                        <label>Poll Interval (seconds):</label>
+                        <input type="number" id="poll_interval" value="{{ config.poll_interval }}" min="1" max="60">
+
+                        <button class="test-btn" onclick="testConnection()">🔌 Test Twilio Connection</button>
+                    </div>
+                </div>
+                <div class="column">
+                    <div class="section">
+                        <h2>FPP Connection</h2>
+                        <label>FPP Host URL:</label>
+                        <input type="text" id="fpp_host" value="{{ config.fpp_host }}" placeholder="http://127.0.0.1">
+                        <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
+
+                        <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
+                        <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
+                        <div id="fpp_status"></div>
+                    </div>
+                </div>
             </div>
-            <script>
-                document.getElementById('text_color').addEventListener('change', function() {
-                    document.getElementById('text_color_hex').value = this.value;
-                    document.getElementById('color_preview').style.background = this.value;
-                });
-                document.getElementById('text_color_hex').addEventListener('input', function() {
-                    if (/^#[0-9A-F]{6}$/i.test(this.value)) {
-                        document.getElementById('text_color').value = this.value;
+
+            <div class="section">
+                <h2>FPP Display Settings</h2>
+
+                <label>Default "Waiting" Playlist:</label>
+                <select id="default_playlist">
+                    <option value="">-- None (Manual Control) --</option>
+                </select>
+                <p class="help-text">📺 This playlist loops while waiting for text messages</p>
+
+                <label>Name Display Playlist:</label>
+                <select id="name_display_playlist">
+                    <option value="">-- None (No Playlist Change) --</option>
+                </select>
+                <p class="help-text">🎬 This playlist plays when displaying a name (should run for ~30 seconds)</p>
+
+                <label>Overlay Model Name:</label>
+                <select id="overlay_model_name">
+                    <option value="">-- None --</option>
+                </select>
+                <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
+
+                <h3>Text Display Options</h3>
+                <label>Message Template:</label>
+                <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
+                <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines. Use spaces to shift text position.</p>
+
+                <label>Text Color:</label>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <input type="color" id="text_color" value="{{ config.get('text_color', '#FF0000') }}"
+                           style="width: 60px; height: 40px; padding: 2px; cursor: pointer;">
+                    <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
+                           placeholder="#FF0000" style="width: 100px;"
+                           onchange="document.getElementById('text_color').value = this.value">
+                    <span id="color_preview" style="padding: 8px 20px; border-radius: 4px; background: {{ config.get('text_color', '#FF0000') }}; color: white; font-weight: bold;">Preview</span>
+                </div>
+                <script>
+                    document.getElementById('text_color').addEventListener('change', function() {
+                        document.getElementById('text_color_hex').value = this.value;
                         document.getElementById('color_preview').style.background = this.value;
-                    }
-                });
-            </script>
-            
-            <label>Font:</label>
-            <select id="text_font">
-                <option value="">Loading fonts...</option>
-            </select>
-            <p class="help-text">🔤 Select from FPP-supported fonts</p>
-            
-            <label>Font Size:</label>
-            <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
-            
-            <label>Scroll Speed (pixels per second):</label>
-            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
-            <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
-            
-            <label>Text Position:</label>
-            <select id="text_position">
-                <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
-                <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
-                <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
-                <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
-            </select>
-            <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
+                    });
+                    document.getElementById('text_color_hex').addEventListener('input', function() {
+                        if (/^#[0-9A-F]{6}$/i.test(this.value)) {
+                            document.getElementById('text_color').value = this.value;
+                            document.getElementById('color_preview').style.background = this.value;
+                        }
+                    });
+                </script>
+
+                <label>Font:</label>
+                <select id="text_font">
+                    <option value="">Loading fonts...</option>
+                </select>
+                <p class="help-text">🔤 Select from FPP-supported fonts</p>
+
+                <label>Font Size:</label>
+                <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
+
+                <label>Scroll Speed (pixels per second):</label>
+                <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
+                <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
+
+                <label>Text Position:</label>
+                <select id="text_position">
+                    <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
+                    <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
+                    <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
+                    <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                    <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                </select>
+                <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
+            </div>
+
+            <div class="section">
+                <h2>Message Settings</h2>
+                <label>Display Duration (seconds):</label>
+                <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
+                <p class="help-text">⏱️ Each message will display for this many seconds before moving to the next</p>
+
+                <label>Max Messages Per Phone (0 = unlimited):</label>
+                <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
+
+                <label>Max Message Length:</label>
+                <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
+
+                <h3>Name Format Rules</h3>
+                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}>
+                <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
+
+                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}>
+                <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
+
+                <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+            </div>
+
+            <div class="section">
+                <h2>Profanity Filter</h2>
+                <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
+                <label class="checkbox-label">✓ Enable Profanity Filter - Reject messages with profanity (uses blacklist.txt)</label><br>
+                <p class="help-text">ℹ️ Edit /home/fpp/media/config/blacklist.txt (one word per line, case-insensitive)</p>
+            </div>
+
+            <div class="section">
+                <h2>Name Whitelist (Optional)</h2>
+                <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
+                <label class="checkbox-label">✓ Enable Whitelist - Only allow approved names</label><br>
+                <p class="help-text">ℹ️ Edit /home/fpp/media/config/whitelist.txt (one name per line, case-insensitive)</p>
+            </div>
+
+            <div class="section" style="border: 2px solid #2196F3;">
+                <h2>📱 SMS Auto-Response Settings</h2>
+                <input type="checkbox" id="send_sms_responses" {{ 'checked' if config.get('send_sms_responses', False) else '' }}>
+                <label class="checkbox-label">✓ Enable Automatic SMS Responses</label><br>
+                <p class="help-text">💡 When enabled, users receive automatic text replies based on their message status</p>
+
+                <h3>Response Messages</h3>
+
+                <label>✅ Success Message (when name is queued):</label>
+                <textarea id="response_success" rows="2">{{ config.get('response_success', 'Thanks! Your name will appear on our display soon! 🎄') }}</textarea>
+
+                <label>🚫 Profanity Detected:</label>
+                <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
+
+                <label>⛔ Rate Limited:</label>
+                <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
+
+                <label>🔄 Duplicate Name:</label>
+                <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
+
+                <label>❌ Invalid Format:</label>
+                <textarea id="response_invalid_format" rows="2">{{ config.get('response_invalid_format', 'Please send only a name (1-2 words, no sentences).') }}</textarea>
+
+                <label>📋 Not on Whitelist:</label>
+                <textarea id="response_not_whitelisted" rows="2">{{ config.get('response_not_whitelisted', 'Sorry, that name is not on our approved list.') }}</textarea>
+
+                <label>🚫 Blocked Number:</label>
+                <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
+            </div>
+
         </div>
-        
-        <div class="section">
-            <h2>Twilio Settings</h2>
-            <label>Enable Plugin:</label>
-            <input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}>
-            <label class="checkbox-label">Enable SMS polling</label>
-            
-            <label>Twilio Account SID:</label>
-            <input type="text" id="account_sid" value="{{ config.twilio_account_sid }}" placeholder="Starts with AC...">
-            
-            <label>Twilio Auth Token:</label>
-            <input type="password" id="auth_token" value="{{ config.twilio_auth_token }}">
-            
-            <label>Twilio Phone Number:</label>
-            <input type="text" id="phone_number" value="{{ config.twilio_phone_number }}" placeholder="+18555551234">
-            
-            <label>Poll Interval (seconds):</label>
-            <input type="number" id="poll_interval" value="{{ config.poll_interval }}" min="1" max="60">
+
+        <!-- Testing Tab -->
+        <div id="tab-testing" class="tab-content">
+
+            <div class="section" style="border: 2px solid #FF9800; margin-top: 20px;">
+                <h2>🧪 Testing Tools</h2>
+                <p style="color: #FF9800; font-size: 14px;">
+                    ⚠️ Use this to test messages without sending actual texts. Works without Twilio credentials.
+                </p>
+
+                <label>Test Name:</label>
+                <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+
+                <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
+
+                <div id="test_result" style="margin-top: 10px;"></div>
+            </div>
+
+            <div class="section" style="border: 2px solid #FF9800;">
+                <h2>🧪 SMS Response Testing</h2>
+                <p style="color: #FF9800; font-size: 14px;">
+                    ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials and "Enable Automatic SMS Responses" checked in Settings.
+                </p>
+
+                <label>Phone Number:</label>
+                <input type="text" id="test_sms_phone" placeholder="+18005551234">
+
+                <label>Message Type:</label>
+                <select id="test_sms_type">
+                    <option value="success">✅ Success</option>
+                    <option value="profanity">🚫 Profanity</option>
+                    <option value="rate_limited">⛔ Rate Limited</option>
+                    <option value="duplicate">🔄 Duplicate</option>
+                    <option value="invalid_format">❌ Invalid Format</option>
+                    <option value="not_whitelisted">📋 Not Whitelisted</option>
+                    <option value="blocked">🚫 Blocked</option>
+                </select>
+
+                <button class="test-btn" onclick="sendTestSMS()">📤 Send Test SMS</button>
+
+                <div id="test_sms_result" style="margin-top: 10px;"></div>
+            </div>
+
         </div>
-        
-        <div class="section" style="border: 2px solid #FF9800;">
-            <h2>🧪 Testing Tools</h2>
-            <p style="color: #FF9800; font-size: 14px;">
-                ⚠️ Use this to test messages without sending actual texts.
-            </p>
-            
-            <label>Test Name:</label>
-            <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
-            
-            <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
-            
-            <div id="test_result" style="margin-top: 10px;"></div>
-        </div>
-        
-        <div class="section">
-            <h2>Message Settings</h2>
-            <label>Display Duration (seconds):</label>
-            <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
-            <p class="help-text">⏱️ Each message will display for this many seconds before moving to the next</p>
-            
-            <label>Max Messages Per Phone (0 = unlimited):</label>
-            <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
-            
-            <label>Max Message Length:</label>
-            <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
-            
-            <h3>Name Format Rules</h3>
-            <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}>
-            <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
-            
-            <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}>
-            <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
-            
-            <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
-        </div>
-        
-        <div class="section">
-            <h2>Profanity Filter</h2>
-            <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
-            <label class="checkbox-label">✓ Enable Profanity Filter - Reject messages with profanity (uses blacklist.txt)</label><br>
-            <p class="help-text">ℹ️ Edit /home/fpp/media/config/blacklist.txt (one word per line, case-insensitive)</p>
-        </div>
-        
-        <div class="section">
-            <h2>Name Whitelist (Optional)</h2>
-            <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
-            <label class="checkbox-label">✓ Enable Whitelist - Only allow approved names</label><br>
-            
-            <p class="help-text">ℹ️ Edit /home/fpp/media/config/whitelist.txt (one name per line, case-insensitive)</p>
-        </div>
-        
-        <div class="section" style="border: 2px solid #2196F3;">
-            <h2>📱 SMS Auto-Response Settings</h2>
-            <input type="checkbox" id="send_sms_responses" {{ 'checked' if config.get('send_sms_responses', False) else '' }}>
-            <label class="checkbox-label">✓ Enable Automatic SMS Responses</label><br>
-            <p class="help-text">💡 When enabled, users receive automatic text replies based on their message status</p>
-            
-            <h3>Response Messages</h3>
-            
-            <label>✅ Success Message (when name is queued):</label>
-            <textarea id="response_success" rows="2">{{ config.get('response_success', 'Thanks! Your name will appear on our display soon! 🎄') }}</textarea>
-            
-            <label>🚫 Profanity Detected:</label>
-            <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
-            
-            <label>⛔ Rate Limited:</label>
-            <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
-            
-            <label>🔄 Duplicate Name:</label>
-            <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
-            
-            <label>❌ Invalid Format:</label>
-            <textarea id="response_invalid_format" rows="2">{{ config.get('response_invalid_format', 'Please send only a name (1-2 words, no sentences).') }}</textarea>
-            
-            <label>📋 Not on Whitelist:</label>
-            <textarea id="response_not_whitelisted" rows="2">{{ config.get('response_not_whitelisted', 'Sorry, that name is not on our approved list.') }}</textarea>
-            
-            <label>🚫 Blocked Number:</label>
-            <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
-        </div>
-        
-        <div class="section" style="border: 2px solid #FF9800;">
-            <h2>🧪 SMS Response Testing</h2>
-            <p style="color: #FF9800; font-size: 14px;">
-                ⚠️ Test sending SMS responses to a phone number. Make sure "Enable Automatic SMS Responses" is checked above!
-            </p>
-            
-            <label>Phone Number:</label>
-            <input type="text" id="test_sms_phone" placeholder="+18005551234">
-            
-            <label>Message Type:</label>
-            <select id="test_sms_type">
-                <option value="success">✅ Success</option>
-                <option value="profanity">🚫 Profanity</option>
-                <option value="rate_limited">⛔ Rate Limited</option>
-                <option value="duplicate">🔄 Duplicate</option>
-                <option value="invalid_format">❌ Invalid Format</option>
-                <option value="not_whitelisted">📋 Not Whitelisted</option>
-                <option value="blocked">🚫 Blocked</option>
-            </select>
-            
-            <button class="test-btn" onclick="sendTestSMS()">📤 Send Test SMS</button>
-            
-            <div id="test_sms_result" style="margin-top: 10px;"></div>
-        </div>
-        
-        <button onclick="saveConfig()">💾 Save Configuration</button>
-        <button class="test-btn" onclick="testConnection()">🔌 Test Twilio Connection</button>
-        <button class="view-btn" onclick="viewMessages()">📋 View Message History & Queue</button>
-        
-        <div id="message" style="margin-top: 20px;"></div>
-        
+
         <script>
             window.onload = function() {
                 loadFPPData();
             };
-            
+
+            function showTab(tabName, btn) {
+                document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                document.getElementById('tab-' + tabName).classList.add('active');
+                btn.classList.add('active');
+            }
+
             function loadFPPData() {
                 fetch('/api/fpp/data')
                 .then(r => r.json())
@@ -1294,10 +1334,10 @@ def index():
                     const nameSelect = document.getElementById('name_display_playlist');
                     const currentDefault = "{{ config.get('default_playlist', '') }}";
                     const currentName = "{{ config.get('name_display_playlist', '') }}";
-                    
+
                     defaultSelect.innerHTML = '<option value="">-- None (Manual Control) --</option>';
                     nameSelect.innerHTML = '<option value="">-- None (No Playlist Change) --</option>';
-                    
+
                     if (data.playlists && data.playlists.length > 0) {
                         data.playlists.forEach(playlist => {
                             const opt1 = new Option(playlist, playlist, false, playlist === currentDefault);
@@ -1306,22 +1346,22 @@ def index():
                             nameSelect.add(opt2);
                         });
                     }
-                    
+
                     const modelSelect = document.getElementById('overlay_model_name');
                     const currentModel = "{{ config.get('overlay_model_name', 'Texting Matrix') }}";
                     modelSelect.innerHTML = '<option value="">-- None --</option>';
-                    
+
                     if (data.models && data.models.length > 0) {
                         data.models.forEach(model => {
                             const opt = new Option(model, model, false, model === currentModel);
                             modelSelect.add(opt);
                         });
                     }
-                    
+
                     const fontSelect = document.getElementById('text_font');
                     const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
                     fontSelect.innerHTML = '<option value="">-- Select Font --</option>';
-                    
+
                     if (data.fonts && data.fonts.length > 0) {
                         data.fonts.forEach(font => {
                             const opt = new Option(font, font, false, font === currentFont);
@@ -1333,7 +1373,7 @@ def index():
                     }
                 });
             }
-            
+
             function refreshFPPData() {
                 document.getElementById('fpp_status').innerHTML = '<p>Refreshing FPP data...</p>';
                 loadFPPData();
@@ -1341,11 +1381,11 @@ def index():
                     document.getElementById('fpp_status').innerHTML = '<p class="success">✅ Refreshed!</p>';
                 }, 1000);
             }
-            
+
             function testFPP() {
                 document.getElementById('fpp_status').innerHTML = '<p>Testing FPP connection...</p>';
                 const fppHost = document.getElementById('fpp_host').value;
-                
+
                 fetch('/api/fpp/test', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1354,15 +1394,15 @@ def index():
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        document.getElementById('fpp_status').innerHTML = 
+                        document.getElementById('fpp_status').innerHTML =
                             '<p class="success">✅ FPP connection successful! Status: ' + data.status + '</p>';
                     } else {
-                        document.getElementById('fpp_status').innerHTML = 
+                        document.getElementById('fpp_status').innerHTML =
                             '<p class="error">❌ Connection failed: ' + data.error + '</p>';
                     }
                 });
             }
-            
+
             function saveConfig() {
                 const data = {
                     enabled: document.getElementById('enabled').checked,
@@ -1396,7 +1436,7 @@ def index():
                     response_not_whitelisted: document.getElementById('response_not_whitelisted').value,
                     response_blocked: document.getElementById('response_blocked').value
                 };
-                
+
                 fetch('/api/config', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1408,7 +1448,7 @@ def index():
                     setTimeout(() => location.reload(), 2000);
                 });
             }
-            
+
             function testConnection() {
                 document.getElementById('message').innerHTML = '<p>Testing Twilio connection...</p>';
                 fetch('/api/test')
@@ -1421,22 +1461,22 @@ def index():
                     }
                 });
             }
-            
+
             function viewMessages() {
                 window.location.href = '/messages';
             }
-            
+
             function submitTestMessage() {
                 const testName = document.getElementById('test_name').value.trim();
                 const resultDiv = document.getElementById('test_result');
-                
+
                 if (!testName) {
                     resultDiv.innerHTML = '<p class="error">❌ Please enter a name</p>';
                     return;
                 }
-                
+
                 resultDiv.innerHTML = '<p>🧪 Submitting test message...</p>';
-                
+
                 fetch('/api/test/message', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1453,24 +1493,24 @@ def index():
                     } else {
                         resultDiv.innerHTML = '<p class="error">❌ ' + data.error + '</p>';
                         if (data.reason) {
-                            resultDiv.innerHTML += '<p style="font-size: 12px; color: #aaa;">Reason: ' + data.reason + '</p>';
+                            resultDiv.innerHTML += '<p style="font-size: 12px; color: #666;">Reason: ' + data.reason + '</p>';
                         }
                     }
                 });
             }
-            
+
             function sendTestSMS() {
                 const phone = document.getElementById('test_sms_phone').value.trim();
                 const messageType = document.getElementById('test_sms_type').value;
                 const resultDiv = document.getElementById('test_sms_result');
-                
+
                 if (!phone) {
                     resultDiv.innerHTML = '<p class="error">❌ Please enter a phone number</p>';
                     return;
                 }
-                
+
                 resultDiv.innerHTML = '<p>📤 Sending test SMS...</p>';
-                
+
                 fetch('/api/test/sms', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
@@ -1489,6 +1529,7 @@ def index():
     </body>
     </html>
     """
+
     return render_template_string(html, config=config)
 
 @app.route('/api/config', methods=['POST'])
@@ -1691,16 +1732,16 @@ def view_blocklist():
     <head>
         <title>Blocked Phone Numbers</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #f44336; }
             table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-            th, td { border: 1px solid #444; padding: 10px; text-align: left; }
+            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
             th { background: #f44336; color: white; }
-            tr:nth-child(even) { background: #2a2a2a; }
+            tr:nth-child(even) { background: #f5f5f5; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 10px 5px 10px 0; }
             .unblock-btn { background: #4CAF50; padding: 5px 10px; font-size: 12px; }
-            .info { background: #f44336; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; }
-            .no-blocked { background: #333; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
+            .info { background: #ffebee; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #ffcdd2; color: #333; }
+            .no-blocked { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
     <body>
@@ -1762,15 +1803,15 @@ def status_page():
     <head>
         <title>Plugin Status</title>
         <style>
-            body {{ font-family: monospace; background: #1a1a1a; color: #0f0; padding: 20px; }}
-            .section {{ background: #000; padding: 15px; margin: 15px 0; border: 1px solid #0f0; }}
-            .ok {{ color: #0f0; }}
-            .error {{ color: #f00; }}
-            button {{ background: #0f0; color: #000; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
+            body {{ font-family: monospace; background: #ffffff; color: #333; padding: 20px; }}
+            .section {{ background: #f5f5f5; padding: 15px; margin: 15px 0; border: 1px solid #ddd; }}
+            .ok {{ color: #4CAF50; }}
+            .error {{ color: #f44336; }}
+            button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
     <body>
-        <h1>🔧 FPP SMS Plugin Status v2.4</h1>
+        <h1>🔧 FPP SMS Plugin Status v2.5</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
         
@@ -1807,22 +1848,22 @@ def view_messages():
     <head>
         <title>Message History & Queue</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #4CAF50; }
             table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-            th, td { border: 1px solid #444; padding: 10px; text-align: left; }
+            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
             th { background: #4CAF50; color: white; }
-            tr:nth-child(even) { background: #2a2a2a; }
+            tr:nth-child(even) { background: #f5f5f5; }
             .displaying { background: #4CAF50 !important; color: white; font-weight: bold; }
-            .queued { color: #FF9800; }
+            .queued { color: #e65100; }
             .displayed { color: #4CAF50; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 10px 5px 10px 0; }
             .block-btn { background: #f44336; padding: 5px 10px; font-size: 12px; }
             .clear-btn { background: #f44336; }
-            .info { background: #1565C0; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; }
-            .queue-box { background: #7B1FA2; padding: 20px; border-radius: 5px; margin: 20px 0; }
-            .current-display { background: #4CAF50; padding: 15px; border-radius: 5px; margin: 10px 0; font-size: 18px; font-weight: bold; }
-            .queue-item { background: #333; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
+            .info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #90caf9; color: #333; }
+            .queue-box { background: #f3e5f5; padding: 20px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
+            .current-display { background: #4CAF50; padding: 15px; border-radius: 5px; margin: 10px 0; font-size: 18px; font-weight: bold; color: white; }
+            .queue-item { background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
         </style>
     </head>
     <body>
@@ -1843,7 +1884,7 @@ def view_messages():
                 (from ***{{ queue_status.currently_displaying.phone_last4 }})
             </div>
             {% else %}
-            <div class="current-display" style="background: #555;">
+            <div class="current-display" style="background: #bdbdbd; color: #333;">
                 💤 Nothing currently displaying
             </div>
             {% endif %}
@@ -1943,13 +1984,15 @@ def view_messages():
 
 if __name__ == '__main__':
     load_config()
-    
+
+    # Display worker always runs so Testing Tools work without Twilio credentials
+    display_thread = threading.Thread(target=display_worker, daemon=True)
+    display_thread.start()
+
+    # Polling thread only starts when plugin is enabled (requires Twilio credentials)
     if config['enabled']:
         polling_thread = threading.Thread(target=poll_twilio, daemon=True)
         polling_thread.start()
-        
-        display_thread = threading.Thread(target=display_worker, daemon=True)
-        display_thread.start()
-    
-    logging.info("FPP SMS Plugin v2.4 with OPTIMIZED list caching starting...")
+
+    logging.info("FPP SMS Plugin v2.5 starting...")
     app.run(host='0.0.0.0', port=5000, debug=False)
