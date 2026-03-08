@@ -1948,6 +1948,7 @@ def view_whitelist():
             .error { color: #f44336; font-size: 13px; }
             .success { color: #4CAF50; font-size: 13px; }
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
+            #list_area { height: calc(100vh - 340px); min-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
         </style>
     </head>
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
@@ -2020,13 +2021,14 @@ def view_whitelist():
 
             function setupSentinel() {
                 if (observer) observer.disconnect();
-                if (sentinel) sentinel.remove();
+                if (sentinel && sentinel.parentNode) sentinel.parentNode.removeChild(sentinel);
+                const area = document.getElementById('list_area');
                 sentinel = document.createElement('div');
                 sentinel.style.height = '1px';
-                document.getElementById('list_area').after(sentinel);
+                area.appendChild(sentinel);
                 observer = new IntersectionObserver(function(entries) {
                     if (entries[0].isIntersecting) appendRows();
-                }, { rootMargin: '200px' });
+                }, { root: area, rootMargin: '200px' });
                 observer.observe(sentinel);
             }
 
@@ -2169,6 +2171,7 @@ def view_blacklist_page():
             .error { color: #f44336; font-size: 13px; }
             .success { color: #4CAF50; font-size: 13px; }
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
+            #list_area { height: calc(100vh - 340px); min-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
         </style>
     </head>
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
@@ -2241,13 +2244,14 @@ def view_blacklist_page():
 
             function setupSentinel() {
                 if (observer) observer.disconnect();
-                if (sentinel) sentinel.remove();
+                if (sentinel && sentinel.parentNode) sentinel.parentNode.removeChild(sentinel);
+                const area = document.getElementById('list_area');
                 sentinel = document.createElement('div');
                 sentinel.style.height = '1px';
-                document.getElementById('list_area').after(sentinel);
+                area.appendChild(sentinel);
                 observer = new IntersectionObserver(function(entries) {
                     if (entries[0].isIntersecting) appendRows();
-                }, { rootMargin: '200px' });
+                }, { root: area, rootMargin: '200px' });
                 observer.observe(sentinel);
             }
 
