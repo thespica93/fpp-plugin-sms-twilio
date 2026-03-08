@@ -1936,11 +1936,17 @@ def view_whitelist():
         </style>
     </head>
     <body>
-        <h1>Name Whitelist</h1>
+        <h1>📋 Name Whitelist</h1>
         <div class="info">
             Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
+        {% if not config.get('use_whitelist', False) %}
+        <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px;">
+            ⚠️ <strong>Whitelist is not enabled</strong> — All names will be shown regardless of this list.
+            <a href="/" style="color:#856404; margin-left:8px;">Enable it in Config →</a>
+        </div>
+        {% endif %}
         <button onclick="location.href='/'">← Back to Config</button>
 
         <h3>Add a Name</h3>
@@ -2060,7 +2066,7 @@ def view_whitelist():
     </body>
     </html>
     """
-    return render_template_string(html)
+    return render_template_string(html, config=config)
 
 @app.route('/blacklist')
 def view_blacklist_page():
@@ -2099,6 +2105,12 @@ def view_blacklist_page():
             ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
+        {% if not config.get('profanity_filter', True) %}
+        <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px;">
+            ⚠️ <strong>Blacklist is not enabled</strong> — Words on this list will still be shown.
+            <a href="/" style="color:#856404; margin-left:8px;">Enable it in Config →</a>
+        </div>
+        {% endif %}
         <button onclick="location.href='/'">← Back to Config</button>
 
         <h3>Add a Word</h3>
@@ -2218,7 +2230,7 @@ def view_blacklist_page():
     </body>
     </html>
     """
-    return render_template_string(html)
+    return render_template_string(html, config=config)
 
 @app.route('/blocklist')
 def view_blocklist():
