@@ -1113,7 +1113,7 @@ def index():
             .tab-content.active { display: block; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
 
         <!-- Top action bar -->
         <div class="top-actions">
@@ -1226,13 +1226,11 @@ def index():
 
                         <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
                         <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
-                        <p class="help-text">ℹ️ When enabled, only names on the approved list are accepted.</p>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 6px;">📋 Manage Whitelist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
 
                         <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
-                        <p class="help-text" style="margin-top:0;">📵 Numbers on this list are permanently blocked from sending messages</p>
                         <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top: 4px;">🚫 View Blocklist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
@@ -1951,7 +1949,7 @@ def view_whitelist():
             #list_area { height: calc(100vh - 340px); min-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>📋 Name Whitelist</h1>
         <div class="info">
             Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
@@ -2174,7 +2172,7 @@ def view_blacklist_page():
             #list_area { height: calc(100vh - 340px); min-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🚫 Profanity Blacklist</h1>
         <div class="info">
             ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
@@ -2386,7 +2384,7 @@ def view_blocklist():
             .no-blocked { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🚫 Blocked Phone Numbers</h1>
         <div class="info">
             ℹ️ Blocked numbers cannot send messages | Total Blocked: {{ blocklist|length }}
@@ -2452,7 +2450,7 @@ def status_page():
             button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🔧 FPP SMS Plugin Status v2.5</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
@@ -2508,7 +2506,7 @@ def view_messages():
             .queue-item { background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>📋 Message History & Queue Status</h1>
 
         <div class="queue-info">
