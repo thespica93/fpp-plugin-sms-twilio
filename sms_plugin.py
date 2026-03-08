@@ -1023,7 +1023,7 @@ def index():
     <head>
         <title>FPP SMS Plugin Configuration</title>
         <style>
-            body { font-family: Arial, sans-serif; max-width: 900px; margin: 50px auto; padding: 20px; background: #ffffff; color: #333; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #4CAF50; }
             .section { background: #f8f8f8; padding: 20px; margin: 20px 0; border-radius: 5px; border: 1px solid #ddd; }
             label { display: block; margin: 10px 0 5px; font-weight: bold; }
@@ -1691,7 +1691,7 @@ def view_blocklist():
     <head>
         <title>Blocked Phone Numbers</title>
         <style>
-            body { font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; background: #ffffff; color: #333; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #f44336; }
             table { width: 100%; border-collapse: collapse; margin: 20px 0; }
             th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
@@ -1807,7 +1807,7 @@ def view_messages():
     <head>
         <title>Message History & Queue</title>
         <style>
-            body { font-family: Arial, sans-serif; max-width: 1200px; margin: 50px auto; padding: 20px; background: #ffffff; color: #333; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #4CAF50; }
             table { width: 100%; border-collapse: collapse; margin: 20px 0; }
             th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
