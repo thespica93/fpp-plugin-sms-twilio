@@ -33,6 +33,7 @@ LOG_FILE = "/home/fpp/media/logs/sms_plugin.log"
 MESSAGE_LOG = "/home/fpp/media/logs/received_messages.json"
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
 WHITELIST_FILE = os.path.join(PLUGIN_DIR, "whitelist.txt")
+WHITELIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "whitelist_removed.txt")
 LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
 BLOCKLIST_FILE = "/home/fpp/media/config/blocked_phones.json"
 
@@ -268,24 +269,39 @@ def test_fpp_connection():
 # ============================================================================
 # OPTIMIZED WHITELIST LOADING - WITH CACHING
 # ============================================================================
+def load_removed_names():
+    """Load names the user has explicitly deleted (so git pull can't re-add them)"""
+    if not os.path.exists(WHITELIST_REMOVED_FILE):
+        return set()
+    try:
+        with open(WHITELIST_REMOVED_FILE, 'r', encoding='latin-1') as f:
+            return {line.strip().lower() for line in f if line.strip()}
+    except Exception:
+        return set()
+
 def load_whitelist():
     """Load and cache the whitelist, reload if file has changed"""
     global _whitelist_cache, _whitelist_mtime
-    
+
     try:
         current_mtime = os.path.getmtime(WHITELIST_FILE)
-        
+
         # Only reload if file changed or not yet loaded
         if _whitelist_cache is None or _whitelist_mtime != current_mtime:
             with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 names = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
-            
+
+            # Filter out names the user has explicitly removed (prevents git pull re-adding them)
+            removed = load_removed_names()
+            if removed:
+                names = [n for n in names if n not in removed]
+
             _whitelist_cache = names
             _whitelist_mtime = current_mtime
             logging.info(f"Loaded {len(_whitelist_cache)} names into whitelist cache")
-        
+
         return _whitelist_cache
-        
+
     except FileNotFoundError:
         logging.info(f"Whitelist file not found: {WHITELIST_FILE}")
         return []
@@ -1066,13 +1082,6 @@ def index():
     </head>
     <body>
 
-        <div class="queue-info">
-            <strong>🎬 Queue System:</strong><br>
-            • Messages are queued and displayed one at a time<br>
-            • Each message displays for the full duration (no interruptions)<br>
-            • View real-time queue status on the Messages page
-        </div>
-
         <!-- Top action bar -->
         <div class="top-actions">
             <button onclick="saveConfig()">💾 Save Configuration</button>
@@ -1750,6 +1759,12 @@ def api_add_whitelist():
         names.add(name)
         with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
             f.write('\n'.join(sorted(names)) + '\n')
+        # If name was previously removed, un-remove it so it isn't filtered out
+        removed = load_removed_names()
+        if name in removed:
+            removed.discard(name)
+            with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(removed)) + '\n')
         _whitelist_cache = None
         _whitelist_mtime = None
         logging.info(f"Added '{name}' to whitelist")
@@ -1770,6 +1785,11 @@ def api_remove_whitelist():
         names.discard(name)
         with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
             f.write('\n'.join(sorted(names)) + '\n' if names else '')
+        # Track removal so git pull can't re-add this name
+        removed = load_removed_names()
+        removed.add(name)
+        with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sorted(removed)) + '\n')
         _whitelist_cache = None
         _whitelist_mtime = None
         logging.info(f"Removed '{name}' from whitelist")
@@ -1880,12 +1900,19 @@ def view_whitelist():
                     return;
                 }
 
-                area.innerHTML = '<table><tr><th>Approved Name</th><th>Action</th></tr>' +
-                    showing.map(name =>
-                        `<tr><td style="text-transform:capitalize">${name}</td>` +
-                        `<td><button class="remove-btn" onclick="removeName('${name}')">✕ Remove</button></td></tr>`
-                    ).join('') +
-                    '</table>';
+                let rows = '';
+                for (let i = 0; i < showing.length; i += 2) {
+                    const a = showing[i];
+                    const b = showing[i + 1];
+                    rows += `<tr>` +
+                        `<td style="text-transform:capitalize">${a}</td>` +
+                        `<td><button class="remove-btn" onclick="removeName('${a}')">✕ Remove</button></td>` +
+                        (b
+                            ? `<td style="text-transform:capitalize">${b}</td><td><button class="remove-btn" onclick="removeName('${b}')">✕ Remove</button></td>`
+                            : `<td></td><td></td>`) +
+                        `</tr>`;
+                }
+                area.innerHTML = '<table><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + rows + '</table>';
             }
 
             function addName() {
@@ -2074,6 +2101,14 @@ def view_messages():
     </head>
     <body>
         <h1>📋 Message History & Queue Status</h1>
+
+        <div class="queue-info">
+            <strong>🎬 Queue System:</strong><br>
+            • Messages are queued and displayed one at a time<br>
+            • Each message displays for the full duration (no interruptions)<br>
+            • View real-time queue status on the Messages page
+        </div>
+        
         <div class="info">
             ℹ️ Auto-refreshes every 5 seconds | Total Messages: {{ messages|length }}
         </div>

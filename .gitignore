@@ -1,3 +1,4 @@
 .vscode/
 __pycache__/
 *.pyc
+whitelist_removed.txt
