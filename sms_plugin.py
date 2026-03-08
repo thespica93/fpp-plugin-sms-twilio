@@ -1119,6 +1119,8 @@ def index():
         <div class="top-actions">
             <button onclick="saveConfig()">💾 Save Configuration</button>
             <button class="view-btn" onclick="viewMessages()">📋 View Message Queue</button>
+            <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
+            <button onclick="location.href='/blocklist'" style="background:#f44336;">🚫 View Blocklist</button>
             <div id="message"></div>
         </div>
 
@@ -1211,7 +1213,6 @@ def index():
                         <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
 
                         <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
-                        <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
                         <div id="fpp_status"></div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
@@ -2379,7 +2380,6 @@ def view_messages():
         <button onclick="location.href='/'">← Back to Config</button>
         <button onclick="location.reload()">🔄 Refresh</button>
         <button onclick="location.href='/whitelist'" style="background: #4CAF50;">📋 Manage Whitelist</button>
-        <button onclick="location.href='/blocklist'" style="background: #f44336;">🚫 View Blocklist</button>
         <button class="clear-btn" onclick="clearHistory()">🗑️ Clear All Messages</button>
         
         <div class="queue-box">
