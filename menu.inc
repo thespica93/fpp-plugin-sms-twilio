@@ -6,6 +6,12 @@ $menuEntries = Array(
 		'type' => 'content',
 		'page' => 'ui.php',
 		'wrap' => 1
+	),
+	Array(
+		'text' => 'SMS Twilio Plugin',
+		'type' => 'help',
+		'page' => 'help.php',
+		'wrap' => 1
 	)
 );
 
