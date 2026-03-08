@@ -1185,76 +1185,84 @@ def index():
                 </div>
             </div>
 
-            <div class="section">
-                <h2>FPP Display Settings</h2>
+            <div class="columns">
+                <div class="column">
+                    <div class="section">
+                        <h2>FPP Display Settings</h2>
 
-                <label>Default "Waiting" Playlist:</label>
-                <select id="default_playlist">
-                    <option value="">-- None (Manual Control) --</option>
-                </select>
-                <p class="help-text">📺 This playlist loops while waiting for text messages</p>
+                        <label>Default "Waiting" Playlist:</label>
+                        <select id="default_playlist">
+                            <option value="">-- None (Manual Control) --</option>
+                        </select>
+                        <p class="help-text">📺 This playlist loops while waiting for text messages</p>
 
-                <label>Name Display Playlist:</label>
-                <select id="name_display_playlist">
-                    <option value="">-- None (No Playlist Change) --</option>
-                </select>
-                <p class="help-text">🎬 This playlist plays when displaying a name</p>
+                        <label>Name Display Playlist:</label>
+                        <select id="name_display_playlist">
+                            <option value="">-- None (No Playlist Change) --</option>
+                        </select>
+                        <p class="help-text">🎬 This playlist plays when displaying a name</p>
 
-                <label>Overlay Model Name:</label>
-                <select id="overlay_model_name">
-                    <option value="">-- None --</option>
-                </select>
-                <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
-
-                <h3>Text Display Options</h3>
-                <label>Message Template:</label>
-                <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-                <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines. Use spaces to shift text position.</p>
-
-                <label>Text Color:</label>
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <input type="color" id="text_color" value="{{ config.get('text_color', '#FF0000') }}"
-                           style="width: 60px; height: 40px; padding: 2px; cursor: pointer;">
-                    <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
-                           placeholder="#FF0000" style="width: 100px;"
-                           onchange="document.getElementById('text_color').value = this.value">
-                    <span id="color_preview" style="padding: 8px 20px; border-radius: 4px; background: {{ config.get('text_color', '#FF0000') }}; color: white; font-weight: bold;">Preview</span>
+                        <label>Overlay Model Name:</label>
+                        <select id="overlay_model_name">
+                            <option value="">-- None --</option>
+                        </select>
+                        <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
+                    </div>
                 </div>
-                <script>
-                    document.getElementById('text_color').addEventListener('change', function() {
-                        document.getElementById('text_color_hex').value = this.value;
-                        document.getElementById('color_preview').style.background = this.value;
-                    });
-                    document.getElementById('text_color_hex').addEventListener('input', function() {
-                        if (/^#[0-9A-F]{6}$/i.test(this.value)) {
-                            document.getElementById('text_color').value = this.value;
-                            document.getElementById('color_preview').style.background = this.value;
-                        }
-                    });
-                </script>
+                <div class="column">
+                    <div class="section">
+                        <h2>Text Display Options</h2>
 
-                <label>Font:</label>
-                <select id="text_font">
-                    <option value="">Loading fonts...</option>
-                </select>
-                <p class="help-text">🔤 Select from FPP-supported fonts</p>
+                        <label>Message Template:</label>
+                        <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
+                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines. Use spaces to shift text position.</p>
 
-                <label>Font Size:</label>
-                <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
+                        <label>Text Color:</label>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <input type="color" id="text_color" value="{{ config.get('text_color', '#FF0000') }}"
+                                   style="width: 60px; height: 40px; padding: 2px; cursor: pointer;">
+                            <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
+                                   placeholder="#FF0000" style="width: 100px;"
+                                   onchange="document.getElementById('text_color').value = this.value">
+                            <span id="color_preview" style="padding: 8px 20px; border-radius: 4px; background: {{ config.get('text_color', '#FF0000') }}; color: white; font-weight: bold;">Preview</span>
+                        </div>
+                        <script>
+                            document.getElementById('text_color').addEventListener('change', function() {
+                                document.getElementById('text_color_hex').value = this.value;
+                                document.getElementById('color_preview').style.background = this.value;
+                            });
+                            document.getElementById('text_color_hex').addEventListener('input', function() {
+                                if (/^#[0-9A-F]{6}$/i.test(this.value)) {
+                                    document.getElementById('text_color').value = this.value;
+                                    document.getElementById('color_preview').style.background = this.value;
+                                }
+                            });
+                        </script>
 
-                <label>Scroll Speed (pixels per second):</label>
-                <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
-                <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
+                        <label>Font:</label>
+                        <select id="text_font">
+                            <option value="">Loading fonts...</option>
+                        </select>
+                        <p class="help-text">🔤 Select from FPP-supported fonts</p>
 
-                <label>Text Position:</label>
-                <select id="text_position">
-                    <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
-                    <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
-                    <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
-                    <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                    <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                </select>
-                <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
+                        <label>Font Size:</label>
+                        <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
+
+                        <label>Scroll Speed (pixels per second):</label>
+                        <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
+                        <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
+
+                        <label>Text Position:</label>
+                        <select id="text_position">
+                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
+                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
+                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
+                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                        </select>
+                        <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
+                    </div>
+                </div>
             </div>
 
             <div class="section">
@@ -1927,7 +1935,7 @@ def view_whitelist():
         </style>
     </head>
     <body>
-        <h1>Global Name Whitelist</h1>
+        <h1>Name Whitelist</h1>
         <div class="info">
             Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
             <span id="filepath" style="font-size:12px; color:#555;"></span>
