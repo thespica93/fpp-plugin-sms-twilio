@@ -1010,7 +1010,7 @@ def poll_twilio():
                             log_message(from_number, body, name, "duplicate_name_today")
                             send_sms_response(from_number, "duplicate")
 
-                        elif not is_valid:
+                        elif not is_valid and not config.get('use_whitelist', False):
                             logging.info(f"❌ Rejected invalid name format: {body}")
                             log_message(from_number, body, name, "invalid_format")
                             send_sms_response(from_number, "invalid_format")
@@ -1333,7 +1333,7 @@ def index():
                 <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
                     <div class="resp-toggle">
                         <input type="checkbox" id="sms_response_invalid_format"
-                               {{ 'checked' if config.get('sms_response_invalid_format', False) else '' }}
+                               {{ 'checked' if config.get('sms_response_invalid_format', False) and not config.get('use_whitelist', False) else '' }}
                                {{ 'disabled' if config.get('use_whitelist', False) else '' }}
                                onchange="toggleResp('invalid_format')">
                         <label for="sms_response_invalid_format">❌ Invalid Format — Send Response</label>
@@ -1533,7 +1533,7 @@ def index():
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
                     sms_response_rate_limited: document.getElementById('sms_response_rate_limited').checked,
                     sms_response_duplicate: document.getElementById('sms_response_duplicate').checked,
-                    sms_response_invalid_format: document.getElementById('sms_response_invalid_format').checked,
+                    sms_response_invalid_format: !document.getElementById('use_whitelist').checked && document.getElementById('sms_response_invalid_format').checked,
                     sms_response_not_whitelisted: document.getElementById('sms_response_not_whitelisted').checked,
                     sms_response_blocked: document.getElementById('sms_response_blocked').checked,
                     response_success: document.getElementById('response_success').value,
