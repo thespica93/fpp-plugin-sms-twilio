@@ -1190,10 +1190,12 @@ def index():
                         <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
 
                         <h3>Name Format Rules</h3>
-                        <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}>
+                        <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}
+                               onchange="if(this.checked) document.getElementById('two_words_max').checked = false;">
                         <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
 
-                        <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}>
+                        <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}
+                               onchange="if(this.checked) document.getElementById('one_word_only').checked = false;">
                         <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
 
                         <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
