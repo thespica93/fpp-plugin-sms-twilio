@@ -1118,9 +1118,8 @@ def index():
         <!-- Top action bar -->
         <div class="top-actions">
             <button onclick="saveConfig()">💾 Save Configuration</button>
-            <button class="view-btn" onclick="viewMessages()">📋 View Message Queue</button>
             <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
-            <button onclick="location.href='/blocklist'" style="background:#f44336;">🚫 View Blocklist</button>
+            <button class="view-btn" onclick="viewMessages()">📋 View Message Queue</button>
             <div id="message"></div>
         </div>
 
@@ -1229,6 +1228,7 @@ def index():
                         <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
                         <p class="help-text">ℹ️ When enabled, only names on the approved list are accepted.</p>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 10px;">📋 Manage Whitelist</button>
+                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top: 6px;">🚫 View Blocklist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">Text Display Options</h2>
@@ -1942,7 +1942,6 @@ def view_whitelist():
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
-        <button onclick="location.href='/messages'">📬 View Messages</button>
 
         <h3>Add a Name</h3>
         <div class="add-row">
@@ -2101,7 +2100,6 @@ def view_blacklist_page():
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
-        <button onclick="location.href='/messages'">📬 View Messages</button>
 
         <h3>Add a Word</h3>
         <div class="add-row">
@@ -2379,7 +2377,6 @@ def view_messages():
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
         <button onclick="location.reload()">🔄 Refresh</button>
-        <button onclick="location.href='/whitelist'" style="background: #4CAF50;">📋 Manage Whitelist</button>
         <button class="clear-btn" onclick="clearHistory()">🗑️ Clear All Messages</button>
         
         <div class="queue-box">
@@ -2529,6 +2526,11 @@ def view_messages():
                             onclick="blockNameFromDisplay()">
                         🚫 Block this name from being displayed
                     </button>
+                    {% if not config.get('use_whitelist', False) %}
+                    <p id="whitelist-warning" style="color:#f44336; font-size:12px; margin:0; padding:4px 0;">
+                        ⚠️ Whitelist is not enabled — this name will still show again
+                    </p>
+                    {% endif %}
                     <button style="background:#aaa; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer; font-size:13px;"
                             onclick="closeBlockModal()">
                         Cancel
@@ -2539,7 +2541,7 @@ def view_messages():
     </body>
     </html>
     """
-    return render_template_string(html, messages=list(reversed(messages)), queue_status=queue_status)
+    return render_template_string(html, messages=list(reversed(messages)), queue_status=queue_status, config=config)
 
 if __name__ == '__main__':
     load_config()
