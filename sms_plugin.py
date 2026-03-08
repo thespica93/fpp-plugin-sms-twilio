@@ -1208,6 +1208,28 @@ def index():
                         </select>
                         <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
                     </div>
+
+                    <div class="section" style="margin-top: 20px;">
+                        <h2>Message Settings</h2>
+                        <label>Display Duration (seconds):</label>
+                        <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
+                        <p class="help-text">⏱️ Each message will display for this many seconds before moving to the next</p>
+
+                        <label>Max Messages Per Phone (0 = unlimited):</label>
+                        <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
+
+                        <label>Max Message Length:</label>
+                        <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
+
+                        <h3>Name Format Rules</h3>
+                        <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}>
+                        <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
+
+                        <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}>
+                        <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
+
+                        <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                    </div>
                 </div>
                 <div class="column">
                     <div class="section">
@@ -1263,28 +1285,6 @@ def index():
                         <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
                     </div>
                 </div>
-            </div>
-
-            <div class="section">
-                <h2>Message Settings</h2>
-                <label>Display Duration (seconds):</label>
-                <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
-                <p class="help-text">⏱️ Each message will display for this many seconds before moving to the next</p>
-
-                <label>Max Messages Per Phone (0 = unlimited):</label>
-                <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
-
-                <label>Max Message Length:</label>
-                <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
-
-                <h3>Name Format Rules</h3>
-                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}>
-                <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
-
-                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}>
-                <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
-
-                <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
             </div>
 
             <div class="section" style="border: 2px solid #2196F3;">
