@@ -383,7 +383,7 @@ def send_sms_response(to_phone, message_type):
         return False
     
     try:
-        message = twilio_client.messages.create(
+        twilio_client.messages.create(
             body=response_message,
             from_=config['twilio_phone_number'],
             to=to_phone
@@ -624,7 +624,7 @@ def send_to_fpp(name):
         if name_playlist:
             try:
                 logging.info(f"⏸️  STEP 1: Stopping all playlists...")
-                stop_response = requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+                requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
                 time.sleep(0.5)
                 
                 logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
@@ -956,7 +956,7 @@ def poll_twilio():
                         continue
                     
                     logging.info(f"🔍 Checking name format validity...")
-                    is_valid, validation_msg = is_valid_name(name)
+                    is_valid, _ = is_valid_name(name)
                     logging.info(f"🔍 Name format check result: valid={is_valid}")
                     
                     if not is_valid:
