@@ -126,26 +126,33 @@ currently_displaying = None
 queue_lock = threading.Lock()
 
 def load_config():
-    """Load configuration from file"""
+    """Load configuration from file, merging with defaults so new settings survive updates"""
     global config, twilio_client, last_message_sid
     try:
         with open(CONFIG_FILE, 'r') as f:
             loaded = json.load(f)
             config.update(loaded)
-        
+
+        # If the plugin was updated and new default keys were added, save them
+        # back so the file stays complete across updates
+        new_keys = set(DEFAULT_CONFIG.keys()) - set(loaded.keys())
+        if new_keys:
+            save_config()
+            logging.info(f"Saved {len(new_keys)} new default setting(s) after update: {new_keys}")
+
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
                 config['twilio_account_sid'],
                 config['twilio_auth_token']
             )
-        
+
         try:
             with open(LAST_SID_FILE, 'r') as f:
                 last_message_sid = f.read().strip()
                 logging.info(f"Loaded last message SID: {last_message_sid}")
         except:
             last_message_sid = None
-            
+
         logging.info("Configuration loaded successfully")
     except FileNotFoundError:
         save_config()
@@ -1166,7 +1173,7 @@ def index():
                 <select id="name_display_playlist">
                     <option value="">-- None (No Playlist Change) --</option>
                 </select>
-                <p class="help-text">🎬 This playlist plays when displaying a name (should run for ~30 seconds)</p>
+                <p class="help-text">🎬 This playlist plays when displaying a name</p>
 
                 <label>Overlay Model Name:</label>
                 <select id="overlay_model_name">
