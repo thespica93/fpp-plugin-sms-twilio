@@ -1207,13 +1207,13 @@ def index():
                             <option value="">-- None --</option>
                         </select>
                         <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
-                    </div>
 
-                    <div class="section" style="margin-top: 20px;">
-                        <h2>Message Settings</h2>
+                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+                        <h2 style="margin-top: 0;">Message Settings</h2>
+
                         <label>Display Duration (seconds):</label>
                         <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
-                        <p class="help-text">⏱️ Each message will display for this many seconds before moving to the next</p>
+                        <p class="help-text">⏱️ Each message displays for this many seconds before moving to the next</p>
 
                         <label>Max Messages Per Phone (0 = unlimited):</label>
                         <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
