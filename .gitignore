@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 whitelist_removed.txt
+blacklist_removed.txt

@@ -32,6 +32,7 @@ CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
 LOG_FILE = "/home/fpp/media/logs/sms_plugin.log"
 MESSAGE_LOG = "/home/fpp/media/logs/received_messages.json"
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
+BLACKLIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "blacklist_removed.txt")
 WHITELIST_FILE = os.path.join(PLUGIN_DIR, "whitelist.txt")
 WHITELIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "whitelist_removed.txt")
 LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
@@ -452,28 +453,58 @@ def is_valid_name(text):
 # ============================================================================
 # OPTIMIZED PROFANITY FILTER - WITH CACHING AND PRE-COMPILED REGEX
 # ============================================================================
+def load_blacklist_removed():
+    """Load words the user has explicitly removed from the profanity filter"""
+    if not os.path.exists(BLACKLIST_REMOVED_FILE):
+        return set()
+    try:
+        with open(BLACKLIST_REMOVED_FILE, 'r', encoding='latin-1') as f:
+            return {line.strip().lower() for line in f if line.strip()}
+    except Exception:
+        return set()
+
+def load_blacklist_words():
+    """Return the raw word list from blacklist.txt (for API use)"""
+    if not os.path.exists(BLACKLIST_FILE):
+        return []
+    try:
+        with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
+            words = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
+        removed = load_blacklist_removed()
+        if removed:
+            words = [w for w in words if w not in removed]
+        return sorted(words)
+    except Exception as e:
+        logging.error(f"Error reading blacklist words: {e}")
+        return []
+
 def load_blacklist():
     """Load and cache the profanity blacklist with pre-compiled regex patterns"""
     global _blacklist_cache, _blacklist_mtime
-    
+
     try:
         current_mtime = os.path.getmtime(BLACKLIST_FILE)
-        
+
         # Only reload if file changed or not yet loaded
         if _blacklist_cache is None or _blacklist_mtime != current_mtime:
             with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
                 words = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
-            
+
+            # Filter out words the user has explicitly removed
+            removed = load_blacklist_removed()
+            if removed:
+                words = [w for w in words if w not in removed]
+
             # Pre-compile all regex patterns for maximum speed
             _blacklist_cache = [
-                re.compile(r'\b' + re.escape(word) + r'\b') 
+                re.compile(r'\b' + re.escape(word) + r'\b')
                 for word in words
             ]
             _blacklist_mtime = current_mtime
             logging.info(f"Loaded {len(_blacklist_cache)} words into profanity filter cache")
-        
+
         return _blacklist_cache
-        
+
     except FileNotFoundError:
         logging.warning(f"Blacklist file not found: {BLACKLIST_FILE}")
         return []
@@ -1139,6 +1170,7 @@ def index():
                         <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
                         <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
                         <p class="help-text">ℹ️ Rejects messages containing words from blacklist.txt</p>
+                        <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
 
@@ -1730,6 +1762,70 @@ def api_get_blocklist():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@app.route('/api/blacklist')
+def api_get_blacklist():
+    try:
+        file_exists = os.path.exists(BLACKLIST_FILE)
+        words = load_blacklist_words()
+        return jsonify({"blacklist": words, "file_path": BLACKLIST_FILE, "file_exists": file_exists})
+    except Exception as e:
+        return jsonify({"error": str(e), "file_path": BLACKLIST_FILE, "file_exists": os.path.exists(BLACKLIST_FILE)})
+
+@app.route('/api/blacklist/add', methods=['POST'])
+def api_add_blacklist():
+    global _blacklist_cache, _blacklist_mtime
+    try:
+        data = request.json
+        word = data.get('word', '').strip().lower()
+        if not word:
+            return jsonify({"success": False, "error": "Word is required"})
+        words = set()
+        if os.path.exists(BLACKLIST_FILE):
+            with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
+                words = {line.strip().lower() for line in f if line.strip()}
+        if word in words:
+            return jsonify({"success": False, "error": "Word already in blacklist"})
+        words.add(word)
+        with open(BLACKLIST_FILE, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sorted(words)) + '\n')
+        # If word was previously removed, un-remove it
+        removed = load_blacklist_removed()
+        if word in removed:
+            removed.discard(word)
+            with open(BLACKLIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(removed)) + '\n')
+        _blacklist_cache = None
+        _blacklist_mtime = None
+        logging.info(f"Added '{word}' to blacklist")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/blacklist/remove', methods=['POST'])
+def api_remove_blacklist():
+    global _blacklist_cache, _blacklist_mtime
+    try:
+        data = request.json
+        word = data.get('word', '').strip().lower()
+        words = set()
+        if os.path.exists(BLACKLIST_FILE):
+            with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
+                words = {line.strip().lower() for line in f if line.strip()}
+        words.discard(word)
+        with open(BLACKLIST_FILE, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sorted(words)) + '\n' if words else '')
+        # Track removal so git pull can't re-add it
+        removed = load_blacklist_removed()
+        removed.add(word)
+        with open(BLACKLIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sorted(removed)) + '\n')
+        _blacklist_cache = None
+        _blacklist_mtime = None
+        logging.info(f"Removed '{word}' from blacklist")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 @app.route('/api/whitelist')
 def api_get_whitelist():
     try:
@@ -1829,9 +1925,9 @@ def view_whitelist():
         </style>
     </head>
     <body>
-        <h1>📋 Name Whitelist</h1>
+        <h1>Global Name Whitelist</h1>
         <div class="info">
-            ℹ️ Only names on this list are accepted when the whitelist is enabled (case-insensitive). &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
+            Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
             <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
@@ -1950,6 +2046,165 @@ def view_whitelist():
             }
 
             loadWhitelist();
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
+
+@app.route('/blacklist')
+def view_blacklist_page():
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Profanity Filter — Blacklist</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
+            h1 { color: #f44336; }
+            table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+            th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; }
+            th { background: #f44336; color: white; }
+            tr:nth-child(even) { background: #f5f5f5; }
+            button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 5px 5px 5px 0; }
+            button:hover { background: #45a049; }
+            .remove-btn { background: #f44336; padding: 4px 10px; font-size: 12px; margin: 0; }
+            .remove-btn:hover { background: #d32f2f; }
+            .add-btn { background: #2196F3; }
+            .add-btn:hover { background: #0b7dda; }
+            .info { background: #fce4e4; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #f5c6c6; }
+            .add-row { display: flex; gap: 10px; margin: 12px 0; }
+            .add-row input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+            .search-row { display: flex; gap: 10px; margin: 12px 0; }
+            .search-row input { flex: 1; padding: 10px; border: 2px solid #f44336; border-radius: 4px; font-size: 14px; }
+            .hint { color: #888; font-size: 13px; margin: 6px 0; }
+            .error { color: #f44336; font-size: 13px; }
+            .success { color: #4CAF50; font-size: 13px; }
+            .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
+        </style>
+    </head>
+    <body>
+        <h1>🚫 Profanity Blacklist</h1>
+        <div class="info">
+            ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
+            <span id="filepath" style="font-size:12px; color:#555;"></span>
+        </div>
+        <button onclick="location.href='/'">← Back to Config</button>
+        <button onclick="location.href='/messages'">📬 View Messages</button>
+
+        <h3>Add a Word</h3>
+        <div class="add-row">
+            <input type="text" id="add_word" placeholder="Type a word to block and press Enter..." onkeydown="if(event.key==='Enter') addWord()">
+            <button class="add-btn" onclick="addWord()">+ Add</button>
+        </div>
+        <div id="add_result"></div>
+
+        <h3>Search / Browse</h3>
+        <div class="search-row">
+            <input type="text" id="search" placeholder="Search words..." oninput="renderTable()">
+        </div>
+        <div id="hint" class="hint"></div>
+        <div id="list_area"></div>
+
+        <script>
+            var allWords = [];
+
+            function loadBlacklist() {
+                document.getElementById('count').textContent = 'Loading...';
+                fetch('/api/blacklist')
+                .then(r => r.json())
+                .then(data => {
+                    allWords = data.blacklist || [];
+                    document.getElementById('count').textContent = allWords.length.toLocaleString() + ' blocked words';
+                    document.getElementById('filepath').textContent = 'File: ' + data.file_path + (data.file_exists ? ' ✓' : ' ✗ NOT FOUND');
+                    renderTable();
+                })
+                .catch(() => {
+                    document.getElementById('count').textContent = 'Error loading';
+                });
+            }
+
+            function renderTable() {
+                const query = document.getElementById('search').value.trim().toLowerCase();
+                const area = document.getElementById('list_area');
+                const hint = document.getElementById('hint');
+
+                if (allWords.length === 0) {
+                    hint.textContent = '';
+                    area.innerHTML = '<div class="empty"><h3>No words in blacklist yet</h3><p>Add words above to block them.</p></div>';
+                    return;
+                }
+
+                let filtered = query
+                    ? allWords.filter(w => w.toLowerCase().includes(query))
+                    : allWords;
+
+                const LIMIT = 100;
+                const showing = filtered.slice(0, LIMIT);
+
+                if (query) {
+                    hint.textContent = filtered.length === 0
+                        ? 'No words match "' + query + '"'
+                        : 'Showing ' + Math.min(filtered.length, LIMIT) + ' of ' + filtered.length + ' matches';
+                } else {
+                    hint.textContent = 'Showing first ' + showing.length + ' of ' + allWords.length.toLocaleString() + ' words — use search to find specific words';
+                }
+
+                if (filtered.length === 0) {
+                    area.innerHTML = '<div class="empty"><p>No words match your search.</p></div>';
+                    return;
+                }
+
+                let rows = '';
+                for (let i = 0; i < showing.length; i += 2) {
+                    const a = showing[i];
+                    const b = showing[i + 1];
+                    rows += `<tr>` +
+                        `<td>${a}</td>` +
+                        `<td><button class="remove-btn" onclick="removeWord('${a}')">✕ Remove</button></td>` +
+                        (b
+                            ? `<td>${b}</td><td><button class="remove-btn" onclick="removeWord('${b}')">✕ Remove</button></td>`
+                            : `<td></td><td></td>`) +
+                        `</tr>`;
+                }
+                area.innerHTML = '<table><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + rows + '</table>';
+            }
+
+            function addWord() {
+                const input = document.getElementById('add_word');
+                const word = input.value.trim();
+                const result = document.getElementById('add_result');
+                if (!word) return;
+                fetch('/api/blacklist/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({word: word})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        result.innerHTML = '<p class="success">✅ Added: ' + word + '</p>';
+                        input.value = '';
+                        loadBlacklist();
+                    } else {
+                        result.innerHTML = '<p class="error">❌ ' + data.error + '</p>';
+                    }
+                    setTimeout(() => result.innerHTML = '', 3000);
+                });
+            }
+
+            function removeWord(word) {
+                if (!confirm('Remove "' + word + '" from the blacklist?')) return;
+                fetch('/api/blacklist/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({word: word})
+                })
+                .then(r => r.json())
+                .then(() => loadBlacklist());
+            }
+
+            loadBlacklist();
         </script>
     </body>
     </html>
@@ -2103,14 +2358,13 @@ def view_messages():
         <h1>📋 Message History & Queue Status</h1>
 
         <div class="queue-info">
-            <strong>🎬 Queue System:</strong><br>
             • Messages are queued and displayed one at a time<br>
-            • Each message displays for the full duration (no interruptions)<br>
-            • View real-time queue status on the Messages page
+            • Each message displays for the full display duration<br>
+            • View real-time queue status
         </div>
         
         <div class="info">
-            ℹ️ Auto-refreshes every 5 seconds | Total Messages: {{ messages|length }}
+            Auto-refreshes every 5 seconds | Total Messages: {{ messages|length }}
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
         <button onclick="location.reload()">🔄 Refresh</button>
