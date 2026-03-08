@@ -44,6 +44,24 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
+IFRAME_RESIZE_SCRIPT = """<script>
+(function() {
+    function reportHeight() {
+        window.parent.postMessage({ type: 'iframeHeight', height: document.documentElement.scrollHeight }, '*');
+    }
+    window.addEventListener('load', reportHeight);
+    new MutationObserver(reportHeight).observe(document.body, { subtree: true, childList: true, characterData: true });
+})();
+</script>"""
+
+@app.after_request
+def inject_iframe_resize(response):
+    if response.content_type.startswith('text/html'):
+        body = response.get_data(as_text=True)
+        body = body.replace('</body>', IFRAME_RESIZE_SCRIPT + '</body>')
+        response.set_data(body)
+    return response
+
 # ============================================================================
 # OPTIMIZED LIST CACHING - Module-level cache variables
 # ============================================================================
