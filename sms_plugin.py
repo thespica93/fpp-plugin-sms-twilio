@@ -1734,12 +1734,13 @@ def api_get_blocklist():
 def api_get_whitelist():
     try:
         names = []
-        if os.path.exists(WHITELIST_FILE):
+        file_exists = os.path.exists(WHITELIST_FILE)
+        if file_exists:
             with open(WHITELIST_FILE, 'r') as f:
-                names = sorted([line.strip() for line in f if line.strip()])
-        return jsonify({"whitelist": names})
+                names = sorted([line.strip() for line in f if line.strip() and not line.startswith('#')])
+        return jsonify({"whitelist": names, "file_path": WHITELIST_FILE, "file_exists": file_exists})
     except Exception as e:
-        return jsonify({"error": str(e)})
+        return jsonify({"error": str(e), "file_path": WHITELIST_FILE})
 
 @app.route('/api/whitelist/add', methods=['POST'])
 def api_add_whitelist():
@@ -1819,7 +1820,8 @@ def view_whitelist():
     <body>
         <h1>📋 Name Whitelist</h1>
         <div class="info">
-            ℹ️ Only names on this list are accepted when the whitelist is enabled (case-insensitive). &nbsp;|&nbsp; <strong id="count">Loading...</strong>
+            ℹ️ Only names on this list are accepted when the whitelist is enabled (case-insensitive). &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
+            <span id="filepath" style="font-size:12px; color:#555;"></span>
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
         <button onclick="location.href='/messages'">📬 View Messages</button>
@@ -1848,6 +1850,7 @@ def view_whitelist():
                 .then(data => {
                     allNames = data.whitelist || [];
                     document.getElementById('count').textContent = allNames.length.toLocaleString() + ' approved names';
+                    document.getElementById('filepath').textContent = 'File: ' + data.file_path + (data.file_exists ? ' ✓' : ' ✗ NOT FOUND');
                     renderTable();
                 })
                 .catch(() => {
