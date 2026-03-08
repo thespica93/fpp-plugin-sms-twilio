@@ -53,9 +53,18 @@ log_and_show "[3/3] Requests complete"
 # Create config files if they don't exist
 [ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json
 
-# whitelist.txt and blacklist.txt now ship with the plugin in the plugin directory.
-# Set permissions so fpp user can read/write them.
+# whitelist.txt and blacklist.txt ship with the plugin via git.
+# Force git checkout to ensure they are present (FPP update may not pull all files).
 PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
+cd "$PLUGIN_DIR" && git checkout -- whitelist.txt blacklist.txt >> "$LOG" 2>&1
+if [ ! -f "$PLUGIN_DIR/whitelist.txt" ]; then
+    log_and_show "WARNING: whitelist.txt still missing after git checkout - creating empty file"
+    touch "$PLUGIN_DIR/whitelist.txt"
+fi
+if [ ! -f "$PLUGIN_DIR/blacklist.txt" ]; then
+    log_and_show "WARNING: blacklist.txt still missing after git checkout - creating empty file"
+    touch "$PLUGIN_DIR/blacklist.txt"
+fi
 chown fpp:fpp "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
 chmod 664 "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
 
