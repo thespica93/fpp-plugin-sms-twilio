@@ -1177,14 +1177,25 @@ def index():
                         {% if not config.get('use_whitelist', False) %}
                         <h3>Name Format Rules</h3>
                         <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}
-                               onchange="if(this.checked) document.getElementById('two_words_max').checked = false;">
+                               onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning();">
                         <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
 
                         <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}
-                               onchange="if(this.checked) document.getElementById('one_word_only').checked = false;">
+                               onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning();">
                         <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
 
+                        <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
+                            ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
+                        </div>
+
                         <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                        <script>
+                        function checkFormatWarning() {
+                            var warn = !document.getElementById('one_word_only').checked && !document.getElementById('two_words_max').checked;
+                            document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
+                        }
+                        checkFormatWarning();
+                        </script>
                         {% endif %}
                     </div>
                 </div>
