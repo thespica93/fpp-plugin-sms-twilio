@@ -50,7 +50,7 @@ app = Flask(__name__)
 IFRAME_RESIZE_SCRIPT = """<script>
 (function() {
     function reportHeight() {
-        window.parent.postMessage({ type: 'iframeHeight', height: document.documentElement.scrollHeight }, '*');
+        window.parent.postMessage({ type: 'iframeHeight', height: document.body.scrollHeight }, '*');
     }
     window.addEventListener('load', reportHeight);
     new MutationObserver(reportHeight).observe(document.body, { subtree: true, childList: true, characterData: true });
