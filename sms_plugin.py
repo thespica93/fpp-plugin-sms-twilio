@@ -104,14 +104,20 @@ DEFAULT_CONFIG = {
     "scroll_speed": 20,
     "text_offset_x": 0,
     "text_offset_y": 0,
-    "send_sms_responses": False,
-    "response_success": "Thanks! Your name will appear on our display soon! 🎄",
-    "response_profanity": "Sorry, your message contains inappropriate content and cannot be displayed.",
-    "response_blocked": "You have been blocked from sending messages.",
+    "sms_response_success": False,
+    "sms_response_profanity": False,
+    "sms_response_rate_limited": False,
+    "sms_response_duplicate": False,
+    "sms_response_invalid_format": False,
+    "sms_response_not_whitelisted": False,
+    "sms_response_blocked": False,
+    "response_success": "Merry Christmas! Your name will appear on our display soon! 🎄",
+    "response_profanity": "Sorry, your message contains inappropriate content and cannot be displayed. Please keep within the Christmas spirit! 🎅",
+    "response_blocked": "Sorry, Your phone number has been blocked from sending messages.",
     "response_rate_limited": "You've reached the maximum number of messages allowed. Please try again tomorrow!",
     "response_duplicate": "You've already sent this name today!",
     "response_invalid_format": "Please send only a name (1-2 words, no sentences).",
-    "response_not_whitelisted": "Sorry, that name is not on our approved list.",
+    "response_not_whitelisted": "Sorry, that name is not on our approved list and cannot be shown.",
 }
 
 config = DEFAULT_CONFIG.copy()
@@ -392,7 +398,7 @@ def is_on_whitelist(name):
 
 def send_sms_response(to_phone, message_type):
     """Send an SMS response to the user based on message type"""
-    if not config.get('send_sms_responses', False):
+    if not config.get(f'sms_response_{message_type}', False):
         return False
     
     if not twilio_client:
@@ -980,84 +986,61 @@ def poll_twilio():
                 
                 logging.info(f"📱 NEW SMS from {from_number[-4:]}: '{body}'")
                 
-                if is_blocked(from_number):
-                    logging.info(f"🚫 Blocked number: {from_number}")
-                    log_message(from_number, body, "", "blocked")
-                    send_sms_response(from_number, "blocked")
-                    last_message_sid = msg.sid
-                    save_last_sid(msg.sid)
-                    continue
-                
-                msg_count = get_message_count(from_number)
-                max_msgs = config.get('max_messages_per_phone', 0)
-                if max_msgs > 0 and msg_count >= max_msgs:
-                    logging.info(f"⛔ Rate limited: {from_number}")
-                    log_message(from_number, body, "", "rate_limited")
-                    send_sms_response(from_number, "rate_limited")
-                    last_message_sid = msg.sid
-                    save_last_sid(msg.sid)
-                    continue
-                
-                name = extract_name(body)
-                logging.info(f"👤 Extracted name: '{name}'")
-                
                 try:
-                    if has_sent_name_today(from_number, name):
-                        logging.info(f"🔄 Duplicate name from same phone today: {name} from {from_number[-4:]}")
-                        log_message(from_number, body, name, "duplicate_name_today")
-                        send_sms_response(from_number, "duplicate")
-                        last_message_sid = msg.sid
-                        save_last_sid(msg.sid)
-                        continue
-                    
-                    logging.info(f"🔍 Checking name format validity...")
-                    is_valid, _ = is_valid_name(name)
-                    logging.info(f"🔍 Name format check result: valid={is_valid}")
-                    
-                    if not is_valid:
-                        logging.info(f"❌ Rejected invalid name format: {body}")
-                        log_message(from_number, body, name, "invalid_format")
-                        send_sms_response(from_number, "invalid_format")
-                        last_message_sid = msg.sid
-                        save_last_sid(msg.sid)
-                        continue
-                    
-                    # Check whitelist first if enabled
-                    logging.info(f"🔍 Checking whitelist...")
-                    if not is_on_whitelist(name):
-                        logging.info(f"❌ Rejected name not on whitelist: {name}")
-                        log_message(from_number, body, name, "not_on_whitelist")
-                        send_sms_response(from_number, "not_whitelisted")
-                        last_message_sid = msg.sid
-                        save_last_sid(msg.sid)
-                        continue
-                    
-                    # Only check profanity if whitelist is disabled or name passed whitelist
-                    logging.info(f"🔍 Checking profanity...")
-                    if config['profanity_filter'] and contains_profanity(body):
-                        logging.info(f"❌ Rejected profanity from {from_number}")
-                        log_message(from_number, body, name, "profanity")
-                        send_sms_response(from_number, "profanity")
-                        last_message_sid = msg.sid
-                        save_last_sid(msg.sid)
-                        continue
-                    
-                    logging.info(f"📋 Adding to queue...")
-                    success = add_to_queue(name, from_number, body)
-                    logging.info(f"📋 Add to queue result: {success}")
-                    
-                    if success:
-                        logging.info(f"✅ SUCCESS! Queued: {name}")
-                        log_message(from_number, body, name, "queued")
-                        send_sms_response(from_number, "success")
+                    # Exactly one branch fires — only one SMS response is ever sent per message
+                    if is_blocked(from_number):
+                        logging.info(f"🚫 Blocked number: {from_number}")
+                        log_message(from_number, body, "", "blocked")
+                        send_sms_response(from_number, "blocked")
+
                     else:
-                        logging.info(f"❌ Error queuing: {name}")
-                        log_message(from_number, body, name, "error")
-                    
+                        name = extract_name(body)
+                        logging.info(f"👤 Extracted name: '{name}'")
+                        msg_count = get_message_count(from_number)
+                        max_msgs = config.get('max_messages_per_phone', 0)
+                        is_valid, _ = is_valid_name(name)
+
+                        if max_msgs > 0 and msg_count >= max_msgs:
+                            logging.info(f"⛔ Rate limited: {from_number}")
+                            log_message(from_number, body, "", "rate_limited")
+                            send_sms_response(from_number, "rate_limited")
+
+                        elif has_sent_name_today(from_number, name):
+                            logging.info(f"🔄 Duplicate name from same phone today: {name} from {from_number[-4:]}")
+                            log_message(from_number, body, name, "duplicate_name_today")
+                            send_sms_response(from_number, "duplicate")
+
+                        elif not is_valid:
+                            logging.info(f"❌ Rejected invalid name format: {body}")
+                            log_message(from_number, body, name, "invalid_format")
+                            send_sms_response(from_number, "invalid_format")
+
+                        elif not is_on_whitelist(name):
+                            logging.info(f"❌ Rejected name not on whitelist: {name}")
+                            log_message(from_number, body, name, "not_on_whitelist")
+                            send_sms_response(from_number, "not_whitelisted")
+
+                        elif config['profanity_filter'] and contains_profanity(body):
+                            logging.info(f"❌ Rejected profanity from {from_number}")
+                            log_message(from_number, body, name, "profanity")
+                            send_sms_response(from_number, "profanity")
+
+                        else:
+                            logging.info(f"📋 Adding to queue...")
+                            success = add_to_queue(name, from_number, body)
+                            logging.info(f"📋 Add to queue result: {success}")
+                            if success:
+                                logging.info(f"✅ SUCCESS! Queued: {name}")
+                                log_message(from_number, body, name, "queued")
+                                send_sms_response(from_number, "success")
+                            else:
+                                logging.info(f"❌ Error queuing: {name}")
+                                log_message(from_number, body, name, "error")
+
                     last_message_sid = msg.sid
                     save_last_sid(msg.sid)
                     logging.info(f"💾 Saved last message SID: {msg.sid[:10]}...")
-                    
+
                 except Exception as e:
                     logging.error(f"💥 EXCEPTION processing message: {e}")
                     import traceback
@@ -1191,6 +1174,7 @@ def index():
                         <label>Max Message Length:</label>
                         <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
 
+                        {% if not config.get('use_whitelist', False) %}
                         <h3>Name Format Rules</h3>
                         <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}
                                onchange="if(this.checked) document.getElementById('two_words_max').checked = false;">
@@ -1201,6 +1185,7 @@ def index():
                         <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
 
                         <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                        {% endif %}
                     </div>
                 </div>
 
@@ -1294,32 +1279,87 @@ def index():
         <div id="tab-sms" class="tab-content">
             <div class="section" style="border: 2px solid #2196F3; margin-top: 20px;">
                 <h2>📱 SMS Auto-Response Settings</h2>
-                <input type="checkbox" id="send_sms_responses" {{ 'checked' if config.get('send_sms_responses', False) else '' }}>
-                <label class="checkbox-label">✓ Enable Automatic SMS Responses</label><br>
-                <p class="help-text">💡 When enabled, users receive automatic text replies based on their message status</p>
+                <p class="help-text">💡 Enable a response for each event type individually. Only one response is ever sent per incoming message.</p>
+                <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:10px 14px; margin:10px 0; font-size:13px;">
+                    ⚠️ <strong>Message &amp; data rates may apply.</strong> Each auto-response costs ~$0.0079 (Twilio US rate). Standard carrier rates also apply to recipients.
+                </div>
 
-                <h3>Response Messages</h3>
+                <style>
+                    .resp-row { border: 1px solid #ddd; border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; background: #fafafa; }
+                    .resp-row.enabled { background: #f0f7ff; border-color: #90caf9; }
+                    .resp-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-weight: bold; font-size: 14px; }
+                    .resp-row textarea { opacity: 0.4; pointer-events: none; transition: opacity .2s; }
+                    .resp-row.enabled textarea { opacity: 1; pointer-events: auto; }
+                </style>
 
-                <label>✅ Success Message (when name is queued):</label>
-                <textarea id="response_success" rows="2">{{ config.get('response_success', 'Thanks! Your name will appear on our display soon! 🎄') }}</textarea>
+                <script>
+                function toggleResp(id) {
+                    var row = document.getElementById('row_' + id);
+                    row.classList.toggle('enabled', document.getElementById('sms_response_' + id).checked);
+                }
+                function initRespRows() {
+                    ['blocked','profanity','duplicate','invalid_format','rate_limited','not_whitelisted','success'].forEach(function(id) {
+                        toggleResp(id);
+                    });
+                }
+                </script>
 
-                <label>🚫 Profanity Detected:</label>
-                <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
+                <div id="row_blocked" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_blocked" {{ 'checked' if config.get('sms_response_blocked', False) else '' }} onchange="toggleResp('blocked')">
+                        <label for="sms_response_blocked">🚫 Blocked Number — Send Response</label>
+                    </div>
+                    <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
+                </div>
 
-                <label>⛔ Rate Limited:</label>
-                <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
+                <div id="row_profanity" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_profanity" {{ 'checked' if config.get('sms_response_profanity', False) else '' }} onchange="toggleResp('profanity')">
+                        <label for="sms_response_profanity">🤬 Profanity Detected — Send Response</label>
+                    </div>
+                    <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
+                </div>
 
-                <label>🔄 Duplicate Name:</label>
-                <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
+                <div id="row_duplicate" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_duplicate" {{ 'checked' if config.get('sms_response_duplicate', False) else '' }} onchange="toggleResp('duplicate')">
+                        <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
+                    </div>
+                    <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
+                </div>
 
-                <label>❌ Invalid Format:</label>
-                <textarea id="response_invalid_format" rows="2">{{ config.get('response_invalid_format', 'Please send only a name (1-2 words, no sentences).') }}</textarea>
+                <div id="row_invalid_format" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_invalid_format" {{ 'checked' if config.get('sms_response_invalid_format', False) else '' }} onchange="toggleResp('invalid_format')">
+                        <label for="sms_response_invalid_format">❌ Invalid Format — Send Response</label>
+                    </div>
+                    <textarea id="response_invalid_format" rows="2">{{ config.get('response_invalid_format', 'Please send only a name (1-2 words, no sentences).') }}</textarea>
+                </div>
 
-                <label>📋 Not on Whitelist:</label>
-                <textarea id="response_not_whitelisted" rows="2">{{ config.get('response_not_whitelisted', 'Sorry, that name is not on our approved list.') }}</textarea>
+                <div id="row_rate_limited" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_rate_limited" {{ 'checked' if config.get('sms_response_rate_limited', False) else '' }} onchange="toggleResp('rate_limited')">
+                        <label for="sms_response_rate_limited">⛔ Rate Limited — Send Response</label>
+                    </div>
+                    <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
+                </div>
 
-                <label>🚫 Blocked Number:</label>
-                <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
+                <div id="row_not_whitelisted" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_not_whitelisted" {{ 'checked' if config.get('sms_response_not_whitelisted', False) else '' }} onchange="toggleResp('not_whitelisted')">
+                        <label for="sms_response_not_whitelisted">📋 Not on Whitelist — Send Response</label>
+                    </div>
+                    <textarea id="response_not_whitelisted" rows="2">{{ config.get('response_not_whitelisted', 'Sorry, that name is not on our approved list.') }}</textarea>
+                </div>
+
+                <div id="row_success" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_success" {{ 'checked' if config.get('sms_response_success', False) else '' }} onchange="toggleResp('success')">
+                        <label for="sms_response_success">✅ Success — Send Response</label>
+                    </div>
+                    <textarea id="response_success" rows="2">{{ config.get('response_success', 'Thanks! Your name will appear on our display soon! 🎄') }}</textarea>
+                </div>
+
             </div>
         </div>
 
@@ -1343,7 +1383,7 @@ def index():
             <div class="section" style="border: 2px solid #FF9800;">
                 <h2>🧪 SMS Response Testing</h2>
                 <p style="color: #FF9800; font-size: 14px;">
-                    ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials and "Enable Automatic SMS Responses" checked in Settings.
+                    ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials and the response type enabled in the SMS Responses tab.
                 </p>
 
                 <label>Phone Number:</label>
@@ -1370,6 +1410,7 @@ def index():
         <script>
             window.onload = function() {
                 loadFPPData();
+                initRespRows();
             };
 
             function showTab(tabName, btn) {
@@ -1466,8 +1507,8 @@ def index():
                     display_duration: parseInt(document.getElementById('display_duration').value),
                     max_messages_per_phone: parseInt(document.getElementById('max_messages').value),
                     max_message_length: parseInt(document.getElementById('max_length').value),
-                    one_word_only: document.getElementById('one_word_only').checked,
-                    two_words_max: document.getElementById('two_words_max').checked,
+                    one_word_only: document.getElementById('one_word_only')?.checked ?? false,
+                    two_words_max: document.getElementById('two_words_max')?.checked ?? true,
                     profanity_filter: document.getElementById('profanity_filter').checked,
                     use_whitelist: document.getElementById('use_whitelist').checked,
                     fpp_host: document.getElementById('fpp_host').value,
@@ -1480,7 +1521,13 @@ def index():
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
                     text_position: document.getElementById('text_position').value,
                     message_template: document.getElementById('message_template').value,
-                    send_sms_responses: document.getElementById('send_sms_responses').checked,
+                    sms_response_success: document.getElementById('sms_response_success').checked,
+                    sms_response_profanity: document.getElementById('sms_response_profanity').checked,
+                    sms_response_rate_limited: document.getElementById('sms_response_rate_limited').checked,
+                    sms_response_duplicate: document.getElementById('sms_response_duplicate').checked,
+                    sms_response_invalid_format: document.getElementById('sms_response_invalid_format').checked,
+                    sms_response_not_whitelisted: document.getElementById('sms_response_not_whitelisted').checked,
+                    sms_response_blocked: document.getElementById('sms_response_blocked').checked,
                     response_success: document.getElementById('response_success').value,
                     response_profanity: document.getElementById('response_profanity').value,
                     response_rate_limited: document.getElementById('response_rate_limited').value,
