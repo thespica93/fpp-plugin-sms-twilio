@@ -1088,7 +1088,7 @@ Aloise
 Aloisia
 Aloma
 Alona
-Alo�a
+Aloña
 Alondra
 Alonso
 Alonzo
@@ -1365,7 +1365,7 @@ Anastasiya
 Anastassia
 Anatael
 Anatalia
-A�aterve
+Añaterve
 Anatola
 Anatole
 Anatoli
@@ -1457,7 +1457,7 @@ Anelis
 Aneliya
 Aner
 Anes
-A�es
+Añes
 Anesia
 Anesio
 Anestassia
@@ -1881,7 +1881,7 @@ Argia
 Argider
 Argimira
 Argimiro
-Argi�e
+Argiñe
 Argoitz
 Arhane
 Arhimo
@@ -1918,7 +1918,7 @@ Arik
 Arild
 Arima
 Arina
-Ari�e
+Ariñe
 Arion
 Aris
 Arismendy
@@ -2223,7 +2223,7 @@ Atocha
 Atou
 Atreyu
 Atri
-Atsegi�e
+Atsegiñe
 Atsuko
 Atsushi
 Atta
@@ -2577,7 +2577,7 @@ Bangali
 Bangally
 Bangaly
 Banna
-Ba�os
+Baños
 Banta
 Banu
 Bao
@@ -2701,8 +2701,8 @@ Beckie
 Becky
 Beda
 Bee
-Bego�a
-Bego�e
+Begoña
+Begoñe
 Begonia
 Begonya
 Begum
@@ -2768,7 +2768,7 @@ Benaouda
 Benardina
 Benardino
 Benat
-Be�at
+Beñat
 Benayga
 Bencomo
 Bendaoud
@@ -3522,9 +3522,9 @@ Candra
 Candy
 Candyce
 Canek
-Ca�os
-Ca�osanto
-Ca�osantos
+Caños
+Cañosanto
+Cañosantos
 Cantia
 Canto
 Canuta
@@ -3604,7 +3604,7 @@ Carmen
 Carmencita
 Carmenza
 Carmina
-Carmi�a
+Carmiña
 Carminda
 Carmine
 Carminia
@@ -3677,7 +3677,7 @@ Cassio
 Cassondra
 Cassy
 Casta
-Casta�ar
+Castañar
 Castellar
 Castillo
 Casto
@@ -4372,7 +4372,7 @@ Columbus
 Coman
 Comfort
 Con
-Concei�ao
+Conceiçao
 Concepcio
 Concepcion
 Conception
@@ -4405,7 +4405,7 @@ Consolacio
 Consolacion
 Consolata
 Consorcia
-Constan�a
+Constança
 Constance
 Constancia
 Constancio
@@ -5120,7 +5120,7 @@ Demofilo
 Dena
 Denae
 Denar
-De�e
+Deñe
 Deneen
 Denes
 Denese
@@ -5437,7 +5437,7 @@ Doe
 Doha
 Doina
 Doinita
-Dol�a
+Dolça
 Doll
 Dolley
 Dolli
@@ -5914,10 +5914,10 @@ Egoi
 Egoitz
 Egon
 Egor
-Eguski�e
+Eguskiñe
 Eguzki
 Eguzkine
-Eguzki�e
+Eguzkiñe
 Ehab
 Ehari
 Ehedei
@@ -5957,10 +5957,10 @@ Ekaterina
 Ekaterine
 Ekhi
 Ekhine
-Ekhi�e
+Ekhiñe
 Ekhiotz
 Eki
-Eki�e
+Ekiñe
 Ekram
 El
 Ela
@@ -6350,7 +6350,7 @@ Enaitz
 Enar
 Enara
 Enaut
-E�aut
+Eñaut
 Encarna
 Encarnacio
 Encarnacion
@@ -6547,11 +6547,11 @@ Esneda
 Esneider
 Esohe
 Esosa
-Espa�a
+España
 Espartaco
 Espectacion
 Espen
-Esperan�a
+Esperança
 Esperanto
 Esperanza
 Espino
@@ -7024,7 +7024,7 @@ Fawzi
 Fawzia
 Fay
 Faycal
-Fay�al
+Fayçal
 Faydra
 Faye
 Fayette
@@ -7325,7 +7325,7 @@ Fozia
 Fran
 Franc
 Franca
-Fran�ais
+Français
 France
 Francelina
 Francene
@@ -7350,9 +7350,9 @@ Franciska
 Franciszek
 Franck
 Franco
-Fran�ois
+François
 Francoise
-Fran�oise
+Françoise
 Francy
 Francyne
 Frank
@@ -7510,7 +7510,7 @@ Gaoussou
 Gara
 Garai
 Garazi
-Garbi�e
+Garbiñe
 Garcia
 Garcilaso
 Gardenia
@@ -8001,8 +8001,8 @@ Goldie
 Goldina
 Goldy
 Goliat
-Gon�al
-Gon�alo
+Gonçal
+Gonçalo
 Gontzal
 Gonzaga
 Gonzala
@@ -8040,9 +8040,9 @@ Goyo
 Grabiel
 Grabiela
 Graca
-Gra�a
+Graça
 Gracas
-Gra�as
+Graças
 Grace
 Gracia
 Gracian
@@ -9354,12 +9354,12 @@ Imtiaz
 In
 Ina
 Inacio
-I�ake
+Iñake
 Inaki
-I�aki
-I�aky
+Iñaki
+Iñaky
 Inam
-I�aqui
+Iñaqui
 Inar
 Inara
 Inas
@@ -9408,7 +9408,7 @@ Ingrida
 Ingunna
 Inha
 Inhar
-I�igo
+Iñigo
 Inka
 Inko
 Inma
@@ -9538,7 +9538,7 @@ Iron
 Ironim
 Irshad
 Iru
-Iru�a
+Iruña
 Irundina
 Irune
 Irvin
@@ -10089,7 +10089,7 @@ Jeaneth
 Jeanett
 Jeanetta
 Jeanette
-Jean-Fran�ois
+Jean-François
 Jeanice
 Jeanie
 Jeanine
@@ -10540,7 +10540,7 @@ Joie
 Joita
 Jojo
 Jokin
-Joki�e
+Jokiñe
 Jolanda
 Jolanta
 Jolee
@@ -12456,7 +12456,7 @@ Lleir
 Lleonard
 Llibert
 Llibertat
-Lloren�
+Llorenç
 Llorens
 Lloyd
 Lluc
@@ -13224,7 +13224,7 @@ Marbella
 Marbelys
 Marc
 Marca
-Mar�al
+Marçal
 Marcas
 Marce
 Marcel
@@ -13426,11 +13426,11 @@ Marilza
 Marimar
 Marin
 Marina
-Mari�a
+Mariña
 Marinalva
 Marinda
 Marine
-Mari�e
+Mariñe
 Marineide
 Marinel
 Marinela
@@ -13581,7 +13581,7 @@ Martinho
 Martiniana
 Martiniano
 Martino
-Marti�o
+Martiño
 Martins
 Martinus
 Martir
@@ -13997,7 +13997,7 @@ Mennana
 Merab
 Merari
 Merce
-Mer�e
+Merçe
 Merced
 Mercedes
 Mercedez
@@ -14483,8 +14483,8 @@ Monserrate
 Monsif
 Monssef
 Mont
-Monta�a
-Monta�as
+Montaña
+Montañas
 Monte
 Montemayor
 Montes
@@ -15357,7 +15357,7 @@ Ninive
 Ninnetta
 Ninnette
 Nino
-Ni�o
+Niño
 Ninon
 Ninoska
 Niobe
@@ -15557,7 +15557,7 @@ Numidia
 Nune
 Nunilon
 Nuno
-Nu�o
+Nuño
 Nunzia
 Nunzio
 Nur
@@ -16167,9 +16167,9 @@ Peli
 Peligros
 Pello
 Pen
-Pe�a
-Pe�arroya
-Pe�as
+Peña
+Peñarroya
+Peñas
 Pencho
 Penda
 Penelopa
@@ -16179,7 +16179,7 @@ Pengcheng
 Pengfei
 Pengpeng
 Penha
-Pe�itas
+Peñitas
 Penka
 Penko
 Penney
@@ -16377,7 +16377,7 @@ Pompeyo
 Pompilia
 Pompilio
 Pompiliu
-Pon�
+Ponç
 Poncho
 Ponciana
 Ponciano
@@ -17569,7 +17569,7 @@ Sabiha
 Sabin
 Sabina
 Sabine
-Sabi�e
+Sabiñe
 Sabiniana
 Sabiniano
 Sabino
@@ -18087,7 +18087,7 @@ Seni
 Senia
 Senida
 Senobia
-Se�or
+Señor
 Senorina
 Seny
 Sephira
@@ -18795,7 +18795,7 @@ Sommer
 Somna
 Son
 Sona
-So�a
+Soña
 Sonali
 Sonam
 Sonata
@@ -18843,8 +18843,8 @@ Sory
 Sosanna
 Sotera
 Sotero
-Soterra�a
-Soterra�o
+Soterraña
+Soterraño
 Sotirios
 Souaad
 Souad
@@ -19800,7 +19800,7 @@ Tonette
 Toney
 Tong
 Toni
-To�i
+Toñi
 Tonia
 Tonica
 Tonie
@@ -20367,7 +20367,7 @@ Vianney
 Viatcheslav
 Vibeke
 Vica
-Vicen�
+Vicenç
 Vicencia
 Vicencio
 Vicens
@@ -20440,7 +20440,7 @@ Vilmos
 Vilson
 Vin
 Vina
-Vi�as
+Viñas
 Vince
 Vincent
 Vincenza
@@ -22160,7 +22160,7 @@ Zurab
 Zurabi
 Zuria
 Zurine
-Zuri�e
+Zuriñe
 Zutoia
 Zuzana
 Zuzanna
