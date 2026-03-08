@@ -1,9 +1,9 @@
 <?php
 $host = preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST']);
-$pluginUrl = "http://$host:5000/";
+$pluginUrl = "http://$host:5000/messages";
 ?>
 <style>
-    #sms-plugin-frame {
+    #sms-messages-frame {
         width: 100%;
         border: none;
         display: block;
@@ -11,14 +11,14 @@ $pluginUrl = "http://$host:5000/";
         min-height: 400px;
     }
 </style>
-<iframe id="sms-plugin-frame" src="<?php echo htmlspecialchars($pluginUrl); ?>" scrolling="no"></iframe>
+<iframe id="sms-messages-frame" src="<?php echo htmlspecialchars($pluginUrl); ?>" scrolling="no"></iframe>
 <script>
-    document.getElementById('sms-plugin-frame').addEventListener('load', function() {
+    document.getElementById('sms-messages-frame').addEventListener('load', function() {
         window.scrollTo(0, 0);
     });
     window.addEventListener('message', function(e) {
         if (e.data && e.data.type === 'iframeHeight') {
-            document.getElementById('sms-plugin-frame').style.height = (e.data.height + 20) + 'px';
+            document.getElementById('sms-messages-frame').style.height = (e.data.height + 20) + 'px';
         }
         if (e.data && e.data.type === 'scrollTop') {
             window.scrollTo(0, 0);

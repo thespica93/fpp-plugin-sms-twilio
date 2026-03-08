@@ -1113,7 +1113,7 @@ def index():
             .tab-content.active { display: block; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.scrollTo(0,0);window.parent.document.documentElement.scrollTop=0;window.parent.document.body.scrollTop=0;}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
 
         <!-- Top action bar -->
         <div class="top-actions">
@@ -1946,10 +1946,9 @@ def view_whitelist():
             .error { color: #f44336; font-size: 13px; }
             .success { color: #4CAF50; font-size: 13px; }
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
-            #list_area { height: calc(100vh - 340px); min-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.scrollTo(0,0);window.parent.document.documentElement.scrollTop=0;window.parent.document.body.scrollTop=0;}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>📋 Name Whitelist</h1>
         <div class="info">
             Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
@@ -1991,6 +1990,7 @@ def view_whitelist():
         </div>
         <div id="hint" class="hint"></div>
         <div id="list_area"></div>
+        <div id="scroll_sentinel" style="height:1px;"></div>
 
         <script>
             var allNames = [];
@@ -2014,20 +2014,14 @@ def view_whitelist():
             var visibleCount = 100;
             var currentFiltered = [];
             var PAGE_SIZE = 100;
-            var sentinel = null;
             var observer = null;
 
             function setupSentinel() {
                 if (observer) observer.disconnect();
-                if (sentinel && sentinel.parentNode) sentinel.parentNode.removeChild(sentinel);
-                const area = document.getElementById('list_area');
-                sentinel = document.createElement('div');
-                sentinel.style.height = '1px';
-                area.appendChild(sentinel);
                 observer = new IntersectionObserver(function(entries) {
                     if (entries[0].isIntersecting) appendRows();
-                }, { root: area, rootMargin: '200px' });
-                observer.observe(sentinel);
+                }, { rootMargin: '400px' });
+                observer.observe(document.getElementById('scroll_sentinel'));
             }
 
             function renderTable() {
@@ -2066,7 +2060,6 @@ def view_whitelist():
                 const showing = currentFiltered.slice(0, visibleCount);
                 const area = document.getElementById('list_area');
                 area.innerHTML = '<table id="names_table"><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + buildRows(showing) + '</table>';
-                setupSentinel();
             }
 
             function buildRows(items) {
@@ -2169,10 +2162,9 @@ def view_blacklist_page():
             .error { color: #f44336; font-size: 13px; }
             .success { color: #4CAF50; font-size: 13px; }
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
-            #list_area { height: calc(100vh - 340px); min-height: 400px; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.scrollTo(0,0);window.parent.document.documentElement.scrollTop=0;window.parent.document.body.scrollTop=0;}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🚫 Profanity Blacklist</h1>
         <div class="info">
             ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
@@ -2214,6 +2206,7 @@ def view_blacklist_page():
         </div>
         <div id="hint" class="hint"></div>
         <div id="list_area"></div>
+        <div id="scroll_sentinel" style="height:1px;"></div>
 
         <script>
             var allWords = [];
@@ -2237,20 +2230,14 @@ def view_blacklist_page():
             var visibleCount = 100;
             var currentFiltered = [];
             var PAGE_SIZE = 100;
-            var sentinel = null;
             var observer = null;
 
             function setupSentinel() {
                 if (observer) observer.disconnect();
-                if (sentinel && sentinel.parentNode) sentinel.parentNode.removeChild(sentinel);
-                const area = document.getElementById('list_area');
-                sentinel = document.createElement('div');
-                sentinel.style.height = '1px';
-                area.appendChild(sentinel);
                 observer = new IntersectionObserver(function(entries) {
                     if (entries[0].isIntersecting) appendRows();
-                }, { root: area, rootMargin: '200px' });
-                observer.observe(sentinel);
+                }, { rootMargin: '400px' });
+                observer.observe(document.getElementById('scroll_sentinel'));
             }
 
             function renderTable() {
@@ -2289,7 +2276,6 @@ def view_blacklist_page():
                 const showing = currentFiltered.slice(0, visibleCount);
                 const area = document.getElementById('list_area');
                 area.innerHTML = '<table id="words_table"><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + buildRows(showing) + '</table>';
-                setupSentinel();
             }
 
             function buildRows(items) {
@@ -2384,7 +2370,7 @@ def view_blocklist():
             .no-blocked { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.scrollTo(0,0);window.parent.document.documentElement.scrollTop=0;window.parent.document.body.scrollTop=0;}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🚫 Blocked Phone Numbers</h1>
         <div class="info">
             ℹ️ Blocked numbers cannot send messages | Total Blocked: {{ blocklist|length }}
@@ -2450,7 +2436,7 @@ def status_page():
             button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){{window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){{window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{{window.parent.postMessage({{type:'scrollTop'}},'*');}}catch(e){{}}}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🔧 FPP SMS Plugin Status v2.5</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
@@ -2506,7 +2492,7 @@ def view_messages():
             .queue-item { background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
         </style>
     </head>
-    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.scrollTo(0,0);window.parent.document.documentElement.scrollTop=0;window.parent.document.body.scrollTop=0;}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>📋 Message History & Queue Status</h1>
 
         <div class="queue-info">

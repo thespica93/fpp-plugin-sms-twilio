@@ -32,8 +32,8 @@ $docsBase   = $githubBase . "/blob/main/docs";
     <h2>📱 FPP SMS Twilio Plugin — Help &amp; Documentation</h2>
     <p>This plugin lets visitors text their name to your Twilio number and have it appear on your pixel LED display.</p>
 
-    <a href="http://<?php echo $_SERVER['HTTP_HOST']; ?>:5000" class="ui-link">🔧 Open Plugin Config UI</a>
-    <a href="http://<?php echo $_SERVER['HTTP_HOST']; ?>:5000/messages" class="ui-link secondary">📋 View Message Queue</a>
+    <a href="plugin.php?_menu=content&plugin=fpp-plugin-sms-twilio&page=ui.php" target="_top" class="ui-link">🔧 Open Plugin Config UI</a>
+    <a href="plugin.php?_menu=content&plugin=fpp-plugin-sms-twilio&page=messages.php" target="_top" class="ui-link secondary">📋 View Message Queue</a>
     <a href="<?php echo $githubBase; ?>" target="_blank" class="ui-link secondary">📖 GitHub Repository</a>
 
     <h2>📚 Documentation</h2>
@@ -91,7 +91,8 @@ $docsBase   = $githubBase . "/blob/main/docs";
     <div class="quick-ref">
     <table>
         <tr><th>#</th><th>Check</th><th>If it fails</th></tr>
-        <tr><td>2</td><td>Rate limit not exceeded</td><td>Auto-response: rate limited</td></tr>
+        <tr><td>1</td><td>Phone number is not blocked</td><td>Auto-response: number blocked</td></tr>
+        <tr><td>2</td><td>Rate limit exceeded</td><td>Auto-response: rate limited</td></tr>
         <tr><td>3</td><td>Name format is valid (1–2 words, letters only)</td><td>Auto-response: invalid format</td></tr>
         <tr><td>4</td><td>Not a duplicate from same phone today</td><td>Auto-response: duplicate</td></tr>
         <tr><td>5</td><td>Profanity filter passes <span class="tag">if enabled</span></td><td>Auto-response: blocked</td></tr>
@@ -113,8 +114,5 @@ $docsBase   = $githubBase . "/blob/main/docs";
     <h2>🆘 Support</h2>
     <p>
         <a href="<?php echo $githubBase; ?>/issues" target="_blank" class="ui-link danger">🐛 Report a Bug on GitHub</a>
-        <a href="https://falconchristmas.com/" target="_blank" class="ui-link secondary">💬 FPP Community Forums</a>
     </p>
-    <p style="color:#666; font-size:13px;">Plugin version 2.5 &nbsp;|&nbsp; Built for the FPP Christmas light community 🎄</p>
-
 </div>
