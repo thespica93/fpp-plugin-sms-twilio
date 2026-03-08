@@ -1023,11 +1023,11 @@ def index():
     <head>
         <title>FPP SMS Plugin Configuration</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
             h1 { color: #4CAF50; }
-            .section { background: #f8f8f8; padding: 20px; margin: 20px 0; border-radius: 5px; border: 1px solid #ddd; }
+            .section { background: #2a2a2a; padding: 20px; margin: 20px 0; border-radius: 5px; border: 1px solid #444; }
             label { display: block; margin: 10px 0 5px; font-weight: bold; }
-            input, select, textarea { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; background: #fff; color: #333; }
+            input, select, textarea { width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #555; border-radius: 4px; background: #333; color: #fff; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }
             button:hover { background: #45a049; }
             .test-btn { background: #2196F3; }
@@ -1040,10 +1040,10 @@ def index():
             input[type="checkbox"] { width: auto; }
             .success { color: #4CAF50; }
             .error { color: #f44336; }
-            .info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #90caf9; color: #333; }
-            .queue-info { background: #f3e5f5; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
+            .info { background: #1565C0; padding: 15px; border-radius: 5px; margin: 20px 0; }
+            .queue-info { background: #7B1FA2; padding: 15px; border-radius: 5px; margin: 20px 0; }
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
-            .help-text { font-size: 12px; color: #666; margin-top: 5px; }
+            .help-text { font-size: 12px; color: #aaa; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
         </style>
     </head>
@@ -1691,16 +1691,16 @@ def view_blocklist():
     <head>
         <title>Blocked Phone Numbers</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
             h1 { color: #f44336; }
             table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+            th, td { border: 1px solid #444; padding: 10px; text-align: left; }
             th { background: #f44336; color: white; }
-            tr:nth-child(even) { background: #f8f8f8; }
+            tr:nth-child(even) { background: #2a2a2a; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 10px 5px 10px 0; }
             .unblock-btn { background: #4CAF50; padding: 5px 10px; font-size: 12px; }
-            .info { background: #ffebee; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #ffcdd2; color: #333; }
-            .no-blocked { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
+            .info { background: #f44336; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; }
+            .no-blocked { background: #333; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
     <body>
@@ -1762,11 +1762,11 @@ def status_page():
     <head>
         <title>Plugin Status</title>
         <style>
-            body {{ font-family: monospace; background: #ffffff; color: #333; padding: 20px; }}
-            .section {{ background: #f5f5f5; padding: 15px; margin: 15px 0; border: 1px solid #ddd; }}
-            .ok {{ color: #4CAF50; }}
+            body {{ font-family: monospace; background: #1a1a1a; color: #0f0; padding: 20px; }}
+            .section {{ background: #000; padding: 15px; margin: 15px 0; border: 1px solid #0f0; }}
+            .ok {{ color: #0f0; }}
             .error {{ color: #f00; }}
-            button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
+            button {{ background: #0f0; color: #000; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
     <body>
@@ -1807,20 +1807,20 @@ def view_messages():
     <head>
         <title>Message History & Queue</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
             h1 { color: #4CAF50; }
             table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+            th, td { border: 1px solid #444; padding: 10px; text-align: left; }
             th { background: #4CAF50; color: white; }
-            tr:nth-child(even) { background: #f8f8f8; }
+            tr:nth-child(even) { background: #2a2a2a; }
             .displaying { background: #4CAF50 !important; color: white; font-weight: bold; }
-            .queued { color: #e65100; }
+            .queued { color: #FF9800; }
             .displayed { color: #4CAF50; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 10px 5px 10px 0; }
             .block-btn { background: #f44336; padding: 5px 10px; font-size: 12px; }
             .clear-btn { background: #f44336; }
-            .info { background: #e3f2fd; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #90caf9; color: #333; }
-            .queue-box { background: #f3e5f5; padding: 20px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
+            .info { background: #1565C0; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; }
+            .queue-box { background: #7B1FA2; padding: 20px; border-radius: 5px; margin: 20px 0; }
             .current-display { background: #4CAF50; padding: 15px; border-radius: 5px; margin: 10px 0; font-size: 18px; font-weight: bold; }
             .queue-item { background: #333; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
         </style>
