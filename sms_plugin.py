@@ -1155,6 +1155,7 @@ def index():
                         <input type="number" id="poll_interval" value="{{ config.poll_interval }}" min="1" max="60">
 
                         <button class="test-btn" onclick="testConnection()">🔌 Test Twilio Connection</button>
+                        <div id="twilio_test_result" style="margin-top: 8px; font-size: 14px;"></div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
@@ -1504,14 +1505,15 @@ def index():
             }
 
             function testConnection() {
-                document.getElementById('message').innerHTML = '<p>Testing Twilio connection...</p>';
+                const result = document.getElementById('twilio_test_result');
+                result.innerHTML = '<span style="color:#555;">Testing...</span>';
                 fetch('/api/test')
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        document.getElementById('message').innerHTML = '<p class="success">✅ Twilio connection successful!</p>';
+                        result.innerHTML = '<span style="color:#4CAF50;">✅ Twilio connection successful!</span>';
                     } else {
-                        document.getElementById('message').innerHTML = '<p class="error">❌ Connection failed: ' + data.error + '</p>';
+                        result.innerHTML = '<span style="color:#f44336;">❌ Connection failed: ' + data.error + '</span>';
                     }
                 });
             }
@@ -2000,10 +2002,16 @@ def view_whitelist():
                 });
             }
 
+            var visibleCount = 100;
+            var currentFiltered = [];
+            var PAGE_SIZE = 100;
+
             function renderTable() {
                 const query = document.getElementById('search').value.trim().toLowerCase();
                 const area = document.getElementById('list_area');
                 const hint = document.getElementById('hint');
+
+                visibleCount = PAGE_SIZE;
 
                 if (allNames.length === 0) {
                     hint.textContent = '';
@@ -2011,30 +2019,40 @@ def view_whitelist():
                     return;
                 }
 
-                let filtered = query
+                currentFiltered = query
                     ? allNames.filter(n => n.toLowerCase().includes(query))
                     : allNames;
 
-                const LIMIT = 100;
-                const showing = filtered.slice(0, LIMIT);
-
-                if (query) {
-                    hint.textContent = filtered.length === 0
-                        ? 'No names match "' + query + '"'
-                        : 'Showing ' + Math.min(filtered.length, LIMIT) + ' of ' + filtered.length + ' matches';
-                } else {
-                    hint.textContent = 'Showing first ' + showing.length + ' of ' + allNames.length.toLocaleString() + ' names — use search to find specific names';
-                }
-
-                if (filtered.length === 0) {
+                if (currentFiltered.length === 0) {
+                    hint.textContent = 'No names match "' + query + '"';
                     area.innerHTML = '<div class="empty"><p>No names match your search.</p></div>';
                     return;
                 }
 
+                updateHint();
+                const showing = currentFiltered.slice(0, visibleCount);
+                let rows = buildRows(showing);
+                area.innerHTML = '<table id="names_table"><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + rows + '</table>';
+            }
+
+            function appendRows() {
+                if (visibleCount >= currentFiltered.length) return;
+                visibleCount = Math.min(visibleCount + PAGE_SIZE, currentFiltered.length);
+                updateHint();
+                const showing = currentFiltered.slice(0, visibleCount);
+                const table = document.getElementById('names_table');
+                if (!table) return;
+                const tbody = table.querySelector('tbody') || table;
+                // Remove existing rows except header
+                while (tbody.rows.length > 1) tbody.deleteRow(1);
+                tbody.innerHTML += buildRows(showing);
+            }
+
+            function buildRows(items) {
                 let rows = '';
-                for (let i = 0; i < showing.length; i += 2) {
-                    const a = showing[i];
-                    const b = showing[i + 1];
+                for (let i = 0; i < items.length; i += 2) {
+                    const a = items[i];
+                    const b = items[i + 1];
                     rows += `<tr>` +
                         `<td style="text-transform:capitalize">${a}</td>` +
                         `<td><button class="remove-btn" onclick="removeName('${a}')">✕ Remove</button></td>` +
@@ -2043,8 +2061,26 @@ def view_whitelist():
                             : `<td></td><td></td>`) +
                         `</tr>`;
                 }
-                area.innerHTML = '<table><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + rows + '</table>';
+                return rows;
             }
+
+            function updateHint() {
+                const hint = document.getElementById('hint');
+                const query = document.getElementById('search').value.trim();
+                const showing = Math.min(visibleCount, currentFiltered.length);
+                if (query) {
+                    hint.textContent = 'Showing ' + showing + ' of ' + currentFiltered.length + ' matches';
+                } else {
+                    hint.textContent = 'Showing ' + showing + ' of ' + allNames.length.toLocaleString() + ' names' +
+                        (showing < allNames.length ? ' — scroll down to load more' : '');
+                }
+            }
+
+            window.addEventListener('scroll', function() {
+                if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 400) {
+                    appendRows();
+                }
+            });
 
             function addName() {
                 const input = document.getElementById('add_name');
@@ -2179,10 +2215,16 @@ def view_blacklist_page():
                 });
             }
 
+            var visibleCount = 100;
+            var currentFiltered = [];
+            var PAGE_SIZE = 100;
+
             function renderTable() {
                 const query = document.getElementById('search').value.trim().toLowerCase();
                 const area = document.getElementById('list_area');
                 const hint = document.getElementById('hint');
+
+                visibleCount = PAGE_SIZE;
 
                 if (allWords.length === 0) {
                     hint.textContent = '';
@@ -2190,30 +2232,39 @@ def view_blacklist_page():
                     return;
                 }
 
-                let filtered = query
+                currentFiltered = query
                     ? allWords.filter(w => w.toLowerCase().includes(query))
                     : allWords;
 
-                const LIMIT = 100;
-                const showing = filtered.slice(0, LIMIT);
-
-                if (query) {
-                    hint.textContent = filtered.length === 0
-                        ? 'No words match "' + query + '"'
-                        : 'Showing ' + Math.min(filtered.length, LIMIT) + ' of ' + filtered.length + ' matches';
-                } else {
-                    hint.textContent = 'Showing first ' + showing.length + ' of ' + allWords.length.toLocaleString() + ' words — use search to find specific words';
-                }
-
-                if (filtered.length === 0) {
+                if (currentFiltered.length === 0) {
+                    hint.textContent = 'No words match "' + query + '"';
                     area.innerHTML = '<div class="empty"><p>No words match your search.</p></div>';
                     return;
                 }
 
+                updateHint();
+                const showing = currentFiltered.slice(0, visibleCount);
+                let rows = buildRows(showing);
+                area.innerHTML = '<table id="words_table"><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + rows + '</table>';
+            }
+
+            function appendRows() {
+                if (visibleCount >= currentFiltered.length) return;
+                visibleCount = Math.min(visibleCount + PAGE_SIZE, currentFiltered.length);
+                updateHint();
+                const showing = currentFiltered.slice(0, visibleCount);
+                const table = document.getElementById('words_table');
+                if (!table) return;
+                const tbody = table.querySelector('tbody') || table;
+                while (tbody.rows.length > 1) tbody.deleteRow(1);
+                tbody.innerHTML += buildRows(showing);
+            }
+
+            function buildRows(items) {
                 let rows = '';
-                for (let i = 0; i < showing.length; i += 2) {
-                    const a = showing[i];
-                    const b = showing[i + 1];
+                for (let i = 0; i < items.length; i += 2) {
+                    const a = items[i];
+                    const b = items[i + 1];
                     rows += `<tr>` +
                         `<td>${a}</td>` +
                         `<td><button class="remove-btn" onclick="removeWord('${a}')">✕ Remove</button></td>` +
@@ -2222,8 +2273,26 @@ def view_blacklist_page():
                             : `<td></td><td></td>`) +
                         `</tr>`;
                 }
-                area.innerHTML = '<table><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + rows + '</table>';
+                return rows;
             }
+
+            function updateHint() {
+                const hint = document.getElementById('hint');
+                const query = document.getElementById('search').value.trim();
+                const showing = Math.min(visibleCount, currentFiltered.length);
+                if (query) {
+                    hint.textContent = 'Showing ' + showing + ' of ' + currentFiltered.length + ' matches';
+                } else {
+                    hint.textContent = 'Showing ' + showing + ' of ' + allWords.length.toLocaleString() + ' words' +
+                        (showing < allWords.length ? ' — scroll down to load more' : '');
+                }
+            }
+
+            window.addEventListener('scroll', function() {
+                if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 400) {
+                    appendRows();
+                }
+            });
 
             function addWord() {
                 const input = document.getElementById('add_word');
