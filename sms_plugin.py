@@ -1057,8 +1057,6 @@ def index():
         </style>
     </head>
     <body>
-        <h1>🎄 FPP SMS Plugin Configuration v2.5</h1>
-
         <div class="info">
             <strong>ℹ️ Plugin Features:</strong><br>
             • Message queueing system (no cut-offs!)<br>
@@ -1126,6 +1124,30 @@ def index():
                         <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
                         <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
                         <div id="fpp_status"></div>
+                    </div>
+
+                    <div class="section">
+                        <h2>Profanity Filter</h2>
+                        <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
+                        <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
+                        <p class="help-text">ℹ️ Rejects messages with profanity (uses blacklist.txt, one word per line)</p>
+                    </div>
+
+                    <div class="section">
+                        <h2>Name Whitelist</h2>
+                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
+                        <label class="checkbox-label">✓ Enable — only allow approved names</label><br>
+                        <p class="help-text">ℹ️ When enabled, only names on this list are accepted.</p>
+
+                        <h3>Manage Whitelist</h3>
+                        <div style="display: flex; gap: 8px; margin: 8px 0;">
+                            <input type="text" id="whitelist_add_name" placeholder="Type a name to add..." style="margin-bottom: 0; flex: 1;" onkeydown="if(event.key==='Enter') addToWhitelist()">
+                            <button onclick="addToWhitelist()" style="margin: 0; white-space: nowrap; padding: 8px 14px;">+ Add</button>
+                        </div>
+                        <div id="whitelist_list" style="max-height: 200px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; padding: 8px; background: #fff; margin-top: 4px;">
+                            <p style="color: #999; font-size: 12px; margin: 0;">Loading...</p>
+                        </div>
+                        <p class="help-text">ℹ️ Names are stored lowercase. Names texted in are added automatically.</p>
                     </div>
                 </div>
             </div>
@@ -1224,20 +1246,6 @@ def index():
                 <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
             </div>
 
-            <div class="section">
-                <h2>Profanity Filter</h2>
-                <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
-                <label class="checkbox-label">✓ Enable Profanity Filter - Reject messages with profanity (uses blacklist.txt)</label><br>
-                <p class="help-text">ℹ️ Edit /home/fpp/media/config/blacklist.txt (one word per line, case-insensitive)</p>
-            </div>
-
-            <div class="section">
-                <h2>Name Whitelist (Optional)</h2>
-                <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
-                <label class="checkbox-label">✓ Enable Whitelist - Only allow approved names</label><br>
-                <p class="help-text">ℹ️ Edit /home/fpp/media/config/whitelist.txt (one name per line, case-insensitive)</p>
-            </div>
-
             <div class="section" style="border: 2px solid #2196F3;">
                 <h2>📱 SMS Auto-Response Settings</h2>
                 <input type="checkbox" id="send_sms_responses" {{ 'checked' if config.get('send_sms_responses', False) else '' }}>
@@ -1274,7 +1282,7 @@ def index():
         <div id="tab-testing" class="tab-content">
 
             <div class="section" style="border: 2px solid #FF9800; margin-top: 20px;">
-                <h2>🧪 Testing Tools</h2>
+                <h2>🧪 Message Testing</h2>
                 <p style="color: #FF9800; font-size: 14px;">
                     ⚠️ Use this to test messages without sending actual texts. Works without Twilio credentials.
                 </p>
@@ -1317,6 +1325,7 @@ def index():
         <script>
             window.onload = function() {
                 loadFPPData();
+                loadWhitelist();
             };
 
             function showTab(tabName, btn) {
@@ -1497,6 +1506,55 @@ def index():
                         }
                     }
                 });
+            }
+
+            function loadWhitelist() {
+                fetch('/api/whitelist')
+                .then(r => r.json())
+                .then(data => {
+                    const listDiv = document.getElementById('whitelist_list');
+                    if (!listDiv) return;
+                    if (!data.whitelist || data.whitelist.length === 0) {
+                        listDiv.innerHTML = '<p style="color: #999; font-size: 12px; margin: 0;">No names in whitelist yet.</p>';
+                        return;
+                    }
+                    listDiv.innerHTML = data.whitelist.map(name =>
+                        `<div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #eee;">
+                            <span style="text-transform: capitalize; font-size: 14px;">${name}</span>
+                            <button onclick="removeFromWhitelist('${name}')" style="background: #f44336; padding: 2px 10px; font-size: 12px; margin: 0;">✕</button>
+                        </div>`
+                    ).join('');
+                });
+            }
+
+            function addToWhitelist() {
+                const input = document.getElementById('whitelist_add_name');
+                const name = input.value.trim();
+                if (!name) return;
+                fetch('/api/whitelist/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: name})
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        input.value = '';
+                        loadWhitelist();
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                });
+            }
+
+            function removeFromWhitelist(name) {
+                fetch('/api/whitelist/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: name})
+                })
+                .then(r => r.json())
+                .then(() => loadWhitelist());
             }
 
             function sendTestSMS() {
@@ -1722,6 +1780,61 @@ def api_get_blocklist():
         return jsonify({"blocklist": blocklist})
     except Exception as e:
         return jsonify({"error": str(e)})
+
+@app.route('/api/whitelist')
+def api_get_whitelist():
+    try:
+        names = []
+        if os.path.exists(WHITELIST_FILE):
+            with open(WHITELIST_FILE, 'r') as f:
+                names = sorted([line.strip() for line in f if line.strip()])
+        return jsonify({"whitelist": names})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+@app.route('/api/whitelist/add', methods=['POST'])
+def api_add_whitelist():
+    global _whitelist_cache, _whitelist_mtime
+    try:
+        data = request.json
+        name = data.get('name', '').strip().lower()
+        if not name:
+            return jsonify({"success": False, "error": "Name is required"})
+        names = set()
+        if os.path.exists(WHITELIST_FILE):
+            with open(WHITELIST_FILE, 'r') as f:
+                names = {line.strip().lower() for line in f if line.strip()}
+        if name in names:
+            return jsonify({"success": False, "error": "Name already in whitelist"})
+        names.add(name)
+        with open(WHITELIST_FILE, 'w') as f:
+            f.write('\n'.join(sorted(names)) + '\n')
+        _whitelist_cache = None
+        _whitelist_mtime = None
+        logging.info(f"Added '{name}' to whitelist")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/whitelist/remove', methods=['POST'])
+def api_remove_whitelist():
+    global _whitelist_cache, _whitelist_mtime
+    try:
+        data = request.json
+        name = data.get('name', '').strip().lower()
+        names = set()
+        if os.path.exists(WHITELIST_FILE):
+            with open(WHITELIST_FILE, 'r') as f:
+                names = {line.strip().lower() for line in f if line.strip()}
+        names.discard(name)
+        with open(WHITELIST_FILE, 'w') as f:
+            f.write('\n'.join(sorted(names)) + '\n' if names else '')
+        _whitelist_cache = None
+        _whitelist_mtime = None
+        logging.info(f"Removed '{name}' from whitelist")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 @app.route('/blocklist')
 def view_blocklist():
