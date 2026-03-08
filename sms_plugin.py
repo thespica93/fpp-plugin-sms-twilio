@@ -1113,7 +1113,7 @@ def index():
             .tab-content.active { display: block; }
         </style>
     </head>
-    <body onload="window.scrollTo(0,0)">
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
 
         <!-- Top action bar -->
         <div class="top-actions">
@@ -1941,7 +1941,7 @@ def view_whitelist():
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body onload="window.scrollTo(0,0)">
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
         <h1>📋 Name Whitelist</h1>
         <div class="info">
             Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
@@ -2040,12 +2040,8 @@ def view_whitelist():
                 visibleCount = Math.min(visibleCount + PAGE_SIZE, currentFiltered.length);
                 updateHint();
                 const showing = currentFiltered.slice(0, visibleCount);
-                const table = document.getElementById('names_table');
-                if (!table) return;
-                const tbody = table.querySelector('tbody') || table;
-                // Remove existing rows except header
-                while (tbody.rows.length > 1) tbody.deleteRow(1);
-                tbody.innerHTML += buildRows(showing);
+                const area = document.getElementById('list_area');
+                area.innerHTML = '<table id="names_table"><tr><th>Name</th><th></th><th>Name</th><th></th></tr>' + buildRows(showing) + '</table>';
             }
 
             function buildRows(items) {
@@ -2053,11 +2049,13 @@ def view_whitelist():
                 for (let i = 0; i < items.length; i += 2) {
                     const a = items[i];
                     const b = items[i + 1];
+                    const ae = a.replace(/'/g, "&#39;");
+                    const be = b ? b.replace(/'/g, "&#39;") : '';
                     rows += `<tr>` +
                         `<td style="text-transform:capitalize">${a}</td>` +
-                        `<td><button class="remove-btn" onclick="removeName('${a}')">✕ Remove</button></td>` +
+                        `<td><button class="remove-btn" onclick="removeName('${ae}')">✕ Remove</button></td>` +
                         (b
-                            ? `<td style="text-transform:capitalize">${b}</td><td><button class="remove-btn" onclick="removeName('${b}')">✕ Remove</button></td>`
+                            ? `<td style="text-transform:capitalize">${b}</td><td><button class="remove-btn" onclick="removeName('${be}')">✕ Remove</button></td>`
                             : `<td></td><td></td>`) +
                         `</tr>`;
                 }
@@ -2154,7 +2152,7 @@ def view_blacklist_page():
             .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body onload="window.scrollTo(0,0)">
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
         <h1>🚫 Profanity Blacklist</h1>
         <div class="info">
             ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
@@ -2253,11 +2251,8 @@ def view_blacklist_page():
                 visibleCount = Math.min(visibleCount + PAGE_SIZE, currentFiltered.length);
                 updateHint();
                 const showing = currentFiltered.slice(0, visibleCount);
-                const table = document.getElementById('words_table');
-                if (!table) return;
-                const tbody = table.querySelector('tbody') || table;
-                while (tbody.rows.length > 1) tbody.deleteRow(1);
-                tbody.innerHTML += buildRows(showing);
+                const area = document.getElementById('list_area');
+                area.innerHTML = '<table id="words_table"><tr><th>Word</th><th></th><th>Word</th><th></th></tr>' + buildRows(showing) + '</table>';
             }
 
             function buildRows(items) {
@@ -2265,11 +2260,13 @@ def view_blacklist_page():
                 for (let i = 0; i < items.length; i += 2) {
                     const a = items[i];
                     const b = items[i + 1];
+                    const ae = a.replace(/'/g, "&#39;");
+                    const be = b ? b.replace(/'/g, "&#39;") : '';
                     rows += `<tr>` +
                         `<td>${a}</td>` +
-                        `<td><button class="remove-btn" onclick="removeWord('${a}')">✕ Remove</button></td>` +
+                        `<td><button class="remove-btn" onclick="removeWord('${ae}')">✕ Remove</button></td>` +
                         (b
-                            ? `<td>${b}</td><td><button class="remove-btn" onclick="removeWord('${b}')">✕ Remove</button></td>`
+                            ? `<td>${b}</td><td><button class="remove-btn" onclick="removeWord('${be}')">✕ Remove</button></td>`
                             : `<td></td><td></td>`) +
                         `</tr>`;
                 }
@@ -2356,7 +2353,7 @@ def view_blocklist():
             .no-blocked { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
-    <body onload="window.scrollTo(0,0)">
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
         <h1>🚫 Blocked Phone Numbers</h1>
         <div class="info">
             ℹ️ Blocked numbers cannot send messages | Total Blocked: {{ blocklist|length }}
@@ -2422,7 +2419,7 @@ def status_page():
             button {{ background: #4CAF50; color: white; padding: 10px; border: none; cursor: pointer; margin: 5px; }}
         </style>
     </head>
-    <body onload="window.scrollTo(0,0)">
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
         <h1>🔧 FPP SMS Plugin Status v2.5</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
@@ -2478,7 +2475,7 @@ def view_messages():
             .queue-item { background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
         </style>
     </head>
-    <body onload="window.scrollTo(0,0)">
+    <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';window.scrollTo(0,0);</script>
         <h1>📋 Message History & Queue Status</h1>
 
         <div class="queue-info">
@@ -2554,7 +2551,7 @@ def view_messages():
                 </td>
                 <td>
                     {% if msg.status != 'blocked' %}
-                    <button class="block-btn" onclick="showBlockModal('{{ msg.phone_full }}', '{{ msg.extracted_name }}')">🚫 Block</button>
+                    <button class="block-btn" data-phone="{{ msg.phone_full | e }}" data-name="{{ msg.extracted_name | e }}" onclick="showBlockModal(this.dataset.phone, this.dataset.name)">🚫 Block</button>
                     {% endif %}
                 </td>
             </tr>
