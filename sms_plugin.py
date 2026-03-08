@@ -1287,9 +1287,11 @@ def index():
                 <style>
                     .resp-row { border: 1px solid #ddd; border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; background: #fafafa; }
                     .resp-row.enabled { background: #f0f7ff; border-color: #90caf9; }
+                    .resp-row.locked { opacity: 0.5; pointer-events: none; background: #f0f0f0; border-color: #ccc; }
                     .resp-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-weight: bold; font-size: 14px; }
                     .resp-row textarea { opacity: 0.4; pointer-events: none; transition: opacity .2s; }
                     .resp-row.enabled textarea { opacity: 1; pointer-events: auto; }
+                    .resp-locked-note { font-size: 12px; color: #888; margin-top: 4px; font-style: italic; }
                 </style>
 
                 <script>
@@ -1328,11 +1330,17 @@ def index():
                     <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
                 </div>
 
-                <div id="row_invalid_format" class="resp-row">
+                <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_invalid_format" {{ 'checked' if config.get('sms_response_invalid_format', False) else '' }} onchange="toggleResp('invalid_format')">
+                        <input type="checkbox" id="sms_response_invalid_format"
+                               {{ 'checked' if config.get('sms_response_invalid_format', False) else '' }}
+                               {{ 'disabled' if config.get('use_whitelist', False) else '' }}
+                               onchange="toggleResp('invalid_format')">
                         <label for="sms_response_invalid_format">❌ Invalid Format — Send Response</label>
                     </div>
+                    {% if config.get('use_whitelist', False) %}
+                    <p class="resp-locked-note">⚠️ Invalid Format responses are disabled when the whitelist is active — all names are validated against the whitelist instead of format rules.</p>
+                    {% endif %}
                     <textarea id="response_invalid_format" rows="2">{{ config.get('response_invalid_format', 'Please send only a name (1-2 words, no sentences).') }}</textarea>
                 </div>
 
