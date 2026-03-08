@@ -1795,60 +1795,103 @@ def view_whitelist():
         <style>
             body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #4CAF50; }
-            table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-            th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+            table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+            th, td { border: 1px solid #ddd; padding: 8px 10px; text-align: left; }
             th { background: #4CAF50; color: white; }
             tr:nth-child(even) { background: #f5f5f5; }
             button { background: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; margin: 5px 5px 5px 0; }
             button:hover { background: #45a049; }
-            .remove-btn { background: #f44336; padding: 5px 12px; font-size: 12px; }
+            .remove-btn { background: #f44336; padding: 4px 10px; font-size: 12px; margin: 0; }
             .remove-btn:hover { background: #d32f2f; }
-            .info { background: #e8f5e9; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #c8e6c9; color: #333; }
-            .add-row { display: flex; gap: 10px; margin: 15px 0; }
-            .add-row input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
-            .add-btn { background: #2196F3; white-space: nowrap; }
+            .add-btn { background: #2196F3; }
             .add-btn:hover { background: #0b7dda; }
-            .empty { background: #f5f5f5; padding: 40px; text-align: center; border-radius: 5px; margin: 20px 0; }
-            .error { color: #f44336; font-size: 13px; margin: 5px 0; }
-            .success { color: #4CAF50; font-size: 13px; margin: 5px 0; }
+            .info { background: #e8f5e9; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 14px; border: 1px solid #c8e6c9; }
+            .add-row { display: flex; gap: 10px; margin: 12px 0; }
+            .add-row input { flex: 1; padding: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+            .search-row { display: flex; gap: 10px; margin: 12px 0; }
+            .search-row input { flex: 1; padding: 10px; border: 2px solid #4CAF50; border-radius: 4px; font-size: 14px; }
+            .hint { color: #888; font-size: 13px; margin: 6px 0; }
+            .error { color: #f44336; font-size: 13px; }
+            .success { color: #4CAF50; font-size: 13px; }
+            .empty { background: #f5f5f5; padding: 30px; text-align: center; border-radius: 5px; margin: 20px 0; }
         </style>
     </head>
     <body>
         <h1>📋 Name Whitelist</h1>
         <div class="info">
-            ℹ️ Only names on this list will be accepted when the whitelist is enabled. Names are case-insensitive. | <span id="count">Loading...</span>
+            ℹ️ Only names on this list are accepted when the whitelist is enabled (case-insensitive). &nbsp;|&nbsp; <strong id="count">Loading...</strong>
         </div>
         <button onclick="location.href='/'">← Back to Config</button>
         <button onclick="location.href='/messages'">📬 View Messages</button>
 
         <h3>Add a Name</h3>
         <div class="add-row">
-            <input type="text" id="add_name" placeholder="Enter a name to approve..." onkeydown="if(event.key==='Enter') addName()">
-            <button class="add-btn" onclick="addName()">+ Add Name</button>
+            <input type="text" id="add_name" placeholder="Type a name to approve and press Enter..." onkeydown="if(event.key==='Enter') addName()">
+            <button class="add-btn" onclick="addName()">+ Add</button>
         </div>
         <div id="add_result"></div>
 
+        <h3>Search / Browse</h3>
+        <div class="search-row">
+            <input type="text" id="search" placeholder="Search names... (e.g. John)" oninput="renderTable()">
+        </div>
+        <div id="hint" class="hint"></div>
         <div id="list_area"></div>
 
         <script>
+            var allNames = [];
+
             function loadWhitelist() {
+                document.getElementById('count').textContent = 'Loading...';
                 fetch('/api/whitelist')
                 .then(r => r.json())
                 .then(data => {
-                    const names = data.whitelist || [];
-                    document.getElementById('count').textContent = 'Total: ' + names.length;
-                    const area = document.getElementById('list_area');
-                    if (names.length === 0) {
-                        area.innerHTML = '<div class="empty"><h2>No names in whitelist yet</h2><p>Add names above to approve them.</p></div>';
-                        return;
-                    }
-                    area.innerHTML = '<table><tr><th>Approved Name</th><th>Action</th></tr>' +
-                        names.map(name =>
-                            `<tr><td style="text-transform: capitalize;">${name}</td>` +
-                            `<td><button class="remove-btn" onclick="removeName('${name}')">✕ Remove</button></td></tr>`
-                        ).join('') +
-                        '</table>';
+                    allNames = data.whitelist || [];
+                    document.getElementById('count').textContent = allNames.length.toLocaleString() + ' approved names';
+                    renderTable();
+                })
+                .catch(() => {
+                    document.getElementById('count').textContent = 'Error loading';
                 });
+            }
+
+            function renderTable() {
+                const query = document.getElementById('search').value.trim().toLowerCase();
+                const area = document.getElementById('list_area');
+                const hint = document.getElementById('hint');
+
+                if (allNames.length === 0) {
+                    hint.textContent = '';
+                    area.innerHTML = '<div class="empty"><h3>No names in whitelist yet</h3><p>Add names above to approve them.</p></div>';
+                    return;
+                }
+
+                let filtered = query
+                    ? allNames.filter(n => n.toLowerCase().includes(query))
+                    : allNames;
+
+                const LIMIT = 100;
+                const showing = filtered.slice(0, LIMIT);
+
+                if (query) {
+                    hint.textContent = filtered.length === 0
+                        ? 'No names match "' + query + '"'
+                        : 'Showing ' + Math.min(filtered.length, LIMIT) + ' of ' + filtered.length + ' matches';
+                } else {
+                    hint.textContent = 'Showing first ' + showing.length + ' of ' + allNames.length.toLocaleString() + ' names — use search to find specific names';
+                }
+
+                if (filtered.length === 0) {
+                    area.innerHTML = '<div class="empty"><p>No names match your search.</p></div>';
+                    return;
+                }
+
+                area.innerHTML = '<table><tr><th>Approved Name</th><th>Action</th></tr>' +
+                    showing.map(name =>
+                        `<tr><td style="text-transform:capitalize">${name}</td>` +
+                        `<td><button class="remove-btn" onclick="removeName('${name}')">✕ Remove</button></td></tr>`
+                    ).join('') +
+                    '</table>';
             }
 
             function addName() {
