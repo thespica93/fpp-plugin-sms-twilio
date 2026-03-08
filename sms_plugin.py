@@ -1125,14 +1125,15 @@ def index():
         <!-- Tab navigation -->
         <div class="tabs">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
+            <button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
         </div>
 
         <!-- Settings Tab -->
         <div id="tab-settings" class="tab-content active">
-
-            <!-- Two-column: Twilio + FPP Connection -->
             <div class="columns">
+
+                <!-- LEFT COLUMN: Twilio + FPP Display + Message Settings -->
                 <div class="column">
                     <div class="section">
                         <h2>Twilio Settings</h2>
@@ -1153,42 +1154,9 @@ def index():
                         <input type="number" id="poll_interval" value="{{ config.poll_interval }}" min="1" max="60">
 
                         <button class="test-btn" onclick="testConnection()">🔌 Test Twilio Connection</button>
-                    </div>
-                </div>
-                <div class="column">
-                    <div class="section">
-                        <h2>FPP Connection</h2>
-                        <label>FPP Host URL:</label>
-                        <input type="text" id="fpp_host" value="{{ config.fpp_host }}" placeholder="http://127.0.0.1">
-                        <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
-
-                        <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
-                        <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
-                        <div id="fpp_status"></div>
-                    </div>
-
-                    <div class="section">
-                        <h2>Filters</h2>
-                        <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
-                        <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
-                        <p class="help-text">ℹ️ Rejects messages containing words from blacklist.txt</p>
-                        <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-
-                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
-                        <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
-                        <p class="help-text">ℹ️ When enabled, only names on the approved list are accepted.</p>
-
-                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 10px;">📋 Manage Whitelist</button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="columns">
-                <div class="column">
-                    <div class="section">
-                        <h2>FPP Display Settings</h2>
+                        <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
                         <label>Default "Waiting" Playlist:</label>
                         <select id="default_playlist">
@@ -1231,9 +1199,36 @@ def index():
                         <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
                     </div>
                 </div>
+
+                <!-- RIGHT COLUMN: FPP Connection + Filters + Text Display -->
                 <div class="column">
                     <div class="section">
-                        <h2>Text Display Options</h2>
+                        <h2>FPP Connection</h2>
+                        <label>FPP Host URL:</label>
+                        <input type="text" id="fpp_host" value="{{ config.fpp_host }}" placeholder="http://127.0.0.1">
+                        <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
+
+                        <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
+                        <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
+                        <div id="fpp_status"></div>
+
+                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+                        <h2 style="margin-top: 0;">Filters</h2>
+
+                        <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
+                        <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
+                        <p class="help-text">ℹ️ Rejects messages containing words from blacklist.txt</p>
+                        <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
+
+                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+
+                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
+                        <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
+                        <p class="help-text">ℹ️ When enabled, only names on the approved list are accepted.</p>
+                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 10px;">📋 Manage Whitelist</button>
+
+                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+                        <h2 style="margin-top: 0;">Text Display Options</h2>
 
                         <label>Message Template:</label>
                         <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
@@ -1285,9 +1280,13 @@ def index():
                         <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
                     </div>
                 </div>
-            </div>
 
-            <div class="section" style="border: 2px solid #2196F3;">
+            </div>
+        </div>
+
+        <!-- SMS Responses Tab -->
+        <div id="tab-sms" class="tab-content">
+            <div class="section" style="border: 2px solid #2196F3; margin-top: 20px;">
                 <h2>📱 SMS Auto-Response Settings</h2>
                 <input type="checkbox" id="send_sms_responses" {{ 'checked' if config.get('send_sms_responses', False) else '' }}>
                 <label class="checkbox-label">✓ Enable Automatic SMS Responses</label><br>
@@ -1316,7 +1315,6 @@ def index():
                 <label>🚫 Blocked Number:</label>
                 <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
             </div>
-
         </div>
 
         <!-- Testing Tab -->
