@@ -27,11 +27,12 @@ from collections import deque
 import os
 
 # Configuration
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
 LOG_FILE = "/home/fpp/media/logs/sms_plugin.log"
 MESSAGE_LOG = "/home/fpp/media/logs/received_messages.json"
-BLACKLIST_FILE = "/home/fpp/media/config/blacklist.txt"
-WHITELIST_FILE = "/home/fpp/media/config/whitelist.txt"
+BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
+WHITELIST_FILE = os.path.join(PLUGIN_DIR, "whitelist.txt")
 LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
 BLOCKLIST_FILE = "/home/fpp/media/config/blocked_phones.json"
 
@@ -270,7 +271,7 @@ def load_whitelist():
         # Only reload if file changed or not yet loaded
         if _whitelist_cache is None or _whitelist_mtime != current_mtime:
             with open(WHITELIST_FILE, 'r') as f:
-                names = [line.strip().lower() for line in f if line.strip()]
+                names = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
             
             _whitelist_cache = names
             _whitelist_mtime = current_mtime
@@ -438,7 +439,7 @@ def load_blacklist():
         # Only reload if file changed or not yet loaded
         if _blacklist_cache is None or _blacklist_mtime != current_mtime:
             with open(BLACKLIST_FILE, 'r') as f:
-                words = [line.strip().lower() for line in f if line.strip()]
+                words = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
             
             # Pre-compile all regex patterns for maximum speed
             _blacklist_cache = [
