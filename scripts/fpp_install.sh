@@ -75,4 +75,7 @@ log_and_show "Installation complete!"
 log_and_show "Restart FPPD to start the service"
 log_and_show "========================================"
 
+# Trigger the "FPPD Restart Required" banner in FPP's UI
+setSetting "restartFlag" "1"
+
 exit 0
