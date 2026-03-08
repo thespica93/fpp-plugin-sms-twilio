@@ -85,7 +85,7 @@ if pgrep -f sms_plugin.py > /dev/null 2>&1; then
     pkill -f sms_plugin.py 2>/dev/null || true
     sleep 1
     PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
-    su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &" < /dev/null
+    setsid su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &" < /dev/null > /dev/null 2>&1
     log_and_show "SMS plugin service restarted"
 fi
 
