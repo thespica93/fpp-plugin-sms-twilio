@@ -51,24 +51,15 @@ pip3 install --break-system-packages --no-cache-dir requests==2.31.0 >> "$LOG" 2
 log_and_show "[3/3] Requests complete"
 
 # Create config files if they don't exist
-if [ ! -f "/home/fpp/media/config/blacklist.txt" ]; then
-cat > /home/fpp/media/config/blacklist.txt << 'EOF'
-fuck
-shit
-damn
-hell
-ass
-bitch
-crap
-bastard
-piss
-EOF
-fi
-
-[ ! -f "/home/fpp/media/config/whitelist.txt" ] && touch /home/fpp/media/config/whitelist.txt
 [ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json
 
-# Set permissions
+# whitelist.txt and blacklist.txt now ship with the plugin in the plugin directory.
+# Set permissions so fpp user can read/write them.
+PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
+chown fpp:fpp "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
+chmod 664 "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
+
+# Set permissions on config/logs directories
 chown -R fpp:fpp /home/fpp/media/config /home/fpp/media/logs 2>/dev/null
 touch /home/fpp/media/logs/sms_plugin.log
 chmod 666 /home/fpp/media/logs/sms_plugin.log
