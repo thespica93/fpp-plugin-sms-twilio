@@ -277,7 +277,7 @@ def load_whitelist():
         
         # Only reload if file changed or not yet loaded
         if _whitelist_cache is None or _whitelist_mtime != current_mtime:
-            with open(WHITELIST_FILE, 'r') as f:
+            with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 names = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
             
             _whitelist_cache = names
@@ -445,7 +445,7 @@ def load_blacklist():
         
         # Only reload if file changed or not yet loaded
         if _blacklist_cache is None or _blacklist_mtime != current_mtime:
-            with open(BLACKLIST_FILE, 'r') as f:
+            with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
                 words = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
             
             # Pre-compile all regex patterns for maximum speed
@@ -1065,15 +1065,6 @@ def index():
         </style>
     </head>
     <body>
-        <div class="info">
-            <strong>ℹ️ Plugin Features:</strong><br>
-            • Message queueing system (no cut-offs!)<br>
-            • Display duration controls how long each message shows<br>
-            • Profanity blacklist with whole-word matching<br>
-            • Optional name whitelist<br>
-            • Multi-line message templates with proper case conversion<br>
-            • FPP playlist switching and text overlay integration
-        </div>
 
         <div class="queue-info">
             <strong>🎬 Queue System:</strong><br>
@@ -1736,11 +1727,11 @@ def api_get_whitelist():
         names = []
         file_exists = os.path.exists(WHITELIST_FILE)
         if file_exists:
-            with open(WHITELIST_FILE, 'r') as f:
+            with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 names = sorted([line.strip() for line in f if line.strip() and not line.startswith('#')])
         return jsonify({"whitelist": names, "file_path": WHITELIST_FILE, "file_exists": file_exists})
     except Exception as e:
-        return jsonify({"error": str(e), "file_path": WHITELIST_FILE})
+        return jsonify({"error": str(e), "file_path": WHITELIST_FILE, "file_exists": os.path.exists(WHITELIST_FILE)})
 
 @app.route('/api/whitelist/add', methods=['POST'])
 def api_add_whitelist():
@@ -1752,12 +1743,12 @@ def api_add_whitelist():
             return jsonify({"success": False, "error": "Name is required"})
         names = set()
         if os.path.exists(WHITELIST_FILE):
-            with open(WHITELIST_FILE, 'r') as f:
+            with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 names = {line.strip().lower() for line in f if line.strip()}
         if name in names:
             return jsonify({"success": False, "error": "Name already in whitelist"})
         names.add(name)
-        with open(WHITELIST_FILE, 'w') as f:
+        with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
             f.write('\n'.join(sorted(names)) + '\n')
         _whitelist_cache = None
         _whitelist_mtime = None
@@ -1774,10 +1765,10 @@ def api_remove_whitelist():
         name = data.get('name', '').strip().lower()
         names = set()
         if os.path.exists(WHITELIST_FILE):
-            with open(WHITELIST_FILE, 'r') as f:
+            with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 names = {line.strip().lower() for line in f if line.strip()}
         names.discard(name)
-        with open(WHITELIST_FILE, 'w') as f:
+        with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
             f.write('\n'.join(sorted(names)) + '\n' if names else '')
         _whitelist_cache = None
         _whitelist_mtime = None
