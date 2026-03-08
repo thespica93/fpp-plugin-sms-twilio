@@ -12,7 +12,7 @@ $docsBase   = $githubBase . "/blob/main/docs";
     .doc-card { background: #f9f9f9; border: 1px solid #ddd; border-radius: 6px; padding: 14px 16px; text-decoration: none; color: #333; display: block; transition: box-shadow .15s; }
     .doc-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.15); text-decoration: none; color: #333; }
     .doc-card .icon { font-size: 22px; margin-bottom: 6px; }
-    .doc-card .title { font-weight: bold; font-size: 15px; margin-bottom: 4px; }
+    .doc-card .title { font-weight: bold; font-size: 15px; margin-bottom: 4px; color: #111 !important; }
     .doc-card .desc { font-size: 13px; color: #666; }
     .quick-ref table { width: 100%; border-collapse: collapse; margin: 10px 0; }
     .quick-ref th { background: #4CAF50; color: white; padding: 8px 10px; text-align: left; }
@@ -32,8 +32,8 @@ $docsBase   = $githubBase . "/blob/main/docs";
     <h2>📱 FPP SMS Twilio Plugin — Help &amp; Documentation</h2>
     <p>This plugin lets visitors text their name to your Twilio number and have it appear on your pixel LED display.</p>
 
-    <a href="http://<?php echo $_SERVER['HTTP_HOST']; ?>:5000" target="_blank" class="ui-link">🔧 Open Plugin Config UI</a>
-    <a href="http://<?php echo $_SERVER['HTTP_HOST']; ?>:5000/messages" target="_blank" class="ui-link secondary">📋 View Message Queue</a>
+    <a href="http://<?php echo $_SERVER['HTTP_HOST']; ?>:5000" class="ui-link">🔧 Open Plugin Config UI</a>
+    <a href="http://<?php echo $_SERVER['HTTP_HOST']; ?>:5000/messages" class="ui-link secondary">📋 View Message Queue</a>
     <a href="<?php echo $githubBase; ?>" target="_blank" class="ui-link secondary">📖 GitHub Repository</a>
 
     <h2>📚 Documentation</h2>
