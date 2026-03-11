@@ -1266,7 +1266,7 @@ def index():
                                     ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
                                 </div>
                             </div>
-                            <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                            <p id="hyphen_note" class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
                         </div>
 
                         <script>
@@ -1285,8 +1285,11 @@ def index():
                         }
                         function checkFormatWarning() {
                             var whitelistOn = document.getElementById('use_whitelist').checked;
-                            var warn = !whitelistOn && !document.getElementById('one_word_only').checked && !document.getElementById('two_words_max').checked;
+                            var oneWord = document.getElementById('one_word_only').checked;
+                            var twoWords = document.getElementById('two_words_max').checked;
+                            var warn = !whitelistOn && !oneWord && !twoWords;
                             document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
+                            document.getElementById('hyphen_note').style.opacity = (whitelistOn || oneWord || twoWords) ? '1' : '0.4';
                         }
                         updateFormatRules();
                         </script>
