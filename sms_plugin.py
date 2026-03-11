@@ -840,7 +840,7 @@ def start_default_playlist():
             command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
         else:
             command = "Start Playlist"
-            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/false"
+            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/true"
 
         logging.info(f"▶️  Starting default playlist: {default_playlist}")
         logging.info(f"   URL: {command_url}")
@@ -2895,37 +2895,37 @@ def view_messages():
 
 @app.route('/api/activate', methods=['GET', 'POST'])
 def api_activate():
-    """FPP scheduler hook: enable the plugin, start polling, and start the default playlist"""
+    """FPP scheduler hook: start the waiting playlist on loop and enable SMS polling.
+    The Flask service itself is always running (started by postStart.sh with FPP).
+    This only controls whether guests can send messages and whether the waiting
+    playlist is playing."""
     global polling_thread, stop_polling
-    config['enabled'] = True
     stop_polling = False
-    save_config()
 
-    # Start polling thread if not already running
-    if not polling_thread or not polling_thread.is_alive():
-        if twilio_client:
+    # Enable SMS polling if Twilio is configured
+    if twilio_client:
+        if not polling_thread or not polling_thread.is_alive():
             polling_thread = threading.Thread(target=poll_twilio, daemon=True)
             polling_thread.start()
-            logging.info("▶️  Activate: polling thread started")
-        else:
-            logging.warning("⚠️  Activate: Twilio credentials not configured, polling not started")
+            logging.info("▶️  Activate: SMS polling started")
+    else:
+        logging.warning("⚠️  Activate: Twilio credentials not configured, polling not started")
 
-    # Start the default waiting playlist
+    # Start the default waiting playlist on loop
     start_default_playlist()
 
-    logging.info("✅ Plugin activated via /api/activate")
-    return jsonify({"success": True, "message": "Twilio SMS plugin activated"})
+    logging.info("✅ TwilioStart: waiting playlist started, SMS polling active")
+    return jsonify({"success": True, "message": "Twilio SMS plugin activated — waiting playlist started"})
 
 
 @app.route('/api/deactivate', methods=['GET', 'POST'])
 def api_deactivate():
-    """FPP scheduler hook: disable the plugin and stop polling"""
+    """FPP scheduler hook: stop SMS polling. The Flask service keeps running
+    so the UI and settings remain accessible."""
     global stop_polling
-    config['enabled'] = False
     stop_polling = True
-    save_config()
-    logging.info("🛑 Plugin deactivated via /api/deactivate")
-    return jsonify({"success": True, "message": "Twilio SMS plugin deactivated"})
+    logging.info("🛑 TwilioStop: SMS polling stopped")
+    return jsonify({"success": True, "message": "Twilio SMS plugin deactivated — SMS polling stopped"})
 
 
 if __name__ == '__main__':
