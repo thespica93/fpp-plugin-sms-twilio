@@ -775,7 +775,7 @@ def send_to_fpp(name):
                     color_encoded = urllib.parse.quote(text_color)
                     
                     # Command: Model/AutoEnable/Effect/Message/Color/Position/Speed/Font/FontSize/AntiAlias/Direction/Iterate
-                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{message_for_url}/{color_encoded}/{urllib.parse.quote(position_value)}/{scroll_speed}/{text_font}/{font_size}/1/{direction}/0"
+                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{message_for_url}/{color_encoded}/{urllib.parse.quote(position_value)}/{scroll_speed}/{urllib.parse.quote(text_font)}/{font_size}/1/{direction}/1"
                     
                     logging.info(f"📡 Sending Overlay Model Effect (Scroll Text):")
                     logging.info(f"   Message to display: {display_message}")
@@ -794,7 +794,7 @@ def send_to_fpp(name):
                     color_encoded = urllib.parse.quote(text_color)
                     
                     # Command: Model/AutoEnable/Effect/Color/Font/FontSize/AntiAlias/Position/0/Duration/Text
-                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{color_encoded}/{text_font}/{font_size}/1/{position_value}/0/{display_duration}/{message_for_url}"
+                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{color_encoded}/{urllib.parse.quote(text_font)}/{font_size}/1/{position_value}/0/{display_duration}/{message_for_url}"
                     
                     logging.info(f"📡 Sending Overlay Model Effect (Static Text):")
                     logging.info(f"   Message to display: {display_message}")
@@ -1488,6 +1488,10 @@ def index():
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
                 document.getElementById('tab-' + tabName).classList.add('active');
                 btn.classList.add('active');
+                // Re-report height after layout settles so iframe resizes correctly
+                requestAnimationFrame(function() {
+                    window.parent.postMessage({ type: 'iframeHeight', height: document.body.scrollHeight }, '*');
+                });
             }
 
             function loadFPPData() {
