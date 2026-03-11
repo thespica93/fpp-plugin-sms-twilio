@@ -1270,6 +1270,7 @@ def index():
                         </div>
 
                         <script>
+                        var _formatRulesInitialized = false;
                         function updateFormatRules() {
                             var whitelistOn = document.getElementById('use_whitelist').checked;
                             var inputs = document.getElementById('format_rules_inputs');
@@ -1280,7 +1281,11 @@ def index():
                             if (whitelistOn) {
                                 document.getElementById('one_word_only').checked = false;
                                 document.getElementById('two_words_max').checked = false;
+                            } else if (_formatRulesInitialized) {
+                                // User just turned whitelist off — restore two words as default
+                                document.getElementById('two_words_max').checked = true;
                             }
+                            _formatRulesInitialized = true;
                             checkFormatWarning();
                         }
                         function checkFormatWarning() {
@@ -1288,8 +1293,9 @@ def index():
                             var oneWord = document.getElementById('one_word_only').checked;
                             var twoWords = document.getElementById('two_words_max').checked;
                             var warn = !whitelistOn && !oneWord && !twoWords;
+                            var rulesActive = !whitelistOn && (oneWord || twoWords);
                             document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
-                            document.getElementById('hyphen_note').style.opacity = (whitelistOn || oneWord || twoWords) ? '1' : '0.4';
+                            document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
                         }
                         updateFormatRules();
                         </script>
