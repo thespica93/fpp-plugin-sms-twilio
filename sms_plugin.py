@@ -823,58 +823,76 @@ def send_to_fpp(name):
         import traceback
         logging.error(traceback.format_exc())
         return False
+def start_default_playlist():
+    """Start the configured default waiting playlist/sequence on loop"""
+    import urllib.parse
+    fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+    default_playlist = config.get('default_playlist', '')
+
+    if not default_playlist:
+        logging.info("ℹ️  No default playlist configured — skipping auto-start")
+        return False
+
+    try:
+        if default_playlist.startswith('seq:'):
+            seq_file = default_playlist[4:]
+            command = "Start Sequence"
+            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
+        else:
+            command = "Start Playlist"
+            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/false"
+
+        logging.info(f"▶️  Starting default playlist: {default_playlist}")
+        logging.info(f"   URL: {command_url}")
+        response = requests.get(command_url, timeout=5)
+        logging.info(f"   Response: {response.status_code} - {response.text}")
+
+        if response.status_code == 200:
+            logging.info(f"✅ Default playlist started")
+            return True
+        else:
+            logging.error(f"❌ Failed to start default playlist: {response.status_code}")
+            return False
+    except Exception as e:
+        logging.error(f"Error starting default playlist: {e}")
+        return False
+
+
 def return_to_default_playlist():
-    """Clear text and trigger next scheduled item"""
+    """Clear text and restart the default waiting playlist"""
     try:
         fpp_host = config.get('fpp_host', 'http://127.0.0.1')
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
-        
+
         if overlay_model:
             try:
                 logging.info(f"🧹 Clearing text from model: {overlay_model}")
                 import urllib.parse
-                
+
                 command = "Overlay Model Clear"
                 encoded_model = urllib.parse.quote(overlay_model)
                 fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}"
-                
+
                 logging.info(f"   Clear URL: {fpp_url}")
                 response = requests.get(fpp_url, timeout=5)
                 logging.info(f"   Clear response: {response.status_code} - {response.text}")
-                
+
                 if response.status_code == 200:
                     logging.info(f"✅ Text cleared")
                 else:
                     logging.warning(f"⚠️  Could not clear text: {response.status_code}")
             except Exception as e:
                 logging.warning(f"Could not clear text: {e}")
-        
+
         with queue_lock:
             queue_length = len(message_queue)
-        
+
         if queue_length > 0:
-            logging.info(f"📋 Queue has {queue_length} more names - NOT returning to scheduled item")
+            logging.info(f"📋 Queue has {queue_length} more names - NOT returning to default playlist yet")
             return
-        
-        try:
-            logging.info(f"🔄 Queue empty - Starting Next Scheduled Item")
-            
-            import urllib.parse
-            command = "Start Next Scheduled Item"
-            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}"
-            
-            logging.info(f"   Command URL: {command_url}")
-            response = requests.get(command_url, timeout=5)
-            logging.info(f"   Response: {response.status_code} - {response.text}")
-            
-            if response.status_code == 200:
-                logging.info(f"✅ Started next scheduled item")
-            else:
-                logging.error(f"❌ Failed to start next scheduled item: {response.status_code}")
-                
-        except Exception as e:
-            logging.error(f"Error starting next scheduled item: {e}")
-    
+
+        start_default_playlist()
+
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
 
@@ -2886,6 +2904,13 @@ if __name__ == '__main__':
     if config['enabled']:
         polling_thread = threading.Thread(target=poll_twilio, daemon=True)
         polling_thread.start()
+
+        # Start the default waiting playlist so the display is ready from launch
+        def _start_default():
+            import time
+            time.sleep(3)  # brief delay to let FPP settle before sending commands
+            start_default_playlist()
+        threading.Thread(target=_start_default, daemon=True).start()
 
     logging.info("FPP SMS Plugin v2.5 starting...")
     app.run(host='0.0.0.0', port=5000, debug=False)
