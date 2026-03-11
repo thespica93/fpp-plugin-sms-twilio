@@ -85,6 +85,21 @@ $docsBase   = $githubBase . "/blob/main/docs";
         </a>
     </div>
 
+    <h2>📁 Whitelist &amp; Blacklist — How Updates Work</h2>
+    <p>The whitelist and profanity blacklist each use <strong>three separate files</strong> so that plugin updates never overwrite your customizations:</p>
+    <div class="quick-ref">
+    <table>
+        <tr><th>File</th><th>Managed by</th><th>Survives plugin update?</th><th>Purpose</th></tr>
+        <tr><td><code>whitelist.txt</code> / <code>blacklist.txt</code></td><td>Plugin developer (git)</td><td>Reset on update</td><td>Global approved names / blocked words shipped with the plugin</td></tr>
+        <tr><td><code>whitelist_added.txt</code> / <code>blacklist_added.txt</code></td><td>You (via the UI)</td><td>✅ Yes — never touched by git</td><td>Your custom additions beyond the global list</td></tr>
+        <tr><td><code>whitelist_removed.txt</code> / <code>blacklist_removed.txt</code></td><td>You (via the UI)</td><td>✅ Yes — never touched by git</td><td>Entries you deleted from the global list</td></tr>
+    </table>
+    </div>
+    <p><strong>Effective list = global + your additions − your removals</strong></p>
+    <div class="filter-status">
+        <strong>ℹ️ Global priority rule:</strong> If the plugin developer adds a word to the global list that you had previously added yourself, your copy is automatically removed from <code>_added</code> on the next load — the global list takes priority and there are no duplicates.
+    </div>
+
     <h2>⚡ Quick Reference</h2>
 
     <h3>How a Message Gets Approved</h3>

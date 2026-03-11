@@ -33,8 +33,10 @@ LOG_FILE = "/home/fpp/media/logs/sms_plugin.log"
 MESSAGE_LOG = "/home/fpp/media/logs/received_messages.json"
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
 BLACKLIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "blacklist_removed.txt")
+BLACKLIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "blacklist_added.txt")
 WHITELIST_FILE = os.path.join(PLUGIN_DIR, "whitelist.txt")
 WHITELIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "whitelist_removed.txt")
+WHITELIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "whitelist_added.txt")
 LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
 BLOCKLIST_FILE = "/home/fpp/media/config/blocked_phones.json"
 
@@ -287,31 +289,38 @@ def load_removed_names():
         return set()
 
 def load_whitelist():
-    """Load and cache the whitelist, reload if file has changed"""
+    """Load and cache the whitelist: global + user-added - user-removed"""
     global _whitelist_cache, _whitelist_mtime
 
     try:
-        current_mtime = os.path.getmtime(WHITELIST_FILE)
+        mtime_global  = os.path.getmtime(WHITELIST_FILE)          if os.path.exists(WHITELIST_FILE)          else 0
+        mtime_added   = os.path.getmtime(WHITELIST_ADDED_FILE)    if os.path.exists(WHITELIST_ADDED_FILE)    else 0
+        mtime_removed = os.path.getmtime(WHITELIST_REMOVED_FILE)  if os.path.exists(WHITELIST_REMOVED_FILE)  else 0
+        current_mtime = (mtime_global, mtime_added, mtime_removed)
 
-        # Only reload if file changed or not yet loaded
         if _whitelist_cache is None or _whitelist_mtime != current_mtime:
-            with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
-                names = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
+            global_names = set()
+            if os.path.exists(WHITELIST_FILE):
+                with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
+                    global_names = {line.strip().lower() for line in f if line.strip() and not line.startswith('#')}
 
-            # Filter out names the user has explicitly removed (prevents git pull re-adding them)
             removed = load_removed_names()
-            if removed:
-                names = [n for n in names if n not in removed]
+            added = load_whitelist_added()
 
-            _whitelist_cache = names
+            # If any user-added names are now in the global list, remove from added (global has priority)
+            overlap = added & global_names
+            if overlap:
+                added -= overlap
+                with open(WHITELIST_ADDED_FILE, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(sorted(added)) + '\n' if added else '')
+
+            effective = (global_names - removed) | added
+            _whitelist_cache = list(effective)
             _whitelist_mtime = current_mtime
             logging.info(f"Loaded {len(_whitelist_cache)} names into whitelist cache")
 
         return _whitelist_cache
 
-    except FileNotFoundError:
-        logging.info(f"Whitelist file not found: {WHITELIST_FILE}")
-        return []
     except Exception as e:
         logging.error(f"Error reading whitelist: {e}")
         return []
@@ -469,17 +478,46 @@ def load_blacklist_removed():
     except Exception:
         return set()
 
-def load_blacklist_words():
-    """Return the raw word list from blacklist.txt (for API use)"""
-    if not os.path.exists(BLACKLIST_FILE):
-        return []
+def load_blacklist_added():
+    """Load words the user has added beyond the global list"""
+    if not os.path.exists(BLACKLIST_ADDED_FILE):
+        return set()
     try:
-        with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
-            words = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
+        with open(BLACKLIST_ADDED_FILE, 'r', encoding='utf-8') as f:
+            return {line.strip().lower() for line in f if line.strip()}
+    except Exception:
+        return set()
+
+def load_whitelist_added():
+    """Load names the user has added beyond the global list"""
+    if not os.path.exists(WHITELIST_ADDED_FILE):
+        return set()
+    try:
+        with open(WHITELIST_ADDED_FILE, 'r', encoding='utf-8') as f:
+            return {line.strip().lower() for line in f if line.strip()}
+    except Exception:
+        return set()
+
+def load_blacklist_words():
+    """Return effective word list: global + user-added - user-removed"""
+    try:
+        global_words = set()
+        if os.path.exists(BLACKLIST_FILE):
+            with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
+                global_words = {line.strip().lower() for line in f if line.strip() and not line.startswith('#')}
+
         removed = load_blacklist_removed()
-        if removed:
-            words = [w for w in words if w not in removed]
-        return sorted(words)
+        added = load_blacklist_added()
+
+        # If any user-added words are now in the global list, remove from added (global has priority)
+        overlap = added & global_words
+        if overlap:
+            added -= overlap
+            with open(BLACKLIST_ADDED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(added)) + '\n' if added else '')
+
+        effective = (global_words - removed) | added
+        return sorted(effective)
     except Exception as e:
         logging.error(f"Error reading blacklist words: {e}")
         return []
@@ -489,19 +527,13 @@ def load_blacklist():
     global _blacklist_cache, _blacklist_mtime
 
     try:
-        current_mtime = os.path.getmtime(BLACKLIST_FILE)
+        mtime_global  = os.path.getmtime(BLACKLIST_FILE)         if os.path.exists(BLACKLIST_FILE)  else 0
+        mtime_added   = os.path.getmtime(BLACKLIST_ADDED_FILE)   if os.path.exists(BLACKLIST_ADDED_FILE)   else 0
+        mtime_removed = os.path.getmtime(BLACKLIST_REMOVED_FILE) if os.path.exists(BLACKLIST_REMOVED_FILE) else 0
+        current_mtime = (mtime_global, mtime_added, mtime_removed)
 
-        # Only reload if file changed or not yet loaded
         if _blacklist_cache is None or _blacklist_mtime != current_mtime:
-            with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
-                words = [line.strip().lower() for line in f if line.strip() and not line.startswith('#')]
-
-            # Filter out words the user has explicitly removed
-            removed = load_blacklist_removed()
-            if removed:
-                words = [w for w in words if w not in removed]
-
-            # Pre-compile all regex patterns for maximum speed
+            words = load_blacklist_words()
             _blacklist_cache = [
                 re.compile(r'\b' + re.escape(word) + r'\b')
                 for word in words
@@ -511,9 +543,6 @@ def load_blacklist():
 
         return _blacklist_cache
 
-    except FileNotFoundError:
-        logging.warning(f"Blacklist file not found: {BLACKLIST_FILE}")
-        return []
     except Exception as e:
         logging.error(f"Error reading blacklist: {e}")
         return []
@@ -1206,11 +1235,11 @@ def index():
                                 ⚠️ Name format rules are disabled when the whitelist is active.
                             </div>
                             <div id="format_rules_inputs">
-                                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}
+                                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
                                        onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning();">
                                 <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
 
-                                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}
+                                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
                                        onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning();">
                                 <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
 
@@ -1229,6 +1258,10 @@ def index():
                             inputs.style.opacity = whitelistOn ? '0.4' : '1';
                             inputs.style.pointerEvents = whitelistOn ? 'none' : '';
                             note.style.display = whitelistOn ? 'block' : 'none';
+                            if (whitelistOn) {
+                                document.getElementById('one_word_only').checked = false;
+                                document.getElementById('two_words_max').checked = false;
+                            }
                             checkFormatWarning();
                         }
                         function checkFormatWarning() {
@@ -1925,11 +1958,10 @@ def api_get_blocklist():
 @app.route('/api/blacklist')
 def api_get_blacklist():
     try:
-        file_exists = os.path.exists(BLACKLIST_FILE)
         words = load_blacklist_words()
-        return jsonify({"blacklist": words, "file_path": BLACKLIST_FILE, "file_exists": file_exists})
+        return jsonify({"blacklist": words})
     except Exception as e:
-        return jsonify({"error": str(e), "file_path": BLACKLIST_FILE, "file_exists": os.path.exists(BLACKLIST_FILE)})
+        return jsonify({"error": str(e)})
 
 @app.route('/api/blacklist/add', methods=['POST'])
 def api_add_blacklist():
@@ -1939,16 +1971,21 @@ def api_add_blacklist():
         word = data.get('word', '').strip().lower()
         if not word:
             return jsonify({"success": False, "error": "Word is required"})
-        words = set()
+        # Check if already in global list
+        global_words = set()
         if os.path.exists(BLACKLIST_FILE):
             with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
-                words = {line.strip().lower() for line in f if line.strip()}
-        if word in words:
+                global_words = {line.strip().lower() for line in f if line.strip()}
+        if word in global_words:
             return jsonify({"success": False, "error": "Word already in blacklist"})
-        words.add(word)
-        with open(BLACKLIST_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(sorted(words)) + '\n')
-        # If word was previously removed, un-remove it
+        # Add to user-added list
+        added = load_blacklist_added()
+        if word in added:
+            return jsonify({"success": False, "error": "Word already in blacklist"})
+        added.add(word)
+        with open(BLACKLIST_ADDED_FILE, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sorted(added)) + '\n')
+        # If word was previously removed from global, un-remove it
         removed = load_blacklist_removed()
         if word in removed:
             removed.discard(word)
@@ -1956,7 +1993,7 @@ def api_add_blacklist():
                 f.write('\n'.join(sorted(removed)) + '\n')
         _blacklist_cache = None
         _blacklist_mtime = None
-        logging.info(f"Added '{word}' to blacklist")
+        logging.info(f"Added '{word}' to user blacklist")
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -1967,18 +2004,22 @@ def api_remove_blacklist():
     try:
         data = request.json
         word = data.get('word', '').strip().lower()
-        words = set()
+        global_words = set()
         if os.path.exists(BLACKLIST_FILE):
             with open(BLACKLIST_FILE, 'r', encoding='latin-1') as f:
-                words = {line.strip().lower() for line in f if line.strip()}
-        words.discard(word)
-        with open(BLACKLIST_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(sorted(words)) + '\n' if words else '')
-        # Track removal so git pull can't re-add it
-        removed = load_blacklist_removed()
-        removed.add(word)
-        with open(BLACKLIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(sorted(removed)) + '\n')
+                global_words = {line.strip().lower() for line in f if line.strip()}
+        # Remove from user-added if present
+        added = load_blacklist_added()
+        if word in added:
+            added.discard(word)
+            with open(BLACKLIST_ADDED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(added)) + '\n' if added else '')
+        # If in global, track removal so git pull can't re-add it
+        if word in global_words:
+            removed = load_blacklist_removed()
+            removed.add(word)
+            with open(BLACKLIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(removed)) + '\n')
         _blacklist_cache = None
         _blacklist_mtime = None
         logging.info(f"Removed '{word}' from blacklist")
@@ -1989,14 +2030,10 @@ def api_remove_blacklist():
 @app.route('/api/whitelist')
 def api_get_whitelist():
     try:
-        names = []
-        file_exists = os.path.exists(WHITELIST_FILE)
-        if file_exists:
-            with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
-                names = sorted([line.strip() for line in f if line.strip() and not line.startswith('#')])
-        return jsonify({"whitelist": names, "file_path": WHITELIST_FILE, "file_exists": file_exists})
+        names = sorted(load_whitelist())
+        return jsonify({"whitelist": names})
     except Exception as e:
-        return jsonify({"error": str(e), "file_path": WHITELIST_FILE, "file_exists": os.path.exists(WHITELIST_FILE)})
+        return jsonify({"error": str(e)})
 
 @app.route('/api/whitelist/add', methods=['POST'])
 def api_add_whitelist():
@@ -2006,16 +2043,21 @@ def api_add_whitelist():
         name = data.get('name', '').strip().lower()
         if not name:
             return jsonify({"success": False, "error": "Name is required"})
-        names = set()
+        # Check if already in global list
+        global_names = set()
         if os.path.exists(WHITELIST_FILE):
             with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
-                names = {line.strip().lower() for line in f if line.strip()}
-        if name in names:
+                global_names = {line.strip().lower() for line in f if line.strip()}
+        if name in global_names:
             return jsonify({"success": False, "error": "Name already in whitelist"})
-        names.add(name)
-        with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(sorted(names)) + '\n')
-        # If name was previously removed, un-remove it so it isn't filtered out
+        # Add to user-added list
+        added = load_whitelist_added()
+        if name in added:
+            return jsonify({"success": False, "error": "Name already in whitelist"})
+        added.add(name)
+        with open(WHITELIST_ADDED_FILE, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sorted(added)) + '\n')
+        # If name was previously removed from global, un-remove it
         removed = load_removed_names()
         if name in removed:
             removed.discard(name)
@@ -2023,7 +2065,7 @@ def api_add_whitelist():
                 f.write('\n'.join(sorted(removed)) + '\n')
         _whitelist_cache = None
         _whitelist_mtime = None
-        logging.info(f"Added '{name}' to whitelist")
+        logging.info(f"Added '{name}' to user whitelist")
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -2034,18 +2076,22 @@ def api_remove_whitelist():
     try:
         data = request.json
         name = data.get('name', '').strip().lower()
-        names = set()
+        global_names = set()
         if os.path.exists(WHITELIST_FILE):
             with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
-                names = {line.strip().lower() for line in f if line.strip()}
-        names.discard(name)
-        with open(WHITELIST_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(sorted(names)) + '\n' if names else '')
-        # Track removal so git pull can't re-add this name
-        removed = load_removed_names()
-        removed.add(name)
-        with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(sorted(removed)) + '\n')
+                global_names = {line.strip().lower() for line in f if line.strip()}
+        # Remove from user-added if present
+        added = load_whitelist_added()
+        if name in added:
+            added.discard(name)
+            with open(WHITELIST_ADDED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(added)) + '\n' if added else '')
+        # If in global, track removal so git pull can't re-add it
+        if name in global_names:
+            removed = load_removed_names()
+            removed.add(name)
+            with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(sorted(removed)) + '\n')
         _whitelist_cache = None
         _whitelist_mtime = None
         logging.info(f"Removed '{name}' from whitelist")
@@ -2087,8 +2133,7 @@ def view_whitelist():
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>📋 Name Whitelist</h1>
         <div class="info">
-            Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
-            <span id="filepath" style="font-size:12px; color:#555;"></span>
+            Only names on this list are accepted when the whitelist is enabled. &nbsp;|&nbsp; <strong id="count">Loading...</strong>
         </div>
         {% if not config.get('use_whitelist', False) %}
         <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -2138,7 +2183,6 @@ def view_whitelist():
                 .then(data => {
                     allNames = data.whitelist || [];
                     document.getElementById('count').textContent = allNames.length.toLocaleString() + ' approved names';
-                    document.getElementById('filepath').textContent = 'File: ' + data.file_path + (data.file_exists ? ' ✓' : ' ✗ NOT FOUND');
                     renderTable();
                     window.scrollTo(0, 0);
                 })
@@ -2303,8 +2347,7 @@ def view_blacklist_page():
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
         <h1>🚫 Profanity Blacklist</h1>
         <div class="info">
-            ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong><br>
-            <span id="filepath" style="font-size:12px; color:#555;"></span>
+            ℹ️ Messages containing any word on this list are rejected by the profanity filter. &nbsp;|&nbsp; <strong id="count">Loading...</strong>
         </div>
         {% if not config.get('profanity_filter', True) %}
         <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; padding:10px 14px; border-radius:5px; margin:10px 0; font-size:14px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -2354,7 +2397,6 @@ def view_blacklist_page():
                 .then(data => {
                     allWords = data.blacklist || [];
                     document.getElementById('count').textContent = allWords.length.toLocaleString() + ' blocked words';
-                    document.getElementById('filepath').textContent = 'File: ' + data.file_path + (data.file_exists ? ' ✓' : ' ✗ NOT FOUND');
                     renderTable();
                     window.scrollTo(0, 0);
                 })
