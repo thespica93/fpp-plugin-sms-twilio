@@ -315,7 +315,7 @@ def load_whitelist():
                     f.write('\n'.join(sorted(added)) + '\n' if added else '')
 
             effective = (global_names - removed) | added
-            _whitelist_cache = list(effective)
+            _whitelist_cache = effective  # keep as set for O(1) lookup
             _whitelist_mtime = current_mtime
             logging.info(f"Loaded {len(_whitelist_cache)} names into whitelist cache")
 
@@ -523,7 +523,7 @@ def load_blacklist_words():
         return []
 
 def load_blacklist():
-    """Load and cache the profanity blacklist with pre-compiled regex patterns"""
+    """Load and cache the profanity blacklist as a single combined regex for fast one-pass matching"""
     global _blacklist_cache, _blacklist_mtime
 
     try:
@@ -534,34 +534,35 @@ def load_blacklist():
 
         if _blacklist_cache is None or _blacklist_mtime != current_mtime:
             words = load_blacklist_words()
-            _blacklist_cache = [
-                re.compile(r'\b' + re.escape(word) + r'\b')
-                for word in words
-            ]
+            if words:
+                # Single combined pattern — one regex pass instead of N passes
+                combined = '|'.join(r'\b' + re.escape(w) + r'\b' for w in words)
+                _blacklist_cache = re.compile(combined)
+            else:
+                _blacklist_cache = None
             _blacklist_mtime = current_mtime
-            logging.info(f"Loaded {len(_blacklist_cache)} words into profanity filter cache")
+            logging.info(f"Loaded {len(words)} words into profanity filter cache (combined regex)")
 
         return _blacklist_cache
 
     except Exception as e:
         logging.error(f"Error reading blacklist: {e}")
-        return []
+        return None
 
 def contains_profanity(text):
-    """Check for profanity using cached blacklist with pre-compiled patterns"""
+    """Check for profanity using a single combined regex pattern"""
     if not config['profanity_filter']:
         return False
-    
-    patterns = load_blacklist()
-    if not patterns:
+
+    pattern = load_blacklist()
+    if not pattern:
         return False
-    
+
     text_lower = text.lower()
-    
-    for pattern in patterns:
-        if pattern.search(text_lower):
-            logging.info(f"🚫 Profanity detected in '{text}'")
-            return True
+
+    if pattern.search(text_lower):
+        logging.info(f"🚫 Profanity detected in '{text}'")
+        return True
     
     return False
 
@@ -715,10 +716,10 @@ def send_to_fpp(name):
             try:
                 logging.info(f"⏸️  STEP 1: Stopping all playlists...")
                 requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
-                time.sleep(0.5)
-                
+                time.sleep(0.1)
+
                 logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
-                
+
                 import urllib.parse
                 if name_playlist.startswith('seq:'):
                     seq_file = name_playlist[4:]
@@ -728,11 +729,11 @@ def send_to_fpp(name):
                     command = "Start Playlist"
                     encoded_playlist = urllib.parse.quote(name_playlist)
                     command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_playlist}/true/false"
-                
+
                 start_response = requests.get(command_url, timeout=5)
                 logging.info(f"   Start response: {start_response.status_code}")
-                
-                time.sleep(1.0)
+
+                time.sleep(0.3)
                 
             except Exception as e:
                 logging.error(f"💥 ERROR starting name playlist: {e}")
@@ -1652,7 +1653,7 @@ def index():
                 // Checkboxes, selects, color picker — save immediately on change
                 ['enabled','profanity_filter','use_whitelist','text_color',
                  'default_playlist','name_display_playlist','overlay_model_name',
-                 'text_font','text_position',
+                 'text_font','text_position','scroll_speed',
                  'one_word_only','two_words_max',
                  'sms_response_success','sms_response_profanity','sms_response_rate_limited',
                  'sms_response_duplicate','sms_response_invalid_format',
@@ -1664,7 +1665,7 @@ def index():
                 // Text, number, textarea — save when user clicks away
                 ['account_sid','auth_token','phone_number','fpp_host',
                  'poll_interval','display_duration','max_messages','max_length',
-                 'text_color_hex','text_font_size','scroll_speed',
+                 'text_color_hex','text_font_size',
                  'message_template',
                  'response_success','response_profanity','response_rate_limited',
                  'response_duplicate','response_invalid_format',
@@ -2866,6 +2867,16 @@ def view_messages():
 
 if __name__ == '__main__':
     load_config()
+
+    # Pre-warm caches in background so first test/message isn't slow
+    def _warm_caches():
+        try:
+            load_blacklist()
+            load_whitelist()
+            logging.info("Cache pre-warm complete")
+        except Exception as e:
+            logging.warning(f"Cache pre-warm failed: {e}")
+    threading.Thread(target=_warm_caches, daemon=True).start()
 
     # Display worker always runs so Testing Tools work without Twilio credentials
     display_thread = threading.Thread(target=display_worker, daemon=True)
