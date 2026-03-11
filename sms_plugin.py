@@ -2920,12 +2920,23 @@ def api_activate():
 
 @app.route('/api/deactivate', methods=['GET', 'POST'])
 def api_deactivate():
-    """FPP scheduler hook: stop SMS polling. The Flask service keeps running
-    so the UI and settings remain accessible."""
+    """FPP scheduler hook: stop SMS polling and stop the current playlist/sequence.
+    The Flask service keeps running so the UI and settings remain accessible."""
     global stop_polling
     stop_polling = True
-    logging.info("🛑 TwilioStop: SMS polling stopped")
-    return jsonify({"success": True, "message": "Twilio SMS plugin deactivated — SMS polling stopped"})
+
+    # Stop the current playlist/sequence in FPP
+    try:
+        import urllib.parse
+        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        command_url = f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}"
+        response = requests.get(command_url, timeout=5)
+        logging.info(f"🛑 Stop Now response: {response.status_code} - {response.text}")
+    except Exception as e:
+        logging.warning(f"Could not send Stop Now to FPP: {e}")
+
+    logging.info("🛑 TwilioStop: SMS polling stopped, playlist stopped")
+    return jsonify({"success": True, "message": "Twilio SMS plugin deactivated — polling and playlist stopped"})
 
 
 if __name__ == '__main__':
