@@ -2892,6 +2892,42 @@ def view_messages():
     """
     return render_template_string(html, config=config)
 
+
+@app.route('/api/activate', methods=['GET', 'POST'])
+def api_activate():
+    """FPP scheduler hook: enable the plugin, start polling, and start the default playlist"""
+    global polling_thread, stop_polling
+    config['enabled'] = True
+    stop_polling = False
+    save_config()
+
+    # Start polling thread if not already running
+    if not polling_thread or not polling_thread.is_alive():
+        if twilio_client:
+            polling_thread = threading.Thread(target=poll_twilio, daemon=True)
+            polling_thread.start()
+            logging.info("▶️  Activate: polling thread started")
+        else:
+            logging.warning("⚠️  Activate: Twilio credentials not configured, polling not started")
+
+    # Start the default waiting playlist
+    start_default_playlist()
+
+    logging.info("✅ Plugin activated via /api/activate")
+    return jsonify({"success": True, "message": "Twilio SMS plugin activated"})
+
+
+@app.route('/api/deactivate', methods=['GET', 'POST'])
+def api_deactivate():
+    """FPP scheduler hook: disable the plugin and stop polling"""
+    global stop_polling
+    config['enabled'] = False
+    stop_polling = True
+    save_config()
+    logging.info("🛑 Plugin deactivated via /api/deactivate")
+    return jsonify({"success": True, "message": "Twilio SMS plugin deactivated"})
+
+
 if __name__ == '__main__':
     load_config()
 

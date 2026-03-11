@@ -74,6 +74,15 @@ touch /home/fpp/media/logs/sms_plugin.log
 chmod 666 /home/fpp/media/logs/sms_plugin.log
 chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
 
+# Install scheduler scripts into FPP's scripts directory so they appear in
+# the scheduler under: Command → Run Script → TwilioStart / TwilioStop
+mkdir -p /home/fpp/media/scripts
+cp "$PLUGIN_DIR/scripts/fpp_activate.sh"   /home/fpp/media/scripts/TwilioStart.sh
+cp "$PLUGIN_DIR/scripts/fpp_deactivate.sh" /home/fpp/media/scripts/TwilioStop.sh
+chmod +x /home/fpp/media/scripts/TwilioStart.sh /home/fpp/media/scripts/TwilioStop.sh
+chown fpp:fpp /home/fpp/media/scripts/TwilioStart.sh /home/fpp/media/scripts/TwilioStop.sh
+log_and_show "Scheduler scripts installed: TwilioStart.sh / TwilioStop.sh"
+
 log_and_show "========================================"
 log_and_show "Installation complete!"
 log_and_show "Restart FPPD to start the service"
