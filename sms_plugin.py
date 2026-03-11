@@ -691,9 +691,14 @@ def send_to_fpp(name):
                 logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
                 
                 import urllib.parse
-                command = "Start Playlist"
-                encoded_playlist = urllib.parse.quote(name_playlist)
-                command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_playlist}/true/false"
+                if name_playlist.startswith('seq:'):
+                    seq_file = name_playlist[4:]
+                    command = "Start Sequence"
+                    command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
+                else:
+                    command = "Start Playlist"
+                    encoded_playlist = urllib.parse.quote(name_playlist)
+                    command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_playlist}/true/false"
                 
                 start_response = requests.get(command_url, timeout=5)
                 logging.info(f"   Start response: {start_response.status_code}")
@@ -1098,19 +1103,13 @@ def index():
     </head>
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
 
-        <!-- Top action bar -->
-        <div class="top-actions">
-            <button onclick="saveConfig()">💾 Save Configuration</button>
-            <button class="refresh-btn" onclick="refreshFPPData()">🔄 Refresh Playlists/Models/Fonts</button>
-            <button class="view-btn" onclick="viewMessages()">📋 View Message Queue</button>
-            <div id="message"></div>
-        </div>
-
         <!-- Tab navigation -->
-        <div class="tabs">
+        <div class="tabs" style="display:flex; align-items:center; gap:6px;">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
             <button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
+            <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
+            <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
         </div>
 
         <!-- Settings Tab -->
@@ -1147,13 +1146,13 @@ def index():
                         <select id="default_playlist">
                             <option value="">-- None (Manual Control) --</option>
                         </select>
-                        <p class="help-text">📺 This playlist loops while waiting for text messages</p>
+                        <p class="help-text">📺 This playlist or sequence loops while waiting for text messages</p>
 
                         <label>Name Display Playlist:</label>
                         <select id="name_display_playlist">
                             <option value="">-- None (No Playlist Change) --</option>
                         </select>
-                        <p class="help-text">🎬 This playlist plays when displaying a name</p>
+                        <p class="help-text">🎬 This playlist or sequence plays when displaying a name</p>
 
                         <label>Overlay Model Name:</label>
                         <select id="overlay_model_name">
@@ -1174,29 +1173,6 @@ def index():
                         <label>Max Message Length:</label>
                         <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
 
-                        {% if not config.get('use_whitelist', False) %}
-                        <h3>Name Format Rules</h3>
-                        <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}
-                               onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning();">
-                        <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
-
-                        <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}
-                               onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning();">
-                        <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
-
-                        <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
-                            ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
-                        </div>
-
-                        <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
-                        <script>
-                        function checkFormatWarning() {
-                            var warn = !document.getElementById('one_word_only').checked && !document.getElementById('two_words_max').checked;
-                            document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
-                        }
-                        checkFormatWarning();
-                        </script>
-                        {% endif %}
                     </div>
                 </div>
 
@@ -1220,9 +1196,48 @@ def index():
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
 
-                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }}>
+                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules()">
                         <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 6px;">📋 Manage Whitelist</button>
+
+                        <div id="format_rules_section" style="margin-top: 12px;">
+                            <h3 style="margin-bottom: 6px;">Name Format Rules</h3>
+                            <div id="format_rules_disabled_note" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-bottom:8px; font-size:13px;">
+                                ⚠️ Name format rules are disabled when the whitelist is active.
+                            </div>
+                            <div id="format_rules_inputs">
+                                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning();">
+                                <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
+
+                                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) else '' }}
+                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning();">
+                                <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
+
+                                <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
+                                    ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
+                                </div>
+                            </div>
+                            <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                        </div>
+
+                        <script>
+                        function updateFormatRules() {
+                            var whitelistOn = document.getElementById('use_whitelist').checked;
+                            var inputs = document.getElementById('format_rules_inputs');
+                            var note = document.getElementById('format_rules_disabled_note');
+                            inputs.style.opacity = whitelistOn ? '0.4' : '1';
+                            inputs.style.pointerEvents = whitelistOn ? 'none' : '';
+                            note.style.display = whitelistOn ? 'block' : 'none';
+                            checkFormatWarning();
+                        }
+                        function checkFormatWarning() {
+                            var whitelistOn = document.getElementById('use_whitelist').checked;
+                            var warn = !whitelistOn && !document.getElementById('one_word_only').checked && !document.getElementById('two_words_max').checked;
+                            document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
+                        }
+                        updateFormatRules();
+                        </script>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
 
@@ -1298,11 +1313,13 @@ def index():
                 <style>
                     .resp-row { border: 1px solid #ddd; border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; background: #fafafa; }
                     .resp-row.enabled { background: #f0f7ff; border-color: #90caf9; }
-                    .resp-row.locked { opacity: 0.5; pointer-events: none; background: #f0f0f0; border-color: #ccc; }
+                    .resp-row.locked { pointer-events: none; background: #f0f0f0; border-color: #ccc; }
+                    .resp-row.locked .resp-toggle { opacity: 0.4; }
                     .resp-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-weight: bold; font-size: 14px; }
                     .resp-row textarea { opacity: 0.4; pointer-events: none; transition: opacity .2s; }
+                    .resp-row.locked textarea { opacity: 0.4; }
                     .resp-row.enabled textarea { opacity: 1; pointer-events: auto; }
-                    .resp-locked-note { font-size: 12px; color: #888; margin-top: 4px; font-style: italic; }
+                    .resp-locked-note { font-size: 13px; color: #856404; background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 7px 10px; margin: 4px 0 6px; }
                 </style>
 
                 <script>
@@ -1430,6 +1447,7 @@ def index():
             window.onload = function() {
                 loadFPPData();
                 initRespRows();
+                setupAutoSave();
             };
 
             function showTab(tabName, btn) {
@@ -1452,12 +1470,30 @@ def index():
                     nameSelect.innerHTML = '<option value="">-- None (No Playlist Change) --</option>';
 
                     if (data.playlists && data.playlists.length > 0) {
+                        const pg1 = document.createElement('optgroup');
+                        pg1.label = '📋 Playlists';
+                        const pg2 = document.createElement('optgroup');
+                        pg2.label = '📋 Playlists';
                         data.playlists.forEach(playlist => {
-                            const opt1 = new Option(playlist, playlist, false, playlist === currentDefault);
-                            const opt2 = new Option(playlist, playlist, false, playlist === currentName);
-                            defaultSelect.add(opt1);
-                            nameSelect.add(opt2);
+                            pg1.appendChild(new Option(playlist, playlist, false, playlist === currentDefault));
+                            pg2.appendChild(new Option(playlist, playlist, false, playlist === currentName));
                         });
+                        defaultSelect.add(pg1);
+                        nameSelect.add(pg2);
+                    }
+
+                    if (data.sequences && data.sequences.length > 0) {
+                        const sg1 = document.createElement('optgroup');
+                        sg1.label = '🎬 Sequences (.fseq)';
+                        const sg2 = document.createElement('optgroup');
+                        sg2.label = '🎬 Sequences (.fseq)';
+                        data.sequences.forEach(seq => {
+                            const val = 'seq:' + seq;
+                            sg1.appendChild(new Option(seq, val, false, val === currentDefault));
+                            sg2.appendChild(new Option(seq, val, false, val === currentName));
+                        });
+                        defaultSelect.add(sg1);
+                        nameSelect.add(sg2);
                     }
 
                     const modelSelect = document.getElementById('overlay_model_name');
@@ -1487,13 +1523,6 @@ def index():
                 });
             }
 
-            function refreshFPPData() {
-                document.getElementById('fpp_status').innerHTML = '<p>Refreshing FPP data...</p>';
-                loadFPPData();
-                setTimeout(() => {
-                    document.getElementById('fpp_status').innerHTML = '<p class="success">✅ Refreshed!</p>';
-                }, 1000);
-            }
 
             function testFPP() {
                 document.getElementById('fpp_status').innerHTML = '<p>Testing FPP connection...</p>';
@@ -1516,7 +1545,16 @@ def index():
                 });
             }
 
+            var _saveTimer = null;
             function saveConfig() {
+                clearTimeout(_saveTimer);
+                _saveTimer = setTimeout(_doSave, 300);
+            }
+            function _doSave() {
+                var status = document.getElementById('autosave_status');
+                status.style.color = '#888';
+                status.textContent = 'Saving...';
+
                 const data = {
                     enabled: document.getElementById('enabled').checked,
                     twilio_account_sid: document.getElementById('account_sid').value,
@@ -1562,9 +1600,41 @@ def index():
                     body: JSON.stringify(data)
                 })
                 .then(r => r.json())
-                .then(data => {
-                    document.getElementById('message').innerHTML = '<p class="success">✅ Configuration saved! Plugin will restart.</p>';
-                    setTimeout(() => location.reload(), 2000);
+                .then(function() {
+                    status.style.color = '#4CAF50';
+                    status.textContent = '✓ Saved';
+                    setTimeout(function() { status.textContent = ''; }, 3000);
+                })
+                .catch(function() {
+                    status.style.color = '#f44336';
+                    status.textContent = '✗ Save failed';
+                });
+            }
+
+            function setupAutoSave() {
+                // Checkboxes, selects, color picker — save immediately on change
+                ['enabled','profanity_filter','use_whitelist','text_color',
+                 'default_playlist','name_display_playlist','overlay_model_name',
+                 'text_font','text_position',
+                 'one_word_only','two_words_max',
+                 'sms_response_success','sms_response_profanity','sms_response_rate_limited',
+                 'sms_response_duplicate','sms_response_invalid_format',
+                 'sms_response_not_whitelisted','sms_response_blocked'
+                ].forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (el) el.addEventListener('change', saveConfig);
+                });
+                // Text, number, textarea — save when user clicks away
+                ['account_sid','auth_token','phone_number','fpp_host',
+                 'poll_interval','display_duration','max_messages','max_length',
+                 'text_color_hex','text_font_size','scroll_speed',
+                 'message_template',
+                 'response_success','response_profanity','response_rate_limited',
+                 'response_duplicate','response_invalid_format',
+                 'response_not_whitelisted','response_blocked'
+                ].forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (el) el.addEventListener('blur', saveConfig);
                 });
             }
 
