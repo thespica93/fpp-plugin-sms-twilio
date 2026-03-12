@@ -761,74 +761,49 @@ def send_to_fpp(name):
         if overlay_model:
             try:
                 logging.info(f"📝 STEP 3: Displaying text on model: {overlay_model}")
-                
+
                 text_position = config.get('text_position', 'Center')
                 text_color = config.get('text_color', '#FF0000')
                 text_font = config.get('text_font', 'FreeSans')
                 font_size = config.get('text_font_size', 48)
                 scroll_speed = config.get('scroll_speed', 20)
-                
+
                 import urllib.parse
-                
-                # Handle newlines for multi-line support
-                # Replace actual newlines with URL-encoded version
-                display_message_encoded = display_message.replace('\n', '%0A')
-                
-                # URL encode the message (keeping %0A intact)
-                message_for_url = urllib.parse.quote(display_message_encoded, safe='%')
-                
-                encoded_model = urllib.parse.quote(overlay_model)
-                
+
                 if not text_color.startswith('#'):
                     text_color = '#' + text_color
-                
-                command = "Overlay Model Effect"
-                auto_enable = "Transparent"
-                
-                # Build command based on text position
-                if text_position in ['L2R', 'R2L', 'T2B', 'B2T']:
-                    # Scrolling text
-                    effect = "Scroll Text"
-                    direction = text_position
-                    position_value = "Center"
-                    
-                    color_encoded = urllib.parse.quote(text_color)
-                    
-                    # Command: Model/AutoEnable/Effect/Message/Color/Position/Speed/Font/FontSize/AntiAlias/Direction/Iterate
-                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{message_for_url}/{color_encoded}/{urllib.parse.quote(position_value)}/{scroll_speed}/{urllib.parse.quote(text_font)}/{font_size}/1/{direction}/1"
-                    
-                    logging.info(f"📡 Sending Overlay Model Effect (Scroll Text):")
-                    logging.info(f"   Message to display: {display_message}")
-                    logging.info(f"   Encoded for URL: {message_for_url}")
-                    logging.info(f"   Full URL: {fpp_url}")
-                    
-                    response = requests.get(fpp_url, timeout=10)
-                    logging.info(f"   Response: {response.status_code} - {response.text}")
-                    
-                else:
-                    # Static text
-                    effect = "Text"
-                    position_value = "Center"
-                    display_duration = config.get('display_duration', 30)
-                    
-                    color_encoded = urllib.parse.quote(text_color)
-                    
-                    # Command: Model/AutoEnable/Effect/Color/Font/FontSize/AntiAlias/Position/0/Duration/Text
-                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{color_encoded}/{urllib.parse.quote(text_font)}/{font_size}/1/{position_value}/0/{display_duration}/{message_for_url}"
-                    
-                    logging.info(f"📡 Sending Overlay Model Effect (Static Text):")
-                    logging.info(f"   Message to display: {display_message}")
-                    logging.info(f"   Encoded for URL: {message_for_url}")
-                    logging.info(f"   Full URL: {fpp_url}")
-                    
-                    response = requests.get(fpp_url, timeout=10)
-                    logging.info(f"   Response: {response.status_code} - {response.text}")
-                
+
+                encoded_model = urllib.parse.quote(overlay_model)
+
+                # State 3 = Transparent RGB: text pixels replace underlying FSEQ pixels
+                # (correct color), non-text pixels stay transparent (FSEQ shows through)
+                state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
+                state_resp = requests.put(state_url, json={"State": 3}, timeout=5)
+                logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
+
+                # Use the direct text API (same as fpp-matrixtools plugin)
+                text_payload = {
+                    "Message": display_message,
+                    "Color": text_color,
+                    "Font": text_font,
+                    "FontSize": font_size,
+                    "Position": text_position,
+                    "PixelsPerSecond": scroll_speed,
+                    "AntiAlias": True,
+                    "AutoEnable": False
+                }
+                text_url = f"{fpp_host}/api/overlays/model/{encoded_model}/text"
+                response = requests.put(text_url, json=text_payload, timeout=10)
+
+                logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
+                logging.info(f"   Payload: {text_payload}")
+                logging.info(f"   Response: {response.status_code} - {response.text}")
+
                 if response.status_code == 200:
-                    logging.info(f"✅ Overlay Model Effect command sent successfully")
+                    logging.info(f"✅ Text sent successfully")
                 else:
-                    logging.error(f"❌ OVERLAY MODEL EFFECT FAILED! Status: {response.status_code}")
-                
+                    logging.error(f"❌ TEXT API FAILED! Status: {response.status_code}")
+
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
                 import traceback
@@ -905,9 +880,11 @@ def return_to_default_playlist():
             try:
                 logging.info(f"🧹 Clearing text from model: {overlay_model}")
                 import urllib.parse
-                fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote('Overlay Model Clear')}/{urllib.parse.quote(overlay_model)}"
-                response = requests.get(fpp_url, timeout=5)
-                logging.info(f"   Clear response: {response.status_code} - {response.text}")
+                encoded_model = urllib.parse.quote(overlay_model)
+                # Disable the overlay model (State 0) to stop rendering text
+                state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
+                response = requests.put(state_url, json={"State": 0}, timeout=5)
+                logging.info(f"   Disable overlay (State 0): {response.status_code} - {response.text}")
                 if response.status_code == 200:
                     logging.info(f"✅ Text cleared")
                 else:
