@@ -775,6 +775,16 @@ def send_to_fpp(name):
 
                 encoded_model = urllib.parse.quote(overlay_model)
 
+                # Map config abbreviations to FPP API full strings
+                position_map = {
+                    'Center': 'Center',
+                    'L2R': 'Left to Right',
+                    'R2L': 'Right to Left',
+                    'T2B': 'Top to Bottom',
+                    'B2T': 'Bottom to Top',
+                }
+                fpp_position = position_map.get(text_position, 'Center')
+
                 # State 3 = Transparent RGB: text pixels replace underlying FSEQ pixels
                 # (correct color), non-text pixels stay transparent (FSEQ shows through)
                 state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
@@ -787,7 +797,7 @@ def send_to_fpp(name):
                     "Color": text_color,
                     "Font": text_font,
                     "FontSize": font_size,
-                    "Position": text_position,
+                    "Position": fpp_position,
                     "PixelsPerSecond": scroll_speed,
                     "AntiAlias": True,
                     "AutoEnable": False
