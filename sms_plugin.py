@@ -54,6 +54,9 @@ logging.basicConfig(
 )
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
+import flask.cli
+flask.cli.show_server_banner = lambda *args: None
+
 app = Flask(__name__)
 
 IFRAME_RESIZE_SCRIPT = """<script>
