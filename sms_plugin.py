@@ -1025,16 +1025,28 @@ def get_queue_status():
 def poll_twilio():
     """Poll Twilio for new messages"""
     global last_message_sid, stop_polling
-    
+
     logging.info("🚀 Twilio polling started")
     first_run = last_message_sid is None
-    
+    _current_day = datetime.now().date()
+
     while not stop_polling:
         try:
+            # Midnight cleanup — clear message log when the date rolls over
+            today = datetime.now().date()
+            if today != _current_day:
+                _current_day = today
+                try:
+                    with open(MESSAGE_LOG, 'w') as f:
+                        json.dump([], f)
+                    logging.info(f"🌙 Midnight: message log cleared for {today}")
+                except Exception as e:
+                    logging.error(f"Error during midnight cleanup: {e}")
+
             if not twilio_client:
                 time.sleep(config.get('poll_interval', 2))
                 continue
-            
+
             logging.debug("📡 Polling Twilio for new messages...")
 
             messages = twilio_client.messages.list(
