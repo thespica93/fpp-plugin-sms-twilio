@@ -79,6 +79,9 @@ _whitelist_mtime = None
 _blocklist_cache = None
 _blocklist_mtime = None
 
+# FPP runs locally — always use localhost
+FPP_HOST = 'http://127.0.0.1'
+
 # Default configuration
 DEFAULT_CONFIG = {
     "enabled": False,
@@ -182,7 +185,7 @@ def save_config():
 def get_fpp_playlists():
     """Get list of playlists from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         playlists = []
         
         try:
@@ -206,7 +209,7 @@ def get_fpp_playlists():
 def get_fpp_sequences():
     """Get list of sequences from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         response = requests.get(f"{fpp_host}/api/sequence", timeout=5)
         if response.status_code == 200:
             sequences = response.json()
@@ -223,7 +226,7 @@ def get_fpp_sequences():
 def get_fpp_models():
     """Get list of overlay models from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         response = requests.get(f"{fpp_host}/api/models", timeout=5)
         if response.status_code == 200:
             data = response.json()
@@ -254,7 +257,7 @@ def get_fpp_models():
 def get_fpp_fonts():
     """Get list of supported fonts from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=5)
         if response.status_code == 200:
             fonts = response.json()
@@ -270,7 +273,7 @@ def get_fpp_fonts():
 def test_fpp_connection():
     """Test connection to FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         response = requests.get(f"{fpp_host}/api/fppd/status", timeout=5)
         if response.status_code == 200:
             status = response.json()
@@ -700,7 +703,7 @@ def add_to_queue(name, phone, message):
 def send_to_fpp(name):
     """Send name to FPP - Start name sequence and display text overlay"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         name_playlist = config.get('name_display_playlist', '')
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
         
@@ -729,15 +732,15 @@ def send_to_fpp(name):
                     seq_file = name_playlist[4:]
                     if not seq_file.endswith('.fseq'):
                         seq_file += '.fseq'
-                    command = "Start Sequence"
-                    command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
+                    seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start"
+                    start_response = requests.get(seq_url, timeout=5)
+                    logging.info(f"   Start sequence response: {start_response.status_code} - {start_response.text}")
                 else:
                     command = "Start Playlist"
                     encoded_playlist = urllib.parse.quote(name_playlist)
                     command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_playlist}/true/false"
-
-                start_response = requests.get(command_url, timeout=5)
-                logging.info(f"   Start response: {start_response.status_code}")
+                    start_response = requests.get(command_url, timeout=5)
+                    logging.info(f"   Start playlist response: {start_response.status_code}")
 
                 time.sleep(0.3)
                 
@@ -832,7 +835,7 @@ def send_to_fpp(name):
 def start_default_playlist():
     """Start the configured default waiting playlist/sequence on loop"""
     import urllib.parse
-    fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+    fpp_host = FPP_HOST
     default_playlist = config.get('default_playlist', '')
 
     if not default_playlist:
@@ -890,7 +893,7 @@ def start_default_playlist():
 def return_to_default_playlist():
     """Clear text and restart the default waiting playlist"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
 
         if overlay_model:
@@ -924,6 +927,32 @@ def return_to_default_playlist():
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
+
+def default_sequence_watchdog():
+    """Keep the default sequence looping. FPP's sequence start plays once and stops,
+    so this watchdog restarts it whenever FPP goes idle and we're not displaying a name."""
+    import time
+    while True:
+        time.sleep(5)
+        try:
+            if not config.get('enabled') or currently_displaying:
+                continue
+            default = config.get('default_playlist', '')
+            if not default.startswith('seq:'):
+                continue  # playlists handle their own looping
+
+            fpp_host = FPP_HOST
+            status_resp = requests.get(f"{fpp_host}/api/fppd/status", timeout=3)
+            if status_resp.status_code != 200:
+                continue
+            status = status_resp.json()
+            status_name = status.get('status_name', '').lower()
+            if status_name in ('idle', ''):
+                logging.info("🔄 Watchdog: FPP idle, restarting default sequence")
+                start_default_playlist()
+        except Exception as e:
+            logging.debug(f"Watchdog error: {e}")
+
 
 def display_worker():
     """Background worker that displays messages from the queue"""
@@ -1253,19 +1282,10 @@ def index():
                     </div>
                 </div>
 
-                <!-- RIGHT COLUMN: FPP Connection + Filters + Text Display -->
+                <!-- RIGHT COLUMN: Filters + Text Display -->
                 <div class="column">
                     <div class="section">
-                        <h2>FPP Connection</h2>
-                        <label>FPP Host URL:</label>
-                        <input type="text" id="fpp_host" value="{{ config.fpp_host }}" placeholder="http://127.0.0.1">
-                        <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
-
-                        <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
-                        <div id="fpp_status"></div>
-
-                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-                        <h2 style="margin-top: 0;">Filters</h2>
+                        <h2>Filters</h2>
 
                         <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
                         <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
@@ -1618,28 +1638,7 @@ def index():
             }
 
 
-            function testFPP() {
-                document.getElementById('fpp_status').innerHTML = '<p>Testing FPP connection...</p>';
-                const fppHost = document.getElementById('fpp_host').value;
-
-                fetch('/api/fpp/test', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({fpp_host: fppHost})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        document.getElementById('fpp_status').innerHTML =
-                            '<p class="success">✅ FPP connection successful! Status: ' + data.status + '</p>';
-                    } else {
-                        document.getElementById('fpp_status').innerHTML =
-                            '<p class="error">❌ Connection failed: ' + data.error + '</p>';
-                    }
-                });
-            }
-
-            var _saveTimer = null;
+var _saveTimer = null;
             function saveConfig() {
                 clearTimeout(_saveTimer);
                 _saveTimer = setTimeout(_doSave, 300);
@@ -1662,7 +1661,6 @@ def index():
                     two_words_max: document.getElementById('two_words_max')?.checked ?? true,
                     profanity_filter: document.getElementById('profanity_filter').checked,
                     use_whitelist: document.getElementById('use_whitelist').checked,
-                    fpp_host: document.getElementById('fpp_host').value,
                     default_playlist: document.getElementById('default_playlist').value,
                     name_display_playlist: document.getElementById('name_display_playlist').value,
                     overlay_model_name: document.getElementById('overlay_model_name').value,
@@ -1719,7 +1717,7 @@ def index():
                     if (el) el.addEventListener('change', saveConfig);
                 });
                 // Text, number, textarea — save when user clicks away
-                ['account_sid','auth_token','phone_number','fpp_host',
+                ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
                  'text_color_hex','text_font_size',
                  'message_template',
@@ -1854,13 +1852,7 @@ def get_fpp_data():
 @app.route('/api/fpp/test', methods=['POST'])
 def test_fpp_api():
     try:
-        data = request.json
-        old_host = config.get('fpp_host')
-        config['fpp_host'] = data.get('fpp_host', 'http://127.0.0.1')
-        
         success, status = test_fpp_connection()
-        config['fpp_host'] = old_host
-        
         return jsonify({"success": success, "status": status})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -2958,7 +2950,7 @@ def api_deactivate():
     # Stop the current playlist/sequence in FPP
     try:
         import urllib.parse
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         command_url = f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}"
         response = requests.get(command_url, timeout=5)
         logging.info(f"🛑 Stop Now: {response.status_code} - {response.text}")
@@ -2985,6 +2977,9 @@ if __name__ == '__main__':
     # Display worker always runs so Testing Tools work without Twilio credentials
     display_thread = threading.Thread(target=display_worker, daemon=True)
     display_thread.start()
+
+    # Watchdog keeps default sequence looping (sequences don't auto-loop via API)
+    threading.Thread(target=default_sequence_watchdog, daemon=True).start()
 
     # Polling thread only starts when plugin is enabled (requires Twilio credentials)
     if config['enabled']:
