@@ -210,7 +210,11 @@ def get_fpp_sequences():
         response = requests.get(f"{fpp_host}/api/sequence", timeout=5)
         if response.status_code == 200:
             sequences = response.json()
-            return sequences if isinstance(sequences, list) else []
+            result = sequences if isinstance(sequences, list) else []
+            logging.info(f"FPP sequences raw response: {sequences}")
+            logging.info(f"Found {len(result)} sequences: {result}")
+            return result
+        logging.warning(f"FPP sequences API returned {response.status_code}: {response.text}")
         return []
     except Exception as e:
         logging.error(f"Error fetching FPP sequences: {e}")
@@ -840,23 +844,44 @@ def start_default_playlist():
             seq_file = default_playlist[4:]
             if not seq_file.endswith('.fseq'):
                 seq_file += '.fseq'
-            command = "Start Sequence"
-            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
+
+            # Try command API first
+            command_url = f"{fpp_host}/api/command/{urllib.parse.quote('Start Sequence')}/{urllib.parse.quote(seq_file)}"
+            logging.info(f"▶️  Starting sequence: {seq_file}")
+            logging.info(f"   URL (command API): {command_url}")
+            response = requests.get(command_url, timeout=5)
+            logging.info(f"   Response: {response.status_code} - {response.text}")
+
+            if response.status_code == 200:
+                logging.info(f"✅ Sequence started via command API")
+                return True
+
+            # Fallback: try FPP's direct sequence endpoint
+            seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start"
+            logging.info(f"   Trying direct sequence API: {seq_url}")
+            response2 = requests.get(seq_url, timeout=5)
+            logging.info(f"   Response: {response2.status_code} - {response2.text}")
+
+            if response2.status_code == 200:
+                logging.info(f"✅ Sequence started via direct API")
+                return True
+
+            logging.error(f"❌ Both sequence start methods failed. command={response.status_code}, direct={response2.status_code}")
+            return False
         else:
             command = "Start Playlist"
             command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/true"
+            logging.info(f"▶️  Starting playlist: {default_playlist}")
+            logging.info(f"   URL: {command_url}")
+            response = requests.get(command_url, timeout=5)
+            logging.info(f"   Response: {response.status_code} - {response.text}")
 
-        logging.info(f"▶️  Starting default playlist: {default_playlist}")
-        logging.info(f"   URL: {command_url}")
-        response = requests.get(command_url, timeout=5)
-        logging.info(f"   Response: {response.status_code} - {response.text}")
-
-        if response.status_code == 200:
-            logging.info(f"✅ Default playlist started")
-            return True
-        else:
-            logging.error(f"❌ Failed to start default playlist: {response.status_code}")
-            return False
+            if response.status_code == 200:
+                logging.info(f"✅ Playlist started")
+                return True
+            else:
+                logging.error(f"❌ Failed to start playlist: {response.status_code}")
+                return False
     except Exception as e:
         logging.error(f"Error starting default playlist: {e}")
         return False
