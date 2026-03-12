@@ -101,4 +101,7 @@ fi
 # Trigger the "FPPD Restart Required" banner in FPP's UI
 setSetting "restartFlag" "1"
 
+# No errors — remove the install log, it's only useful for debugging failures
+rm -f "$LOG"
+
 exit 0

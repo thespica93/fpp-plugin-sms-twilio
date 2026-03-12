@@ -48,4 +48,7 @@ log_and_show "✅ Uninstall complete!"
 log_and_show "All plugin files and dependencies removed"
 log_and_show "========================================"
 
+# No errors — remove the uninstall log, it's only useful for debugging failures
+rm -f "$LOG"
+
 exit 0
