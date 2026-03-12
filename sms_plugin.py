@@ -112,7 +112,7 @@ DEFAULT_CONFIG = {
     "text_font_size": 48,
     "text_position": "Center",
     "message_template": "Merry Christmas {name}!",
-    "scroll_speed": 20,
+    "scroll_speed": 5,
     "text_offset_x": 0,
     "text_offset_y": 0,
     "sms_response_show_not_live": False,
@@ -785,9 +785,11 @@ def send_to_fpp(name):
                 }
                 fpp_position = position_map.get(text_position, 'Center')
 
+                state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
+                # Reset to State 0 first so scroll position starts fresh each time
+                requests.put(state_url, json={"State": 0}, timeout=5)
                 # State 3 = Transparent RGB: text pixels replace underlying FSEQ pixels
                 # (correct color), non-text pixels stay transparent (FSEQ shows through)
-                state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
                 state_resp = requests.put(state_url, json={"State": 3}, timeout=5)
                 logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
 
@@ -798,7 +800,7 @@ def send_to_fpp(name):
                     "Font": text_font,
                     "FontSize": font_size,
                     "Position": fpp_position,
-                    "PixelsPerSecond": scroll_speed,
+                    "PixelsPerSecond": scroll_speed * 20,
                     "AntiAlias": True,
                     "AutoEnable": False
                 }
@@ -1033,32 +1035,32 @@ def poll_twilio():
                 time.sleep(config.get('poll_interval', 2))
                 continue
             
-            logging.info("📡 Polling Twilio for new messages...")
-            
+            logging.debug("📡 Polling Twilio for new messages...")
+
             messages = twilio_client.messages.list(
                 to=config['twilio_phone_number'],
                 date_sent_after=datetime.utcnow() - timedelta(minutes=10),
                 limit=20
             )
-            
-            logging.info(f"📨 Found {len(messages)} total messages in last 10 minutes")
-            
+
+            logging.debug(f"📨 Found {len(messages)} total messages in last 10 minutes")
+
             new_messages = []
             for msg in messages:
                 if last_message_sid and msg.sid == last_message_sid:
-                    logging.info(f"✓ Reached last processed message SID: {last_message_sid[:10]}...")
+                    logging.debug(f"✓ Reached last processed message SID: {last_message_sid[:10]}...")
                     break
                 new_messages.append(msg)
-            
-            logging.info(f"🆕 Found {len(new_messages)} NEW messages to process")
-            
+
+            logging.debug(f"🆕 Found {len(new_messages)} NEW messages to process")
+
             if first_run:
                 if len(messages) > 0:
                     last_message_sid = messages[0].sid
                     save_last_sid(messages[0].sid)
-                    logging.info(f"⚙️ First run: Initialized with message SID {messages[0].sid[:10]}..., will process new messages from now on")
+                    logging.info(f"⚙️ First run: initialized SID {messages[0].sid[:10]}...")
                 else:
-                    logging.info("⚙️ First run: No messages found, will process new messages from now on")
+                    logging.info("⚙️ First run: no messages found, polling from now on")
                 first_run = False
                 time.sleep(config['poll_interval'])
                 continue
@@ -1067,7 +1069,7 @@ def poll_twilio():
                 from_number = msg.from_
                 body = msg.body
 
-                logging.info(f"📱 NEW SMS from {from_number[-4:]}: '{body}'")
+                logging.info(f"📱 SMS from {from_number[-4:]}: '{body[:30]}'")  # keep at INFO — new message is significant
 
                 try:
                     if not config.get('enabled', False):
@@ -1082,57 +1084,55 @@ def poll_twilio():
 
                     # Exactly one branch fires — only one SMS response is ever sent per message
                     if is_blocked(from_number):
-                        logging.info(f"🚫 Blocked number: {from_number}")
+                        logging.info(f"🚫 Blocked: {from_number[-4:]}")
                         log_message(from_number, body, "", "blocked")
                         send_sms_response(from_number, "blocked")
 
                     else:
                         name = extract_name(body)
-                        logging.info(f"👤 Extracted name: '{name}'")
-                        msg_count = get_message_count(from_number)
+                        logging.debug(f"👤 Extracted name: '{name}'")
                         max_msgs = config.get('max_messages_per_phone', 0)
+                        msg_count = get_message_count(from_number) if max_msgs > 0 else 0
                         is_valid, _ = is_valid_name(name)
 
                         if max_msgs > 0 and msg_count >= max_msgs:
-                            logging.info(f"⛔ Rate limited: {from_number}")
+                            logging.info(f"⛔ Rate limited: {from_number[-4:]}")
                             log_message(from_number, body, "", "rate_limited")
                             send_sms_response(from_number, "rate_limited")
 
-                        elif has_sent_name_today(from_number, name):
-                            logging.info(f"🔄 Duplicate name from same phone today: {name} from {from_number[-4:]}")
+                        elif max_msgs > 0 and has_sent_name_today(from_number, name):
+                            logging.info(f"🔄 Duplicate name: {name}")
                             log_message(from_number, body, name, "duplicate_name_today")
                             send_sms_response(from_number, "duplicate")
 
                         elif not is_valid and not config.get('use_whitelist', False):
-                            logging.info(f"❌ Rejected invalid name format: {body}")
+                            logging.info(f"❌ Invalid format: '{body[:20]}'")
                             log_message(from_number, body, name, "invalid_format")
                             send_sms_response(from_number, "invalid_format")
 
                         elif not is_on_whitelist(name):
-                            logging.info(f"❌ Rejected name not on whitelist: {name}")
+                            logging.info(f"❌ Not on whitelist: {name}")
                             log_message(from_number, body, name, "not_on_whitelist")
                             send_sms_response(from_number, "not_whitelisted")
 
                         elif config['profanity_filter'] and contains_profanity(body):
-                            logging.info(f"❌ Rejected profanity from {from_number}")
+                            logging.info(f"❌ Profanity rejected")
                             log_message(from_number, body, name, "profanity")
                             send_sms_response(from_number, "profanity")
 
                         else:
-                            logging.info(f"📋 Adding to queue...")
                             success = add_to_queue(name, from_number, body)
-                            logging.info(f"📋 Add to queue result: {success}")
                             if success:
-                                logging.info(f"✅ SUCCESS! Queued: {name}")
+                                logging.info(f"✅ Queued: {name}")
                                 log_message(from_number, body, name, "queued")
                                 send_sms_response(from_number, "success")
                             else:
-                                logging.info(f"❌ Error queuing: {name}")
+                                logging.warning(f"❌ Queue error: {name}")
                                 log_message(from_number, body, name, "error")
 
                     last_message_sid = msg.sid
                     save_last_sid(msg.sid)
-                    logging.info(f"💾 Saved last message SID: {msg.sid[:10]}...")
+                    logging.debug(f"💾 Saved SID: {msg.sid[:10]}...")
 
                 except Exception as e:
                     logging.error(f"💥 EXCEPTION processing message: {e}")
@@ -1407,9 +1407,9 @@ def index():
                         <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
 
                         <div id="scroll_speed_row">
-                            <label>Scroll Speed (pixels per second):</label>
-                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
-                            <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
+                            <label>Scroll Speed:</label>
+                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10">
+                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
                         </div>
                     </div>
                 </div>
@@ -1693,7 +1693,6 @@ var _saveTimer = null;
                 status.textContent = 'Saving...';
 
                 const data = {
-                    enabled: document.getElementById('enabled').checked,
                     twilio_account_sid: document.getElementById('account_sid').value,
                     twilio_auth_token: document.getElementById('auth_token').value,
                     twilio_phone_number: document.getElementById('phone_number').value,
@@ -1750,8 +1749,19 @@ var _saveTimer = null;
             }
 
             function setupAutoSave() {
+                // enabled has its own handler — saves only itself so it never
+                // clobbers the runtime state set by TwilioStart/TwilioStop
+                var enabledEl = document.getElementById('enabled');
+                if (enabledEl) enabledEl.addEventListener('change', function() {
+                    fetch('/api/config', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({enabled: this.checked})
+                    });
+                });
+
                 // Checkboxes, selects, color picker — save immediately on change
-                ['enabled','profanity_filter','use_whitelist','text_color',
+                ['profanity_filter','use_whitelist','text_color',
                  'default_playlist','name_display_playlist','overlay_model_name',
                  'text_font','text_position','scroll_speed',
                  'one_word_only','two_words_max',
