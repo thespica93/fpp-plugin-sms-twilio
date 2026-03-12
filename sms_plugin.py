@@ -1952,7 +1952,7 @@ def test_message_submission():
     try:
         data = request.json
         test_name = data.get('name', '').strip()
-        test_phone = data.get('phone', '+15555550000')
+        test_phone = data.get('phone', 'Local Testing')
         
         logging.info(f"🧪 ===== TEST MESSAGE RECEIVED =====")
         logging.info(f"🧪 Raw input: '{test_name}'")
@@ -2895,8 +2895,11 @@ def view_messages():
                 var statusLabel = {'displaying':'🎬 DISPLAYING NOW','queued':'📋 Queued','displayed':'✅ Displayed'};
                 var rows = messages.map(function(msg) {
                     var label = statusLabel[msg.status] || esc(msg.status);
-                    var btn = '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
-                              '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
+                    var isTest = (msg.phone_full === 'Local Testing');
+                    var btn = isTest
+                        ? '<button class="block-btn" disabled style="opacity:0.35;cursor:not-allowed;" title="Cannot block the local test number">🚫 Block</button>'
+                        : '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
+                          '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
                     return '<tr class="' + esc(msg.status) + '">' +
                         '<td>' + esc(msg.timestamp) + '</td>' +
                         '<td>' + esc(msg.phone) + '</td>' +
