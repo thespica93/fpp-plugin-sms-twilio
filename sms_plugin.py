@@ -48,11 +48,10 @@ try:
 except Exception:
     pass  # directory may not exist on some FPP installs; stderr is the fallback
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.ERROR,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=_log_handlers
 )
-# Suppress Flask/werkzeug per-request access logs — they write on every page hit
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
@@ -1979,48 +1978,32 @@ def test_message_submission():
         test_name = data.get('name', '').strip()
         test_phone = data.get('phone', 'Local Testing')
         
-        logging.info(f"🧪 ===== TEST MESSAGE RECEIVED =====")
-        logging.info(f"🧪 Raw input: '{test_name}'")
-
         if not config.get('enabled', False):
-            logging.warning(f"🧪 TEST BLOCKED: Show is not live (plugin not activated)")
             return jsonify({"success": False, "error": "Show is not live — run TwilioStart first"})
 
         if not test_name:
-            logging.warning(f"🧪 TEST FAILED: Name is empty")
             return jsonify({"success": False, "error": "Name is required"})
-        
+
         test_name = extract_name(test_name)
-        logging.info(f"🧪 Extracted name (proper case): '{test_name}'")
-        
-        logging.info(f"🧪 Checking name format...")
         is_valid, validation_msg = is_valid_name(test_name)
-        logging.info(f"🧪 Name format valid: {is_valid}")
-        
+
         if not is_valid:
-            logging.warning(f"🧪 TEST FAILED: Invalid format - {validation_msg}")
             return jsonify({"success": False, "error": validation_msg, "reason": "invalid_format"})
-        
-        logging.info(f"🧪 Checking whitelist...")
+
         if not is_on_whitelist(test_name):
-            logging.warning(f"🧪 TEST FAILED: Not on whitelist")
             return jsonify({"success": False, "error": "Name not on whitelist", "reason": "not_on_whitelist"})
-        
-        logging.info(f"🧪 Checking profanity...")
+
         if config['profanity_filter'] and contains_profanity(test_name):
-            logging.warning(f"🧪 TEST FAILED: Profanity detected")
             return jsonify({"success": False, "error": "Profanity detected", "reason": "profanity"})
-        
-        logging.info(f"🧪 Adding to queue...")
+
         success = add_to_queue(test_name, test_phone, f"TEST: {test_name}")
-        logging.info(f"🧪 Add to queue result: {success}")
-        
+
         if success:
-            logging.info(f"🧪 ✅ TEST MESSAGE QUEUED: {test_name}")
+            logging.info(f"🧪 Queued: {test_name}")
             log_message(test_phone, f"TEST: {test_name}", test_name, "queued")
             return jsonify({"success": True, "message": f"Test message '{test_name}' queued successfully!"})
         else:
-            logging.error(f"🧪 ❌ TEST FAILED: Could not add to queue")
+            logging.error(f"🧪 Queue error: {test_name}")
             return jsonify({"success": False, "error": "Failed to add to queue"})
             
     except Exception as e:
@@ -2043,7 +2026,7 @@ def test_sms_response():
         if not config.get('send_sms_responses', False):
             return jsonify({"success": False, "error": "SMS responses are disabled. Enable them in settings first!"})
         
-        logging.info(f"🧪 TEST SMS: Sending '{message_type}' response to {phone}")
+        logging.debug(f"🧪 TEST SMS: '{message_type}' to {phone}")
         
         success = send_sms_response(phone, message_type)
         
