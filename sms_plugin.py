@@ -721,8 +721,16 @@ def send_to_fpp(name):
         # Step 1: Start the name display playlist/sequence (background)
         if name_playlist:
             try:
-                logging.info(f"⏸️  STEP 1: Stopping all playlists...")
+                logging.info(f"⏸️  STEP 1: Stopping current sequence/playlist...")
                 requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+                # Also stop the waiting sequence if it was started directly
+                default = config.get('default_playlist', '')
+                if default.startswith('seq:'):
+                    wait_seq = default[4:]
+                    if not wait_seq.endswith('.fseq'):
+                        wait_seq += '.fseq'
+                    import urllib.parse as _ul
+                    requests.get(f"{fpp_host}/api/sequence/{_ul.quote(wait_seq)}/stop", timeout=5)
                 time.sleep(0.1)
 
                 logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
@@ -859,11 +867,14 @@ def start_default_playlist():
                 logging.info(f"✅ Sequence started via command API")
                 return True
 
-            # Fallback: try FPP's direct sequence endpoint (with loop=1 hint)
-            seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start?loop=1"
-            logging.info(f"   Trying direct sequence API: {seq_url}")
-            response2 = requests.get(seq_url, timeout=5)
+            # Fallback: try FPP's direct sequence endpoint, try POST with loop body first
+            seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start"
+            logging.info(f"   Trying direct sequence API (POST loop): {seq_url}")
+            response2 = requests.post(seq_url, json={"loop": True}, timeout=5)
             logging.info(f"   Response: {response2.status_code} - {response2.text}")
+            if response2.status_code not in (200, 201):
+                response2 = requests.get(seq_url, timeout=5)
+                logging.info(f"   GET fallback: {response2.status_code} - {response2.text}")
 
             if response2.status_code == 200:
                 logging.info(f"✅ Sequence started via direct API")
@@ -951,7 +962,7 @@ def default_sequence_watchdog():
                 logging.info("🔄 Watchdog: FPP idle, restarting default sequence")
                 start_default_playlist()
         except Exception as e:
-            logging.debug(f"Watchdog error: {e}")
+            logging.warning(f"Watchdog error: {e}")
 
 
 def display_worker():
@@ -1291,12 +1302,12 @@ def index():
                             <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState()">
                             <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
                             <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
-                            <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
-                                ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended.
-                            </div>
-                            <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
-                                ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
-                            </div>
+                        </div>
+                        <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                            ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended.
+                        </div>
+                        <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                            ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
                         </div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
