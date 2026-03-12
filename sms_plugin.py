@@ -858,12 +858,11 @@ def start_default_playlist():
             if not seq_file.endswith('.fseq'):
                 seq_file += '.fseq'
 
-            # Use FSEQ Effect (loop=true, background=true):
-            # - Loops continuously with no flash between repeats
-            # - Automatically suppressed when a foreground sequence/playlist starts
-            # - Auto-resumes when foreground sequence stops
-            effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_file)}/true/true"
-            logging.info(f"▶️  Starting FSEQ Effect Start (loop+background): {seq_file}")
+            # Use FSEQ Effect (loop=true, background=false):
+            # - background=false starts immediately (background=true requires FPP player active)
+            # - loop=true loops natively without a watchdog
+            effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_file)}/true/false"
+            logging.info(f"▶️  Starting FSEQ Effect Start (loop, foreground): {seq_file}")
             logging.info(f"   URL: {effect_url}")
             response = requests.get(effect_url, timeout=5)
             logging.info(f"   Response: {response.status_code} - {response.text}")
@@ -922,26 +921,22 @@ def return_to_default_playlist():
             logging.info(f"📋 Queue has {queue_length} more names — skipping return-to-default")
             return
 
-        default = config.get('default_playlist', '')
         name_playlist = config.get('name_display_playlist', '')
 
-        if default.startswith('seq:'):
-            # FSEQ Effect mode: stop the names sequence so background auto-resumes
-            if name_playlist:
-                import urllib.parse
-                if name_playlist.startswith('seq:'):
-                    seq_file = name_playlist[4:]
-                    if not seq_file.endswith('.fseq'):
-                        seq_file += '.fseq'
-                    stop_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/stop"
-                    r = requests.get(stop_url, timeout=5)
-                    logging.info(f"⏹️  Stopped names sequence ({r.status_code}) — background FSEQ auto-resumes")
-                else:
-                    requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
-                    logging.info("⏹️  Stopped names playlist — background FSEQ auto-resumes")
-        else:
-            # Playlist mode: explicitly restart the default playlist
-            start_default_playlist()
+        # Stop names sequence/playlist then restart the waiting FSEQ Effect
+        import urllib.parse
+        if name_playlist:
+            if name_playlist.startswith('seq:'):
+                seq_file = name_playlist[4:]
+                if not seq_file.endswith('.fseq'):
+                    seq_file += '.fseq'
+                r = requests.get(f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/stop", timeout=5)
+                logging.info(f"⏹️  Stopped names sequence ({r.status_code})")
+            else:
+                requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+                logging.info("⏹️  Stopped names playlist")
+
+        start_default_playlist()
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
