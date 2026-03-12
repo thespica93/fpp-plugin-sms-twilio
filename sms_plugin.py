@@ -2151,13 +2151,25 @@ def api_add_whitelist():
         name = data.get('name', '').strip().lower()
         if not name:
             return jsonify({"success": False, "error": "Name is required"})
-        # Check if already in global list
         global_names = set()
         if os.path.exists(WHITELIST_FILE):
             with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 global_names = {line.strip().lower() for line in f if line.strip()}
+        removed = load_removed_names()
+
         if name in global_names:
-            return jsonify({"success": False, "error": "Name already in whitelist"})
+            if name in removed:
+                # Name was blocked by user — un-remove it to make it active again
+                removed.discard(name)
+                with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(sorted(removed)) + '\n')
+                _whitelist_cache = None
+                _whitelist_mtime = None
+                logging.info(f"Re-enabled '{name}' in whitelist")
+                return jsonify({"success": True})
+            else:
+                return jsonify({"success": False, "error": "Name already in whitelist"})
+
         # Add to user-added list
         added = load_whitelist_added()
         if name in added:
@@ -2166,7 +2178,6 @@ def api_add_whitelist():
         with open(WHITELIST_ADDED_FILE, 'w', encoding='utf-8') as f:
             f.write('\n'.join(sorted(added)) + '\n')
         # If name was previously removed from global, un-remove it
-        removed = load_removed_names()
         if name in removed:
             removed.discard(name)
             with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
