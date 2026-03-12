@@ -721,16 +721,10 @@ def send_to_fpp(name):
         # Step 1: Start the name display playlist/sequence (background)
         if name_playlist:
             try:
-                logging.info(f"⏸️  STEP 1: Stopping current sequence/playlist...")
+                logging.info(f"⏸️  STEP 1: Stopping any running playlist...")
                 requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
-                # Also stop the waiting sequence if it was started directly
-                default = config.get('default_playlist', '')
-                if default.startswith('seq:'):
-                    wait_seq = default[4:]
-                    if not wait_seq.endswith('.fseq'):
-                        wait_seq += '.fseq'
-                    import urllib.parse as _ul
-                    requests.get(f"{fpp_host}/api/sequence/{_ul.quote(wait_seq)}/stop", timeout=5)
+                # Note: background FSEQ Effect is NOT stopped here — the names sequence
+                # (foreground) will automatically suppress it and it auto-resumes after.
                 time.sleep(0.1)
 
                 logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
@@ -841,7 +835,9 @@ def send_to_fpp(name):
         logging.error(traceback.format_exc())
         return False
 def start_default_playlist():
-    """Start the configured default waiting playlist/sequence on loop"""
+    """Start the configured default waiting playlist/sequence.
+    For sequences (seq:), uses FSEQ Effect (loop=true, background=true) so it loops
+    seamlessly and automatically yields to/resumes from any foreground sequence."""
     import urllib.parse
     fpp_host = FPP_HOST
     default_playlist = config.get('default_playlist', '')
@@ -856,31 +852,21 @@ def start_default_playlist():
             if not seq_file.endswith('.fseq'):
                 seq_file += '.fseq'
 
-            # Try command API first
-            command_url = f"{fpp_host}/api/command/{urllib.parse.quote('Start Sequence')}/{urllib.parse.quote(seq_file)}"
-            logging.info(f"▶️  Starting sequence: {seq_file}")
-            logging.info(f"   URL (command API): {command_url}")
-            response = requests.get(command_url, timeout=5)
+            # Use FSEQ Effect (loop=true, background=true):
+            # - Loops continuously with no flash between repeats
+            # - Automatically suppressed when a foreground sequence/playlist starts
+            # - Auto-resumes when foreground sequence stops
+            effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_file)}/true/true"
+            logging.info(f"▶️  Starting FSEQ Effect Start (loop+background): {seq_file}")
+            logging.info(f"   URL: {effect_url}")
+            response = requests.get(effect_url, timeout=5)
             logging.info(f"   Response: {response.status_code} - {response.text}")
 
             if response.status_code == 200:
-                logging.info(f"✅ Sequence started via command API")
+                logging.info(f"✅ FSEQ Effect Start — looping in background")
                 return True
 
-            # Fallback: try FPP's direct sequence endpoint, try POST with loop body first
-            seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start"
-            logging.info(f"   Trying direct sequence API (POST loop): {seq_url}")
-            response2 = requests.post(seq_url, json={"loop": True}, timeout=5)
-            logging.info(f"   Response: {response2.status_code} - {response2.text}")
-            if response2.status_code not in (200, 201):
-                response2 = requests.get(seq_url, timeout=5)
-                logging.info(f"   GET fallback: {response2.status_code} - {response2.text}")
-
-            if response2.status_code == 200:
-                logging.info(f"✅ Sequence started via direct API")
-                return True
-
-            logging.error(f"❌ Both sequence start methods failed. command={response.status_code}, direct={response2.status_code}")
+            logging.error(f"❌ FSEQ Effect Start failed: {response.status_code} - {response.text}")
             return False
         else:
             command = "Start Playlist"
@@ -902,7 +888,9 @@ def start_default_playlist():
 
 
 def return_to_default_playlist():
-    """Clear text and restart the default waiting playlist"""
+    """Clear text overlay and stop the names sequence/playlist.
+    If the default is a seq: (FSEQ Effect background), the background auto-resumes.
+    If the default is a playlist, restart it explicitly."""
     try:
         fpp_host = FPP_HOST
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
@@ -911,15 +899,9 @@ def return_to_default_playlist():
             try:
                 logging.info(f"🧹 Clearing text from model: {overlay_model}")
                 import urllib.parse
-
-                command = "Overlay Model Clear"
-                encoded_model = urllib.parse.quote(overlay_model)
-                fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}"
-
-                logging.info(f"   Clear URL: {fpp_url}")
+                fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote('Overlay Model Clear')}/{urllib.parse.quote(overlay_model)}"
                 response = requests.get(fpp_url, timeout=5)
                 logging.info(f"   Clear response: {response.status_code} - {response.text}")
-
                 if response.status_code == 200:
                     logging.info(f"✅ Text cleared")
                 else:
@@ -931,38 +913,32 @@ def return_to_default_playlist():
             queue_length = len(message_queue)
 
         if queue_length > 0:
-            logging.info(f"📋 Queue has {queue_length} more names - NOT returning to default playlist yet")
+            logging.info(f"📋 Queue has {queue_length} more names — skipping return-to-default")
             return
 
-        start_default_playlist()
+        default = config.get('default_playlist', '')
+        name_playlist = config.get('name_display_playlist', '')
+
+        if default.startswith('seq:'):
+            # FSEQ Effect mode: stop the names sequence so background auto-resumes
+            if name_playlist:
+                import urllib.parse
+                if name_playlist.startswith('seq:'):
+                    seq_file = name_playlist[4:]
+                    if not seq_file.endswith('.fseq'):
+                        seq_file += '.fseq'
+                    stop_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/stop"
+                    r = requests.get(stop_url, timeout=5)
+                    logging.info(f"⏹️  Stopped names sequence ({r.status_code}) — background FSEQ auto-resumes")
+                else:
+                    requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+                    logging.info("⏹️  Stopped names playlist — background FSEQ auto-resumes")
+        else:
+            # Playlist mode: explicitly restart the default playlist
+            start_default_playlist()
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
-
-def default_sequence_watchdog():
-    """Keep the default sequence looping. FPP's sequence start plays once and stops,
-    so this watchdog restarts it whenever FPP goes idle and we're not displaying a name."""
-    import time
-    while True:
-        time.sleep(1)
-        try:
-            if not config.get('enabled') or currently_displaying:
-                continue
-            default = config.get('default_playlist', '')
-            if not default.startswith('seq:'):
-                continue  # playlists handle their own looping
-
-            fpp_host = FPP_HOST
-            status_resp = requests.get(f"{fpp_host}/api/fppd/status", timeout=3)
-            if status_resp.status_code != 200:
-                continue
-            status = status_resp.json()
-            status_name = status.get('status_name', '').lower()
-            if status_name in ('idle', ''):
-                logging.info("🔄 Watchdog: FPP idle, restarting default sequence")
-                start_default_playlist()
-        except Exception as e:
-            logging.warning(f"Watchdog error: {e}")
 
 
 def display_worker():
@@ -2980,21 +2956,21 @@ def api_deactivate():
     stop_polling = True
     save_config()
 
-    # Stop the current sequence/playlist in FPP immediately
+    # Stop the current sequence/playlist and any background FSEQ effect
     try:
         import urllib.parse
 
-        # Stop any directly-started sequence via the sequence API
         default = config.get('default_playlist', '')
         if default.startswith('seq:'):
+            # Stop background FSEQ Effect
             seq_file = default[4:]
             if not seq_file.endswith('.fseq'):
                 seq_file += '.fseq'
-            stop_url = f"{FPP_HOST}/api/sequence/{urllib.parse.quote(seq_file)}/stop"
-            r = requests.get(stop_url, timeout=5)
-            logging.info(f"🛑 Sequence stop: {r.status_code} - {r.text}")
+            effect_stop_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_file)}"
+            r = requests.get(effect_stop_url, timeout=5)
+            logging.info(f"🛑 FSEQ Effect Stop: {r.status_code} - {r.text}")
 
-        # Also send Stop Now to catch playlists and anything else
+        # Stop Now catches playlists and any foreground sequences
         command_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('Stop Now')}"
         r2 = requests.get(command_url, timeout=5)
         logging.info(f"🛑 Stop Now: {r2.status_code} - {r2.text}")
@@ -3021,9 +2997,6 @@ if __name__ == '__main__':
     # Display worker always runs so Testing Tools work without Twilio credentials
     display_thread = threading.Thread(target=display_worker, daemon=True)
     display_thread.start()
-
-    # Watchdog keeps default sequence looping (sequences don't auto-loop via API)
-    threading.Thread(target=default_sequence_watchdog, daemon=True).start()
 
     # Polling thread only starts when plugin is enabled (requires Twilio credentials)
     if config['enabled']:
