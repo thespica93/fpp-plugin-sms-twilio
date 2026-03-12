@@ -52,6 +52,8 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=_log_handlers
 )
+# Suppress Flask/werkzeug per-request access logs — they write on every page hit
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
@@ -160,6 +162,11 @@ def load_config():
         if new_keys:
             save_config()
             logging.info(f"Saved {len(new_keys)} new default setting(s) after update: {new_keys}")
+
+        # Migrate old scroll_speed values (pre-v2.6 stored raw px/s, now 1-10 scale)
+        if config.get('scroll_speed', 5) > 10:
+            config['scroll_speed'] = 5
+            save_config()
 
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
@@ -1420,7 +1427,8 @@ def index():
 
                         <div id="scroll_speed_row">
                             <label>Scroll Speed:</label>
-                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10">
+                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
+                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
                             <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
                         </div>
                     </div>
