@@ -115,10 +115,11 @@ DEFAULT_CONFIG = {
     "text_font": "FreeSans",
     "text_font_size": 48,
     "text_position": "Center",
+    "text_v_align": "center",
     "message_template": "Merry Christmas {name}!",
     "scroll_speed": 5,
-    "text_offset_x": 0,
-    "text_offset_y": 0,
+    "overlay_model_width": 0,
+    "overlay_model_height": 0,
     "sms_response_show_not_live": False,
     "sms_response_success": False,
     "sms_response_profanity": False,
@@ -241,30 +242,35 @@ def get_fpp_sequences():
         return []
 
 def get_fpp_models():
-    """Get list of overlay models from FPP"""
+    """Get list of overlay models from FPP, including pixel dimensions when available"""
     try:
         fpp_host = FPP_HOST
         response = requests.get(f"{fpp_host}/api/models", timeout=5)
         if response.status_code == 200:
             data = response.json()
-            logging.info(f"FPP Models API response: {data}")
-            
+
+            def extract_model(m):
+                if not (isinstance(m, dict) and 'Name' in m):
+                    return None
+                w = int(m.get('Width') or m.get('width') or m.get('Cols') or m.get('cols') or 0)
+                h = int(m.get('Height') or m.get('height') or m.get('Rows') or m.get('rows') or 0)
+                return {"name": m['Name'], "width": w, "height": h}
+
             models = []
-            
             if isinstance(data, dict) and 'models' in data:
-                for model in data['models']:
-                    if isinstance(model, dict) and 'Name' in model:
-                        models.append(model['Name'])
+                for m in data['models']:
+                    obj = extract_model(m)
+                    if obj: models.append(obj)
             elif isinstance(data, list):
-                for model in data:
-                    if isinstance(model, dict) and 'Name' in model:
-                        models.append(model['Name'])
+                for m in data:
+                    obj = extract_model(m)
+                    if obj: models.append(obj)
             elif isinstance(data, dict):
-                models = list(data.keys())
-            
-            logging.info(f"Extracted {len(models)} models: {models}")
+                models = [{"name": k, "width": 0, "height": 0} for k in data.keys()]
+
+            logging.info(f"Extracted {len(models)} models")
             return models
-        
+
         logging.warning(f"FPP models API returned status {response.status_code}")
         return []
     except Exception as e:
@@ -724,9 +730,25 @@ def send_to_fpp(name):
         name_playlist = config.get('name_display_playlist', '')
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
         
-        # FIXED: Get message template and replace {name} with actual name
+        # Get message template and replace {name} with actual name
         message_template = config.get('message_template', 'Merry Christmas {name}!')
         display_message = message_template.replace('{name}', name)
+
+        # Vertical alignment: pad with newlines to shift text on the matrix.
+        # FPP "Center" centers the full text block vertically, so:
+        #   top    → append trailing newlines (block grows down → text rises)
+        #   bottom → prepend leading newlines (block grows up → text sinks)
+        #   center → no change (FPP centers naturally)
+        v_align = config.get('text_v_align', 'center')
+        model_height = config.get('overlay_model_height', 0)
+        font_size = config.get('text_font_size', 48)
+        if v_align != 'center' and model_height > font_size:
+            pad = max(0, (model_height // font_size) - 1)
+            if pad > 0:
+                if v_align == 'top':
+                    display_message = display_message + '\n' * pad
+                elif v_align == 'bottom':
+                    display_message = '\n' * pad + display_message
         
         logging.info(f"🎄 ========== STARTING DISPLAY FOR: {name} ==========")
         logging.info(f"📺 FPP Host: {fpp_host}")
@@ -1197,6 +1219,11 @@ def index():
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
+            .valign-picker { display: flex; gap: 6px; margin: 4px 0; }
+            .valign-btn { flex: 1; padding: 7px 4px; border: 1px solid #ccc; background: #f5f5f5; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.15s, border-color 0.15s; }
+            .valign-btn.active { background: #4CAF50; color: white; border-color: #388E3C; font-weight: bold; }
+            .valign-btn:hover:not(.active) { background: #e8e8e8; }
+            #message_template { font-family: monospace; min-height: 50px; max-height: 180px; resize: vertical; }
             .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
             .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
             .column .section { flex: 0 0 auto; }
@@ -1383,8 +1410,8 @@ def index():
                         <h2 style="margin-top: 0;">Text Display Options</h2>
 
                         <label>Message Template:</label>
-                        <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines. Use spaces to shift text position.</p>
+                        <textarea id="message_template">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
+                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines.</p>
 
                         <label>Text Color:</label>
                         <div style="display: flex; align-items: center; gap: 10px;">
@@ -1433,6 +1460,17 @@ def index():
                                    oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
                             <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
                         </div>
+
+                        <label>Vertical Alignment:</label>
+                        <div class="valign-picker">
+                            <button type="button" class="valign-btn" data-val="top">▲ Top</button>
+                            <button type="button" class="valign-btn" data-val="center">● Center</button>
+                            <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
+                        </div>
+                        <input type="hidden" id="text_v_align" value="{{ config.get('text_v_align', 'center') }}">
+                        <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
+                        <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
+                        <p class="help-text">↕ Shifts text vertically on the matrix (approximate, based on model size)</p>
                     </div>
                 </div>
 
@@ -1617,6 +1655,27 @@ def index():
                 if (row) row.style.display = (pos === 'Center') ? 'none' : '';
             }
 
+            function updateModelAspect(width, height) {
+                var ta = document.getElementById('message_template');
+                if (ta && width > 0 && height > 0) {
+                    ta.style.aspectRatio = (width / height).toFixed(2);
+                    ta.style.height = 'auto';
+                }
+            }
+
+            function initValignButtons() {
+                var current = document.getElementById('text_v_align').value || 'center';
+                document.querySelectorAll('.valign-btn').forEach(function(btn) {
+                    btn.classList.toggle('active', btn.dataset.val === current);
+                    btn.addEventListener('click', function() {
+                        document.querySelectorAll('.valign-btn').forEach(function(b) { b.classList.remove('active'); });
+                        this.classList.add('active');
+                        document.getElementById('text_v_align').value = this.dataset.val;
+                        saveConfig();
+                    });
+                });
+            }
+
             window.onload = function() {
                 loadFPPData();
                 initRespRows();
@@ -1624,6 +1683,11 @@ def index():
                 updateLiveStatus();
                 setInterval(updateLiveStatus, 5000);
                 updateScrollSpeedVisibility();
+                initValignButtons();
+                // Apply saved model aspect ratio on load
+                var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
+                var h = parseInt(document.getElementById('overlay_model_height').value) || 0;
+                if (w > 0 && h > 0) updateModelAspect(w, h);
             };
 
             function showTab(tabName, btn) {
@@ -1679,13 +1743,29 @@ def index():
                     const modelSelect = document.getElementById('overlay_model_name');
                     const currentModel = "{{ config.get('overlay_model_name', 'Texting Matrix') }}";
                     modelSelect.innerHTML = '<option value="">-- None --</option>';
+                    window.fppModels = data.models || [];
 
                     if (data.models && data.models.length > 0) {
                         data.models.forEach(model => {
-                            const opt = new Option(model, model, false, model === currentModel);
+                            const name = typeof model === 'object' ? model.name : model;
+                            const opt = new Option(name, name, false, name === currentModel);
                             modelSelect.add(opt);
                         });
+                        // Set aspect ratio for the currently selected model
+                        const cur = data.models.find(m => (typeof m === 'object' ? m.name : m) === currentModel);
+                        if (cur && cur.width && cur.height) updateModelAspect(cur.width, cur.height);
                     }
+
+                    modelSelect.addEventListener('change', function() {
+                        const selected = this.value;
+                        const m = (window.fppModels || []).find(m => (typeof m === 'object' ? m.name : m) === selected);
+                        if (m && m.width && m.height) {
+                            updateModelAspect(m.width, m.height);
+                            document.getElementById('overlay_model_width').value = m.width;
+                            document.getElementById('overlay_model_height').value = m.height;
+                        }
+                        saveConfig();
+                    });
 
                     const fontSelect = document.getElementById('text_font');
                     const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
@@ -1734,6 +1814,9 @@ var _saveTimer = null;
                     text_font_size: parseInt(document.getElementById('text_font_size').value),
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
                     text_position: document.getElementById('text_position').value,
+                    text_v_align: document.getElementById('text_v_align').value,
+                    overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
+                    overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
                     message_template: document.getElementById('message_template').value,
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
