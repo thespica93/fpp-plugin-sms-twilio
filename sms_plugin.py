@@ -115,6 +115,7 @@ DEFAULT_CONFIG = {
     "scroll_speed": 20,
     "text_offset_x": 0,
     "text_offset_y": 0,
+    "sms_response_show_not_live": False,
     "sms_response_success": False,
     "sms_response_profanity": False,
     "sms_response_rate_limited": False,
@@ -122,6 +123,7 @@ DEFAULT_CONFIG = {
     "sms_response_invalid_format": False,
     "sms_response_not_whitelisted": False,
     "sms_response_blocked": False,
+    "response_show_not_live": "Ho, Ho, Ho, It looks like our show isn't running now. Try again later.",
     "response_success": "Merry Christmas! Your name will appear on our display soon! 🎄",
     "response_profanity": "Sorry, your message contains inappropriate content and cannot be displayed. Please keep within the Christmas spirit! 🎅",
     "response_blocked": "Sorry, Your phone number has been blocked from sending messages.",
@@ -1034,8 +1036,8 @@ def poll_twilio():
     
     while not stop_polling:
         try:
-            if not config['enabled'] or not twilio_client:
-                time.sleep(config['poll_interval'])
+            if not twilio_client:
+                time.sleep(config.get('poll_interval', 2))
                 continue
             
             logging.info("📡 Polling Twilio for new messages...")
@@ -1071,10 +1073,20 @@ def poll_twilio():
             for msg in reversed(new_messages):
                 from_number = msg.from_
                 body = msg.body
-                
+
                 logging.info(f"📱 NEW SMS from {from_number[-4:]}: '{body}'")
-                
+
                 try:
+                    if not config.get('enabled', False):
+                        # Show not live — reply if enabled, then discard
+                        if not is_blocked(from_number):
+                            send_sms_response(from_number, "show_not_live")
+                            log_message(from_number, body, "", "show_not_live")
+                            logging.info(f"🔴 Show not live reply sent to {from_number[-4:]}")
+                        last_message_sid = msg.sid
+                        save_last_sid(msg.sid)
+                        continue
+
                     # Exactly one branch fires — only one SMS response is ever sent per message
                     if is_blocked(from_number):
                         logging.info(f"🚫 Blocked number: {from_number}")
@@ -1437,11 +1449,20 @@ def index():
                     row.classList.toggle('enabled', document.getElementById('sms_response_' + id).checked);
                 }
                 function initRespRows() {
-                    ['blocked','profanity','duplicate','invalid_format','rate_limited','not_whitelisted','success'].forEach(function(id) {
+                    ['show_not_live','blocked','profanity','duplicate','invalid_format','rate_limited','not_whitelisted','success'].forEach(function(id) {
                         toggleResp(id);
                     });
                 }
                 </script>
+
+                <div id="row_show_not_live" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_show_not_live" {{ 'checked' if config.get('sms_response_show_not_live', False) else '' }} onchange="toggleResp('show_not_live')">
+                        <label for="sms_response_show_not_live">🔴 Show Not Live — Send Response</label>
+                    </div>
+                    <p class="help-text" style="margin:4px 0 6px;">Sent to anyone who texts while the show is not active (TwilioStop has been called).</p>
+                    <textarea id="response_show_not_live" rows="2">{{ config.get('response_show_not_live', "Ho, Ho, Ho, It looks like our show isn't running now. Try again later.") }}</textarea>
+                </div>
 
                 <div id="row_blocked" class="resp-row">
                     <div class="resp-toggle">
@@ -1691,6 +1712,7 @@ var _saveTimer = null;
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
                     text_position: document.getElementById('text_position').value,
                     message_template: document.getElementById('message_template').value,
+                    sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
                     sms_response_rate_limited: document.getElementById('sms_response_rate_limited').checked,
@@ -1704,7 +1726,8 @@ var _saveTimer = null;
                     response_duplicate: document.getElementById('response_duplicate').value,
                     response_invalid_format: document.getElementById('response_invalid_format').value,
                     response_not_whitelisted: document.getElementById('response_not_whitelisted').value,
-                    response_blocked: document.getElementById('response_blocked').value
+                    response_blocked: document.getElementById('response_blocked').value,
+                    response_show_not_live: document.getElementById('response_show_not_live').value
                 };
 
                 fetch('/api/config', {
@@ -2966,10 +2989,9 @@ def api_activate():
 
 @app.route('/api/deactivate', methods=['GET', 'POST'])
 def api_deactivate():
-    """FPP scheduler hook: disable plugin, stop SMS polling, stop the current playlist/sequence."""
-    global stop_polling
+    """FPP scheduler hook: disable plugin and stop the current playlist/sequence.
+    Polling thread keeps running in standby to send show_not_live replies."""
     config['enabled'] = False
-    stop_polling = True
     save_config()
 
     # Stop the current sequence/playlist and any background FSEQ effect
@@ -3012,12 +3034,14 @@ if __name__ == '__main__':
     display_thread = threading.Thread(target=display_worker, daemon=True)
     display_thread.start()
 
-    # Polling thread only starts when plugin is enabled (requires Twilio credentials)
-    if config['enabled']:
+    # Polling thread starts if Twilio is configured — runs in standby (show_not_live
+    # replies) when disabled, and processes names normally when enabled
+    if twilio_client:
         polling_thread = threading.Thread(target=poll_twilio, daemon=True)
         polling_thread.start()
 
-        # Start the default waiting playlist so the display is ready from launch
+    # Start the default waiting playlist on launch if the plugin is already enabled
+    if config['enabled']:
         def _start_default():
             import time
             time.sleep(3)  # brief delay to let FPP settle before sending commands
