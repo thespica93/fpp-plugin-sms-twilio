@@ -920,27 +920,11 @@ def return_to_default_playlist():
             logging.info(f"📋 Queue has {queue_length} more names — skipping return-to-default")
             return
 
-        name_playlist = config.get('name_display_playlist', '')
-        default = config.get('default_playlist', '')
-
-        # Stop the names sequence/playlist
+        # Stop Now kills the names sequence/playlist — FSEQ Effects survive Stop Now
+        # so the background waiting sequence auto-resumes without a restart
         import urllib.parse
-        if name_playlist:
-            if name_playlist.startswith('seq:'):
-                seq_file = name_playlist[4:]
-                if not seq_file.endswith('.fseq'):
-                    seq_file += '.fseq'
-                r = requests.get(f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/stop", timeout=5)
-                logging.info(f"⏹️  Stopped names sequence ({r.status_code})")
-            else:
-                requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
-                logging.info("⏹️  Stopped names playlist")
-
-        if default.startswith('seq:'):
-            # background=true FSEQ Effect auto-resumes — no restart needed
-            logging.info("🔄 Background FSEQ Effect auto-resumes")
-        else:
-            start_default_playlist()
+        r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=5)
+        logging.info(f"⏹️  Stop Now ({r.status_code}) — background FSEQ Effect resumes")
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
@@ -1035,7 +1019,8 @@ def get_queue_status():
     status = {
         "currently_displaying": current,
         "queue": queue_list,
-        "queue_length": len(queue_list)
+        "queue_length": len(queue_list),
+        "show_live": config.get('enabled', False)
     }
     
     return status
@@ -1526,18 +1511,25 @@ def index():
         <!-- Testing Tab -->
         <div id="tab-testing" class="tab-content">
 
-            <div class="section" style="border: 2px solid #FF9800; margin-top: 20px;">
+            <div id="test_message_section" class="section" style="border: 2px solid #FF9800; margin-top: 20px;">
                 <h2>🧪 Message Testing</h2>
-                <p style="color: #FF9800; font-size: 14px;">
-                    ⚠️ Use this to test messages without sending actual texts. Works without Twilio credentials.
-                </p>
 
-                <label>Test Name:</label>
-                <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+                <div id="show_not_live_banner" style="display:none; background:#ffecb3; border:1px solid #FF9800; border-radius:6px; padding:10px 14px; margin-bottom:14px; color:#7a4f00; font-size:14px;">
+                    🔴 Show is not live — run <strong>TwilioStart</strong> from the FPP scheduler to activate the display before testing.
+                </div>
 
-                <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
+                <div id="test_form_inner">
+                    <p style="color: #FF9800; font-size: 14px;">
+                        ⚠️ Use this to test messages without sending actual texts. Works without Twilio credentials.
+                    </p>
 
-                <div id="test_result" style="margin-top: 10px;"></div>
+                    <label>Test Name:</label>
+                    <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+
+                    <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
+
+                    <div id="test_result" style="margin-top: 10px;"></div>
+                </div>
             </div>
 
             <div class="section" style="border: 2px solid #FF9800;">
@@ -1568,10 +1560,25 @@ def index():
         </div>
 
         <script>
+            function updateLiveStatus() {
+                fetch('/api/queue/status').then(r => r.json()).then(data => {
+                    const live = data.show_live === true;
+                    const banner = document.getElementById('show_not_live_banner');
+                    const form = document.getElementById('test_form_inner');
+                    if (banner) banner.style.display = live ? 'none' : 'block';
+                    if (form) {
+                        form.style.opacity = live ? '1' : '0.4';
+                        form.style.pointerEvents = live ? '' : 'none';
+                    }
+                }).catch(() => {});
+            }
+
             window.onload = function() {
                 loadFPPData();
                 initRespRows();
                 setupAutoSave();
+                updateLiveStatus();
+                setInterval(updateLiveStatus, 5000);
             };
 
             function showTab(tabName, btn) {
@@ -1919,7 +1926,11 @@ def test_message_submission():
         
         logging.info(f"🧪 ===== TEST MESSAGE RECEIVED =====")
         logging.info(f"🧪 Raw input: '{test_name}'")
-        
+
+        if not config.get('enabled', False):
+            logging.warning(f"🧪 TEST BLOCKED: Show is not live (plugin not activated)")
+            return jsonify({"success": False, "error": "Show is not live — run TwilioStart first"})
+
         if not test_name:
             logging.warning(f"🧪 TEST FAILED: Name is empty")
             return jsonify({"success": False, "error": "Name is required"})
