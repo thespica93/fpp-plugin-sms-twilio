@@ -783,7 +783,7 @@ def send_to_fpp(name):
                     text_color = '#' + text_color
                 
                 command = "Overlay Model Effect"
-                auto_enable = "Background"
+                auto_enable = "Transparent"
                 
                 # Build command based on text position
                 if text_position in ['L2R', 'R2L', 'T2B', 'B2T']:
