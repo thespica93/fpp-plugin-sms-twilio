@@ -723,6 +723,8 @@ def send_to_fpp(name):
                 import urllib.parse
                 if name_playlist.startswith('seq:'):
                     seq_file = name_playlist[4:]
+                    if not seq_file.endswith('.fseq'):
+                        seq_file += '.fseq'
                     command = "Start Sequence"
                     command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
                 else:
@@ -836,6 +838,8 @@ def start_default_playlist():
     try:
         if default_playlist.startswith('seq:'):
             seq_file = default_playlist[4:]
+            if not seq_file.endswith('.fseq'):
+                seq_file += '.fseq'
             command = "Start Sequence"
             command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
         else:
