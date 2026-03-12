@@ -1410,12 +1410,8 @@ def index():
                         <label>Font Size:</label>
                         <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
 
-                        <label>Scroll Speed (pixels per second):</label>
-                        <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
-                        <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
-
                         <label>Text Position:</label>
-                        <select id="text_position">
+                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
                             <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
                             <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
                             <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
@@ -1423,6 +1419,12 @@ def index():
                             <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
                         </select>
                         <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
+
+                        <div id="scroll_speed_row">
+                            <label>Scroll Speed (pixels per second):</label>
+                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
+                            <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
+                        </div>
                     </div>
                 </div>
 
@@ -1601,12 +1603,19 @@ def index():
                 }).catch(() => {});
             }
 
+            function updateScrollSpeedVisibility() {
+                var pos = document.getElementById('text_position').value;
+                var row = document.getElementById('scroll_speed_row');
+                if (row) row.style.display = (pos === 'Center') ? 'none' : '';
+            }
+
             window.onload = function() {
                 loadFPPData();
                 initRespRows();
                 setupAutoSave();
                 updateLiveStatus();
                 setInterval(updateLiveStatus, 5000);
+                updateScrollSpeedVisibility();
             };
 
             function showTab(tabName, btn) {
