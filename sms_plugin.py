@@ -854,15 +854,14 @@ def start_default_playlist():
 
     try:
         if default_playlist.startswith('seq:'):
-            seq_file = default_playlist[4:]
-            if not seq_file.endswith('.fseq'):
-                seq_file += '.fseq'
+            # FSEQ Effect Start uses the display name WITHOUT .fseq extension
+            seq_name = default_playlist[4:]
+            seq_name = seq_name.removesuffix('.fseq')
 
-            # Use FSEQ Effect (loop=true, background=false):
-            # - background=false starts immediately (background=true requires FPP player active)
-            # - loop=true loops natively without a watchdog
-            effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_file)}/true/false"
-            logging.info(f"▶️  Starting FSEQ Effect Start (loop, foreground): {seq_file}")
+            # loop=true, background=true: loops natively, auto-suppressed by foreground
+            # sequences, auto-resumes when foreground stops
+            effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
+            logging.info(f"▶️  Starting FSEQ Effect Start (loop+background): {seq_name}")
             logging.info(f"   URL: {effect_url}")
             response = requests.get(effect_url, timeout=5)
             logging.info(f"   Response: {response.status_code} - {response.text}")
@@ -922,8 +921,9 @@ def return_to_default_playlist():
             return
 
         name_playlist = config.get('name_display_playlist', '')
+        default = config.get('default_playlist', '')
 
-        # Stop names sequence/playlist then restart the waiting FSEQ Effect
+        # Stop the names sequence/playlist
         import urllib.parse
         if name_playlist:
             if name_playlist.startswith('seq:'):
@@ -936,7 +936,11 @@ def return_to_default_playlist():
                 requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
                 logging.info("⏹️  Stopped names playlist")
 
-        start_default_playlist()
+        if default.startswith('seq:'):
+            # background=true FSEQ Effect auto-resumes — no restart needed
+            logging.info("🔄 Background FSEQ Effect auto-resumes")
+        else:
+            start_default_playlist()
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
@@ -2963,11 +2967,9 @@ def api_deactivate():
 
         default = config.get('default_playlist', '')
         if default.startswith('seq:'):
-            # Stop background FSEQ Effect
-            seq_file = default[4:]
-            if not seq_file.endswith('.fseq'):
-                seq_file += '.fseq'
-            effect_stop_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_file)}"
+            # FSEQ Effect Stop also uses display name without .fseq
+            seq_name = default[4:].removesuffix('.fseq')
+            effect_stop_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}"
             r = requests.get(effect_stop_url, timeout=5)
             logging.info(f"🛑 FSEQ Effect Stop: {r.status_code} - {r.text}")
 
