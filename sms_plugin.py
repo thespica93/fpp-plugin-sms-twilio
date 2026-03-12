@@ -927,11 +927,10 @@ def return_to_default_playlist():
         name_playlist = config.get('name_display_playlist', '')
 
         if name_playlist.startswith('seq:'):
-            # Stop the names FSEQ Effect, then restart the waiting background FSEQ
+            # Stop the names FSEQ Effect — waiting FSEQ keeps running underneath
             seq_name = name_playlist[4:].removesuffix('.fseq')
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=5)
             logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
-            start_default_playlist()
         else:
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=5)
             logging.info(f"⏹️  Stop Now ({r.status_code})")
