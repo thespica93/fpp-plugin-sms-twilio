@@ -859,8 +859,8 @@ def start_default_playlist():
                 logging.info(f"✅ Sequence started via command API")
                 return True
 
-            # Fallback: try FPP's direct sequence endpoint
-            seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start"
+            # Fallback: try FPP's direct sequence endpoint (with loop=1 hint)
+            seq_url = f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/start?loop=1"
             logging.info(f"   Trying direct sequence API: {seq_url}")
             response2 = requests.get(seq_url, timeout=5)
             logging.info(f"   Response: {response2.status_code} - {response2.text}")
@@ -933,7 +933,7 @@ def default_sequence_watchdog():
     so this watchdog restarts it whenever FPP goes idle and we're not displaying a name."""
     import time
     while True:
-        time.sleep(5)
+        time.sleep(1)
         try:
             if not config.get('enabled') or currently_displaying:
                 continue
@@ -1287,13 +1287,21 @@ def index():
                     <div class="section">
                         <h2>Filters</h2>
 
-                        <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
-                        <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
-                        <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
+                        <div id="blacklist_section">
+                            <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState()">
+                            <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
+                            <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
+                            <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                                ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended.
+                            </div>
+                            <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                                ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
+                            </div>
+                        </div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
 
-                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules()">
+                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState();">
                         <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 6px;">📋 Manage Whitelist</button>
 
@@ -1346,7 +1354,21 @@ def index():
                             document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
                             document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
                         }
+                        function checkFiltersState() {
+                            var whitelistOn = document.getElementById('use_whitelist').checked;
+                            var profanityOn = document.getElementById('profanity_filter').checked;
+                            var section = document.getElementById('blacklist_section');
+
+                            // Grey out entire blacklist section when whitelist is active
+                            section.style.opacity = whitelistOn ? '0.4' : '1';
+                            section.style.pointerEvents = whitelistOn ? 'none' : '';
+
+                            // Warnings
+                            document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
+                            document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
+                        }
                         updateFormatRules();
+                        checkFiltersState();
                         </script>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
