@@ -2969,15 +2969,26 @@ def api_deactivate():
     stop_polling = True
     save_config()
 
-    # Stop the current playlist/sequence in FPP
+    # Stop the current sequence/playlist in FPP immediately
     try:
         import urllib.parse
-        fpp_host = FPP_HOST
-        command_url = f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}"
-        response = requests.get(command_url, timeout=5)
-        logging.info(f"🛑 Stop Now: {response.status_code} - {response.text}")
+
+        # Stop any directly-started sequence via the sequence API
+        default = config.get('default_playlist', '')
+        if default.startswith('seq:'):
+            seq_file = default[4:]
+            if not seq_file.endswith('.fseq'):
+                seq_file += '.fseq'
+            stop_url = f"{FPP_HOST}/api/sequence/{urllib.parse.quote(seq_file)}/stop"
+            r = requests.get(stop_url, timeout=5)
+            logging.info(f"🛑 Sequence stop: {r.status_code} - {r.text}")
+
+        # Also send Stop Now to catch playlists and anything else
+        command_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('Stop Now')}"
+        r2 = requests.get(command_url, timeout=5)
+        logging.info(f"🛑 Stop Now: {r2.status_code} - {r2.text}")
     except Exception as e:
-        logging.warning(f"Could not send Stop Now to FPP: {e}")
+        logging.warning(f"Could not stop FPP playback: {e}")
 
     logging.info("🛑 TwilioStop: disabled, polling stopped, playlist stopped")
     return jsonify({"success": True, "message": "Twilio SMS plugin deactivated"})
