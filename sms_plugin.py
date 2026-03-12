@@ -40,11 +40,17 @@ WHITELIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "whitelist_added.txt")
 LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
 BLOCKLIST_FILE = "/home/fpp/media/config/blocked_phones.json"
 
-# Setup logging
+# Setup logging — ensure the log directory exists, then write to file + stderr
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+_log_handlers = [logging.StreamHandler()]  # stderr always available via nohup
+try:
+    _log_handlers.append(logging.FileHandler(LOG_FILE))
+except Exception:
+    pass  # directory may not exist on some FPP installs; stderr is the fallback
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=_log_handlers
 )
 
 app = Flask(__name__)
