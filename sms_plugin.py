@@ -739,10 +739,10 @@ def send_to_fpp(name):
 
                 import urllib.parse
                 if name_playlist.startswith('seq:'):
-                    # FSEQ Effect (loop=true, background=false): plays as foreground effect.
-                    # FSEQ Effect Stop at end of display_duration stops it cleanly.
+                    # FSEQ Effect (loop=true, background=true): plays as background so
+                    # overlay model renders on top with correct text colors.
                     seq_name = name_playlist[4:].removesuffix('.fseq')
-                    effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/false"
+                    effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
                     start_response = requests.get(effect_url, timeout=5)
                     logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
                 else:
