@@ -242,36 +242,50 @@ def get_fpp_sequences():
         return []
 
 def get_fpp_models():
-    """Get list of overlay models from FPP, including pixel dimensions when available"""
+    """Get list of overlay models from FPP, including pixel dimensions when available.
+    Tries /api/overlays/models first (has dimensions), falls back to /api/models."""
+    def extract_model(m):
+        if not isinstance(m, dict):
+            return None
+        name = m.get('Name') or m.get('name')
+        if not name:
+            return None
+        # FPP overlay models use rows/cols; channel output models use Width/Height
+        w = int(m.get('Width') or m.get('width') or m.get('Cols') or m.get('cols') or
+                m.get('Columns') or m.get('columns') or 0)
+        h = int(m.get('Height') or m.get('height') or m.get('Rows') or m.get('rows') or 0)
+        return {"name": name, "width": w, "height": h}
+
+    def parse_response(data):
+        models = []
+        if isinstance(data, dict) and 'models' in data:
+            for m in data['models']:
+                obj = extract_model(m)
+                if obj: models.append(obj)
+        elif isinstance(data, list):
+            for m in data:
+                obj = extract_model(m)
+                if obj: models.append(obj)
+        elif isinstance(data, dict):
+            models = [{"name": k, "width": 0, "height": 0} for k in data.keys()]
+        return models
+
     try:
         fpp_host = FPP_HOST
-        response = requests.get(f"{fpp_host}/api/models", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
+        # /api/overlays/models is the overlay-specific endpoint and includes dimensions
+        for endpoint in ['/api/overlays/models', '/api/models']:
+            try:
+                response = requests.get(f"{fpp_host}{endpoint}", timeout=5)
+                if response.status_code == 200:
+                    models = parse_response(response.json())
+                    if models:
+                        has_dims = any(m['width'] > 0 or m['height'] > 0 for m in models)
+                        logging.info(f"Got {len(models)} models from {endpoint} (dims: {has_dims})")
+                        return models
+            except Exception:
+                pass
 
-            def extract_model(m):
-                if not (isinstance(m, dict) and 'Name' in m):
-                    return None
-                w = int(m.get('Width') or m.get('width') or m.get('Cols') or m.get('cols') or 0)
-                h = int(m.get('Height') or m.get('height') or m.get('Rows') or m.get('rows') or 0)
-                return {"name": m['Name'], "width": w, "height": h}
-
-            models = []
-            if isinstance(data, dict) and 'models' in data:
-                for m in data['models']:
-                    obj = extract_model(m)
-                    if obj: models.append(obj)
-            elif isinstance(data, list):
-                for m in data:
-                    obj = extract_model(m)
-                    if obj: models.append(obj)
-            elif isinstance(data, dict):
-                models = [{"name": k, "width": 0, "height": 0} for k in data.keys()]
-
-            logging.info(f"Extracted {len(models)} models")
-            return models
-
-        logging.warning(f"FPP models API returned status {response.status_code}")
+        logging.warning("Could not fetch models from FPP")
         return []
     except Exception as e:
         logging.error(f"Error fetching FPP models: {e}")
@@ -969,10 +983,15 @@ def display_worker():
             with queue_lock:
                 if len(message_queue) == 0:
                     currently_displaying = None
-                    time.sleep(1)
-                    continue
-                
-                currently_displaying = message_queue.popleft()
+                    _next_item = None
+                else:
+                    _next_item = message_queue.popleft()
+
+            if _next_item is None:
+                time.sleep(0.1)
+                continue
+
+            currently_displaying = _next_item
             
             name = currently_displaying['name']
             phone = currently_displaying['phone']
