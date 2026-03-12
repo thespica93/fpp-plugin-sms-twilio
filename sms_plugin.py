@@ -922,11 +922,22 @@ def return_to_default_playlist():
             logging.info(f"📋 Queue has {queue_length} more names — skipping return-to-default")
             return
 
-        # Stop Now kills the names sequence/playlist — FSEQ Effects survive Stop Now
-        # so the background waiting sequence auto-resumes without a restart
         import urllib.parse
-        r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=5)
-        logging.info(f"⏹️  Stop Now ({r.status_code}) — background FSEQ Effect resumes")
+        name_playlist = config.get('name_display_playlist', '')
+
+        # Stop the names sequence/playlist directly by name (handles direct-API sequences)
+        # AND call Stop Now as fallback (handles playlist-based items)
+        if name_playlist.startswith('seq:'):
+            seq_file = name_playlist[4:]
+            if not seq_file.endswith('.fseq'):
+                seq_file += '.fseq'
+            r1 = requests.get(f"{fpp_host}/api/sequence/{urllib.parse.quote(seq_file)}/stop", timeout=5)
+            logging.info(f"⏹️  Sequence stop ({r1.status_code})")
+        else:
+            requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+
+        r2 = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=5)
+        logging.info(f"⏹️  Stop Now ({r2.status_code}) — background FSEQ Effect resumes")
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
@@ -2826,6 +2837,8 @@ def view_messages():
             var useWhitelist = {{ config.get('use_whitelist', False) | tojson }};
             var modalOpen = false;
             var refreshTimer = null;
+            var prevQueueJson = null;
+            var prevMessagesJson = null;
 
             function scheduleRefresh() {
                 clearTimeout(refreshTimer);
@@ -2851,6 +2864,9 @@ def view_messages():
             }
 
             function renderQueue(status) {
+                var json = JSON.stringify(status);
+                if (json === prevQueueJson) return;
+                prevQueueJson = json;
                 var html = '';
                 if (status.currently_displaying) {
                     html += '<div class="current-display">🎄 NOW DISPLAYING: ' + esc(status.currently_displaying.name) +
@@ -2871,6 +2887,9 @@ def view_messages():
             }
 
             function renderMessages(messages) {
+                var json = JSON.stringify(messages);
+                if (json === prevMessagesJson) return;
+                prevMessagesJson = json;
                 document.getElementById('msg-count').textContent = messages.length;
                 if (messages.length === 0) {
                     document.getElementById('messages-content').innerHTML =
