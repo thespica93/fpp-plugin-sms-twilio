@@ -1956,20 +1956,21 @@ def index():
                 renderCanvasPreview();
             } catch(e) { console.error('Canvas init error:', e); } }
 
-            window.onload = function() {
-                initCanvasPreview();
-                loadFPPData();
-                initRespRows();
-                setupAutoSave();
-                updateLiveStatus();
-                setInterval(updateLiveStatus, 5000);
-                updateScrollSpeedVisibility();
-                initValignButtons();
-                // Apply saved model aspect ratio on load
+            // All DOM elements are above this script block so we call init
+            // functions directly — no event listener needed or reliable here.
+            initCanvasPreview();
+            loadFPPData();
+            initRespRows();
+            setupAutoSave();
+            updateLiveStatus();
+            setInterval(updateLiveStatus, 5000);
+            updateScrollSpeedVisibility();
+            initValignButtons();
+            (function() {
                 var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
                 var h = parseInt(document.getElementById('overlay_model_height').value) || 0;
                 if (w > 0 && h > 0) updateModelAspect(w, h);
-            };
+            })();
 
             function showTab(tabName, btn) {
                 document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
