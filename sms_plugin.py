@@ -27,6 +27,13 @@ from twilio.rest import Client
 from collections import deque
 import os
 
+# PIL/Pillow for pixel-accurate text rendering (optional — falls back to FPP text API if unavailable)
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 # Configuration
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
@@ -125,6 +132,8 @@ DEFAULT_CONFIG = {
     "scroll_speed": 5,
     "overlay_model_width": 0,
     "overlay_model_height": 0,
+    "text_x": -1,  # -1 = auto-center; >= 0 = pixel X in model space (PIL mode only)
+    "text_y": -1,  # -1 = auto-center; >= 0 = pixel Y in model space (PIL mode only)
     "sms_response_show_not_live": False,
     "sms_response_success": False,
     "sms_response_profanity": False,
@@ -204,6 +213,78 @@ def save_config():
         logging.info("Configuration saved")
     except Exception as e:
         logging.error(f"Error saving config: {e}")
+
+def _find_font(font_name, font_size):
+    """Locate a PIL ImageFont matching font_name. Returns ImageFont or None."""
+    if not PIL_AVAILABLE:
+        return None
+    search_dirs = [
+        '/usr/share/fonts/truetype/freefont',
+        '/usr/share/fonts/truetype',
+        '/usr/share/fonts',
+        '/usr/share/fpp/fonts',
+        '/home/fpp/media/fonts',
+    ]
+    font_name_lower = font_name.lower()
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+        for dirpath, _, filenames in os.walk(search_dir):
+            for fname in filenames:
+                if fname.lower().endswith(('.ttf', '.otf')) and font_name_lower in fname.lower():
+                    try:
+                        return ImageFont.truetype(os.path.join(dirpath, fname), font_size)
+                    except Exception:
+                        pass
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def render_to_shm(display_message, model_name, width, height, x, y, font_name, font_size, color_hex):
+    """Render text to FPP shared memory at a pixel-accurate position using Pillow.
+    x/y < 0 means auto-center. Returns True on success, False on failure."""
+    if not PIL_AVAILABLE or width <= 0 or height <= 0:
+        return False
+    try:
+        hex_str = color_hex.lstrip('#')
+        color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+
+        img = Image.new('RGB', (width, height), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        font = _find_font(font_name, font_size)
+
+        # Strip newline padding (used only by the old valign trick — PIL uses x/y directly)
+        text = display_message.strip('\n')
+
+        # Measure text for auto-centering
+        if font is not None:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        else:
+            text_w = len(text) * 6
+            text_h = font_size
+
+        draw_x = max(0, (width - text_w) // 2) if x < 0 else x
+        draw_y = max(0, (height - text_h) // 2) if y < 0 else y
+
+        draw.text((draw_x, draw_y), text, fill=color, font=font)
+
+        shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
+        raw = img.tobytes()
+        expected = width * height * 3
+        if len(raw) != expected:
+            logging.error(f"render_to_shm: size mismatch ({len(raw)} != {expected})")
+            return False
+        with open(shm_path, 'r+b') as f:
+            f.write(raw)
+        logging.info(f"render_to_shm: wrote {len(raw)} bytes to {shm_path} at ({draw_x},{draw_y})")
+        return True
+    except Exception as e:
+        logging.error(f"render_to_shm failed: {e}")
+        return False
+
 
 def get_fpp_playlists():
     """Get list of playlists from FPP"""
@@ -840,36 +921,49 @@ def send_to_fpp(name):
 
                 # Order matters to avoid flash of previous name:
                 # 1. Disable overlay (State 0) — hides it
-                # 2. Load new text while hidden — buffer has new name, not old one
+                # 2. Write new frame (PIL shm or FPP text API)
                 # 3. Enable overlay (State 3 Transparent RGB) — activates cleanly
                 requests.put(state_url, json={"State": 0}, timeout=3)
 
-                text_payload = {
-                    "Message": display_message,
-                    "Color": text_color,
-                    "Font": text_font,
-                    "FontSize": font_size,
-                    "Position": fpp_position,
-                    "PixelsPerSecond": scroll_speed * 20,
-                    "AntiAlias": True,
-                    "AutoEnable": False
-                }
-                response = requests.put(text_url, json=text_payload, timeout=10)
+                # PIL shm rendering for static (Center) mode — gives pixel-accurate x/y positioning.
+                # Scroll modes use the FPP text API (PIL can't animate scrolling).
+                shm_rendered = False
+                if text_position == 'Center' and PIL_AVAILABLE:
+                    tx = config.get('text_x', -1)
+                    ty = config.get('text_y', -1)
+                    mw = config.get('overlay_model_width', 0)
+                    mh = config.get('overlay_model_height', 0)
+                    if mw > 0 and mh > 0:
+                        shm_rendered = render_to_shm(
+                            display_message, overlay_model,
+                            mw, mh, tx, ty,
+                            text_font, font_size, text_color
+                        )
 
-                logging.info(f"   Payload: {text_payload}")
-                logging.info(f"   Response: {response.status_code} - {response.text}")
+                if not shm_rendered:
+                    text_payload = {
+                        "Message": display_message,
+                        "Color": text_color,
+                        "Font": text_font,
+                        "FontSize": font_size,
+                        "Position": fpp_position,
+                        "PixelsPerSecond": scroll_speed * 20,
+                        "AntiAlias": True,
+                        "AutoEnable": False
+                    }
+                    response = requests.put(text_url, json=text_payload, timeout=10)
+                    logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
+                    logging.info(f"   Payload: {text_payload}")
+                    logging.info(f"   Response: {response.status_code} - {response.text}")
+                    if response.status_code == 200:
+                        logging.info(f"✅ Text sent successfully")
+                    else:
+                        logging.error(f"❌ TEXT API FAILED! Status: {response.status_code}")
+                else:
+                    logging.info(f"✅ PIL shm render succeeded — skipping text API")
 
                 state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
                 logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
-
-                logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
-                logging.info(f"   Payload: {text_payload}")
-                logging.info(f"   Response: {response.status_code} - {response.text}")
-
-                if response.status_code == 200:
-                    logging.info(f"✅ Text sent successfully")
-                else:
-                    logging.error(f"❌ TEXT API FAILED! Status: {response.status_code}")
 
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
@@ -1490,16 +1584,33 @@ def index():
                             <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
                         </div>
 
-                        <label>Vertical Alignment:</label>
-                        <div class="valign-picker">
-                            <button type="button" class="valign-btn" data-val="top">▲ Top</button>
-                            <button type="button" class="valign-btn" data-val="center">● Center</button>
-                            <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
-                        </div>
                         <input type="hidden" id="text_v_align" value="{{ config.get('text_v_align', 'center') }}">
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
-                        <p class="help-text">↕ Shifts text vertically on the matrix (approximate, based on model size)</p>
+                        <input type="hidden" id="text_x" value="{{ config.get('text_x', -1) }}">
+                        <input type="hidden" id="text_y" value="{{ config.get('text_y', -1) }}">
+
+                        <!-- Canvas position picker — shown for Static mode, PIL rendering -->
+                        <div id="canvas_section">
+                            <label>Text Position Preview: <span style="font-weight:normal; font-size:12px; color:#888;">(drag to reposition)</span></label>
+                            <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #444; border-radius:4px; cursor:crosshair;"></canvas>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">⬛ Reset to Center</button>
+                                <span id="pos_display" style="font-size:12px; color:#666;"></span>
+                            </div>
+                            <p class="help-text">🖱️ Click or drag to position text on the matrix. Reset returns to auto-center.</p>
+                        </div>
+
+                        <!-- Vertical alignment — shown for Scroll modes (PIL doesn't handle scrolling) -->
+                        <div id="valign_section">
+                            <label>Vertical Alignment:</label>
+                            <div class="valign-picker">
+                                <button type="button" class="valign-btn" data-val="top">▲ Top</button>
+                                <button type="button" class="valign-btn" data-val="center">● Center</button>
+                                <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
+                            </div>
+                            <p class="help-text">↕ Shifts text vertically on the matrix (scroll modes only)</p>
+                        </div>
                     </div>
                 </div>
 
@@ -1680,8 +1791,13 @@ def index():
 
             function updateScrollSpeedVisibility() {
                 var pos = document.getElementById('text_position').value;
+                var isStatic = (pos === 'Center');
                 var row = document.getElementById('scroll_speed_row');
-                if (row) row.style.display = (pos === 'Center') ? 'none' : '';
+                if (row) row.style.display = isStatic ? 'none' : '';
+                var canvasSec = document.getElementById('canvas_section');
+                if (canvasSec) canvasSec.style.display = isStatic ? '' : 'none';
+                var valignSec = document.getElementById('valign_section');
+                if (valignSec) valignSec.style.display = isStatic ? 'none' : '';
             }
 
             function updateModelAspect(width, height) {
@@ -1689,6 +1805,17 @@ def index():
                 if (ta && width > 0 && height > 0) {
                     ta.style.aspectRatio = (width / height).toFixed(2);
                     ta.style.height = 'auto';
+                }
+                // Resize canvas to model aspect ratio and re-render preview
+                if (width > 0 && height > 0) {
+                    window._canvasModelW = width;
+                    window._canvasModelH = height;
+                    var canvas = document.getElementById('matrix_canvas');
+                    if (canvas) {
+                        canvas.width = 640;
+                        canvas.height = Math.round(640 * height / width);
+                    }
+                    if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
                 }
             }
 
@@ -1704,6 +1831,128 @@ def index():
                     });
                 });
             }
+
+            // ── Canvas drag-to-position preview ──────────────────────────────
+            (function() {
+                var canvas = document.getElementById('matrix_canvas');
+                if (!canvas) return;
+                var ctx = canvas.getContext('2d');
+
+                // Internal canvas resolution (logical pixels = model space)
+                window._canvasModelW = parseInt(document.getElementById('overlay_model_width').value) || 640;
+                window._canvasModelH = parseInt(document.getElementById('overlay_model_height').value) || 360;
+                canvas.width  = 640;
+                canvas.height = Math.round(640 * window._canvasModelH / window._canvasModelW);
+
+                var textX = parseInt(document.getElementById('text_x').value);
+                var textY = parseInt(document.getElementById('text_y').value);
+                var dragging = false;
+
+                function renderCanvasPreview() {
+                    var mw = window._canvasModelW || 640;
+                    var mh = window._canvasModelH || 360;
+                    ctx.fillStyle = '#000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
+                    var color      = document.getElementById('text_color').value || '#ff0000';
+                    var tmpl       = document.getElementById('message_template').value || '{name}';
+                    var text       = tmpl.replace('{name}', 'Santa').replace(/\n/g, ' ').trim();
+                    var scaledFont = Math.round(fontSize * canvas.width / mw);
+
+                    ctx.font         = 'bold ' + scaledFont + 'px sans-serif';
+                    ctx.fillStyle    = color;
+                    ctx.textBaseline = 'top';
+
+                    var drawX, drawY;
+                    if (textX < 0 || textY < 0) {
+                        var metrics = ctx.measureText(text);
+                        drawX = (canvas.width  - metrics.width) / 2;
+                        drawY = (canvas.height - scaledFont)    / 2;
+                    } else {
+                        drawX = textX * canvas.width  / mw;
+                        drawY = textY * canvas.height / mh;
+                    }
+                    ctx.fillText(text, drawX, drawY);
+
+                    var posEl = document.getElementById('pos_display');
+                    if (posEl) posEl.textContent = (textX < 0 || textY < 0)
+                        ? 'Position: Center (auto)'
+                        : 'Position: ' + textX + ', ' + textY + ' px';
+                }
+
+                // Expose so updateModelAspect can call it
+                window.renderCanvasPreview = renderCanvasPreview;
+
+                function posFromEvent(e) {
+                    var rect = canvas.getBoundingClientRect();
+                    var mw   = window._canvasModelW || 640;
+                    var mh   = window._canvasModelH || 360;
+                    var cx   = (e.clientX - rect.left) * canvas.width  / rect.width;
+                    var cy   = (e.clientY - rect.top)  * canvas.height / rect.height;
+                    return {
+                        x: Math.max(0, Math.min(mw - 1, Math.round(cx * mw / canvas.width))),
+                        y: Math.max(0, Math.min(mh - 1, Math.round(cy * mh / canvas.height)))
+                    };
+                }
+
+                canvas.addEventListener('mousedown', function(e) {
+                    dragging = true;
+                    var p = posFromEvent(e);
+                    textX = p.x; textY = p.y;
+                    document.getElementById('text_x').value = textX;
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview();
+                    saveConfig();
+                });
+                canvas.addEventListener('mousemove', function(e) {
+                    if (!dragging) return;
+                    var p = posFromEvent(e);
+                    textX = p.x; textY = p.y;
+                    document.getElementById('text_x').value = textX;
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview();
+                });
+                canvas.addEventListener('mouseup',    function() { dragging = false; saveConfig(); });
+                canvas.addEventListener('mouseleave', function() { dragging = false; });
+
+                // Touch support
+                canvas.addEventListener('touchstart', function(e) {
+                    e.preventDefault();
+                    var t = e.touches[0];
+                    var p = posFromEvent(t);
+                    textX = p.x; textY = p.y;
+                    document.getElementById('text_x').value = textX;
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview(); saveConfig();
+                }, { passive: false });
+                canvas.addEventListener('touchmove', function(e) {
+                    e.preventDefault();
+                    var t = e.touches[0];
+                    var p = posFromEvent(t);
+                    textX = p.x; textY = p.y;
+                    document.getElementById('text_x').value = textX;
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview();
+                }, { passive: false });
+                canvas.addEventListener('touchend', function() { saveConfig(); });
+
+                window.resetTextPosition = function() {
+                    textX = -1; textY = -1;
+                    document.getElementById('text_x').value = -1;
+                    document.getElementById('text_y').value = -1;
+                    renderCanvasPreview();
+                    saveConfig();
+                };
+
+                // Re-render on style changes
+                ['text_color', 'text_font_size', 'message_template'].forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (el) el.addEventListener(el.tagName === 'TEXTAREA' || el.type === 'text' ? 'input' : 'change', renderCanvasPreview);
+                });
+
+                renderCanvasPreview();
+            })();
 
             window.onload = function() {
                 loadFPPData();
@@ -1853,6 +2102,8 @@ var _saveTimer = null;
                     text_v_align: document.getElementById('text_v_align').value,
                     overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
                     overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
+                    text_x: parseInt(document.getElementById('text_x').value) || -1,
+                    text_y: parseInt(document.getElementById('text_y').value) || -1,
                     message_template: document.getElementById('message_template').value,
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,

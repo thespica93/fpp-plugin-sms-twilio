@@ -33,22 +33,26 @@ if ! command -v pip3 &> /dev/null; then
 fi
 
 # Install packages
-log_and_show "[1/3] Installing Flask... please wait"
+log_and_show "[1/4] Installing Flask... please wait"
 pip3 install --break-system-packages --no-cache-dir flask==3.0.0 >> "$LOG" 2>&1
-log_and_show "[1/3] Flask complete"
+log_and_show "[1/4] Flask complete"
 
-log_and_show "[2/3] Installing Twilio... please wait (this is the slow one)"
+log_and_show "[2/4] Installing Twilio... please wait (this is the slow one)"
 pip3 install --break-system-packages --no-cache-dir twilio==8.10.0 >> "$LOG" 2>&1
 TWILIO_EXIT=$?
 if [ $TWILIO_EXIT -ne 0 ]; then
     log_and_show "ERROR: Twilio installation failed with exit code $TWILIO_EXIT"
     exit 1
 fi
-log_and_show "[2/3] Twilio complete"
+log_and_show "[2/4] Twilio complete"
 
-log_and_show "[3/3] Installing Requests... please wait"
+log_and_show "[3/4] Installing Requests... please wait"
 pip3 install --break-system-packages --no-cache-dir requests==2.31.0 >> "$LOG" 2>&1
-log_and_show "[3/3] Requests complete"
+log_and_show "[3/4] Requests complete"
+
+log_and_show "[4/4] Installing Pillow (image rendering)... please wait"
+pip3 install --break-system-packages --no-cache-dir pillow >> "$LOG" 2>&1
+log_and_show "[4/4] Pillow complete"
 
 # Create config files if they don't exist
 [ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json
