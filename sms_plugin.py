@@ -207,7 +207,7 @@ def get_fpp_playlists():
         playlists = []
         
         try:
-            response = requests.get(f"{fpp_host}/api/playlists", timeout=5)
+            response = requests.get(f"{fpp_host}/api/playlists", timeout=3)
             if response.status_code == 200:
                 data = response.json()
                 if isinstance(data, dict):
@@ -228,7 +228,7 @@ def get_fpp_sequences():
     """Get list of sequences from FPP"""
     try:
         fpp_host = FPP_HOST
-        response = requests.get(f"{fpp_host}/api/sequence", timeout=5)
+        response = requests.get(f"{fpp_host}/api/sequence", timeout=3)
         if response.status_code == 200:
             sequences = response.json()
             result = sequences if isinstance(sequences, list) else []
@@ -275,7 +275,7 @@ def get_fpp_models():
         # /api/overlays/models is the overlay-specific endpoint and includes dimensions
         for endpoint in ['/api/overlays/models', '/api/models']:
             try:
-                response = requests.get(f"{fpp_host}{endpoint}", timeout=5)
+                response = requests.get(f"{fpp_host}{endpoint}", timeout=3)
                 if response.status_code == 200:
                     models = parse_response(response.json())
                     if models:
@@ -295,7 +295,7 @@ def get_fpp_fonts():
     """Get list of supported fonts from FPP"""
     try:
         fpp_host = FPP_HOST
-        response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=5)
+        response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=3)
         if response.status_code == 200:
             fonts = response.json()
             logging.info(f"Found {len(fonts)} fonts from FPP")
@@ -311,7 +311,7 @@ def test_fpp_connection():
     """Test connection to FPP"""
     try:
         fpp_host = FPP_HOST
-        response = requests.get(f"{fpp_host}/api/fppd/status", timeout=5)
+        response = requests.get(f"{fpp_host}/api/fppd/status", timeout=3)
         if response.status_code == 200:
             status = response.json()
             return True, status.get('fppd', 'Unknown')
@@ -775,7 +775,7 @@ def send_to_fpp(name):
         if name_playlist:
             try:
                 logging.info(f"⏸️  STEP 1: Stopping any running playlist...")
-                requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+                requests.get(f"{fpp_host}/api/playlists/stop", timeout=3)
                 # Note: background FSEQ Effect is NOT stopped here — the names sequence
                 # (foreground) will automatically suppress it and it auto-resumes after.
                 time.sleep(0.1)
@@ -788,13 +788,13 @@ def send_to_fpp(name):
                     # overlay model renders on top with correct text colors.
                     seq_name = name_playlist[4:].removesuffix('.fseq')
                     effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
-                    start_response = requests.get(effect_url, timeout=5)
+                    start_response = requests.get(effect_url, timeout=3)
                     logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
                 else:
                     command = "Start Playlist"
                     encoded_playlist = urllib.parse.quote(name_playlist)
                     command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_playlist}/true/false"
-                    start_response = requests.get(command_url, timeout=5)
+                    start_response = requests.get(command_url, timeout=3)
                     logging.info(f"   Start playlist response: {start_response.status_code}")
 
                 time.sleep(0.3)
@@ -832,10 +832,10 @@ def send_to_fpp(name):
 
                 state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
                 # Reset to State 0 first so scroll position starts fresh each time
-                requests.put(state_url, json={"State": 0}, timeout=5)
+                requests.put(state_url, json={"State": 0}, timeout=3)
                 # State 3 = Transparent RGB: text pixels replace underlying FSEQ pixels
                 # (correct color), non-text pixels stay transparent (FSEQ shows through)
-                state_resp = requests.put(state_url, json={"State": 3}, timeout=5)
+                state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
                 logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
 
                 # Use the direct text API (same as fpp-matrixtools plugin)
@@ -897,7 +897,7 @@ def start_default_playlist():
             effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
             logging.info(f"▶️  Starting FSEQ Effect Start (loop+background): {seq_name}")
             logging.info(f"   URL: {effect_url}")
-            response = requests.get(effect_url, timeout=5)
+            response = requests.get(effect_url, timeout=3)
             logging.info(f"   Response: {response.status_code} - {response.text}")
 
             if response.status_code == 200:
@@ -911,7 +911,7 @@ def start_default_playlist():
             command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/true"
             logging.info(f"▶️  Starting playlist: {default_playlist}")
             logging.info(f"   URL: {command_url}")
-            response = requests.get(command_url, timeout=5)
+            response = requests.get(command_url, timeout=3)
             logging.info(f"   Response: {response.status_code} - {response.text}")
 
             if response.status_code == 200:
@@ -940,7 +940,7 @@ def return_to_default_playlist():
                 encoded_model = urllib.parse.quote(overlay_model)
                 # Disable the overlay model (State 0) to stop rendering text
                 state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
-                response = requests.put(state_url, json={"State": 0}, timeout=5)
+                response = requests.put(state_url, json={"State": 0}, timeout=3)
                 logging.info(f"   Disable overlay (State 0): {response.status_code} - {response.text}")
                 if response.status_code == 200:
                     logging.info(f"✅ Text cleared")
@@ -962,10 +962,10 @@ def return_to_default_playlist():
         if name_playlist.startswith('seq:'):
             # Stop the names FSEQ Effect — waiting FSEQ keeps running underneath
             seq_name = name_playlist[4:].removesuffix('.fseq')
-            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=5)
+            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=3)
             logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
         else:
-            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=5)
+            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
             logging.info(f"⏹️  Stop Now ({r.status_code})")
 
     except Exception as e:
@@ -3145,12 +3145,12 @@ def api_deactivate():
             # FSEQ Effect Stop also uses display name without .fseq
             seq_name = default[4:].removesuffix('.fseq')
             effect_stop_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}"
-            r = requests.get(effect_stop_url, timeout=5)
+            r = requests.get(effect_stop_url, timeout=3)
             logging.info(f"🛑 FSEQ Effect Stop: {r.status_code} - {r.text}")
 
         # Stop Now catches playlists and any foreground sequences
         command_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('Stop Now')}"
-        r2 = requests.get(command_url, timeout=5)
+        r2 = requests.get(command_url, timeout=3)
         logging.info(f"🛑 Stop Now: {r2.status_code} - {r2.text}")
     except Exception as e:
         logging.warning(f"Could not stop FPP playback: {e}")
@@ -3191,4 +3191,4 @@ if __name__ == '__main__':
         threading.Thread(target=_start_default, daemon=True).start()
 
     logging.info("FPP SMS Plugin v2.5 starting...")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
