@@ -74,6 +74,15 @@ touch /home/fpp/media/logs/sms_plugin.log
 chmod 666 /home/fpp/media/logs/sms_plugin.log
 chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
 
+# Install scheduler scripts into FPP's scripts directory so they appear in
+# the scheduler under: Command → Run Script → TwilioStart / TwilioStop
+mkdir -p /home/fpp/media/scripts
+cp "$PLUGIN_DIR/scripts/fpp_activate.sh"   /home/fpp/media/scripts/TwilioStart.sh
+cp "$PLUGIN_DIR/scripts/fpp_deactivate.sh" /home/fpp/media/scripts/TwilioStop.sh
+chmod +x /home/fpp/media/scripts/TwilioStart.sh /home/fpp/media/scripts/TwilioStop.sh
+chown fpp:fpp /home/fpp/media/scripts/TwilioStart.sh /home/fpp/media/scripts/TwilioStop.sh
+log_and_show "Scheduler scripts installed: TwilioStart.sh / TwilioStop.sh"
+
 log_and_show "========================================"
 log_and_show "Installation complete!"
 log_and_show "Restart FPPD to start the service"
@@ -85,11 +94,14 @@ if pgrep -f sms_plugin.py > /dev/null 2>&1; then
     pkill -f sms_plugin.py 2>/dev/null || true
     sleep 1
     PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
-    setsid su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &" < /dev/null > /dev/null 2>&1
+    setsid su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /dev/null 2>/home/fpp/media/logs/sms_plugin.log &" < /dev/null > /dev/null 2>&1
     log_and_show "SMS plugin service restarted"
 fi
 
 # Trigger the "FPPD Restart Required" banner in FPP's UI
 setSetting "restartFlag" "1"
+
+# No errors — remove the install log, it's only useful for debugging failures
+rm -f "$LOG"
 
 exit 0

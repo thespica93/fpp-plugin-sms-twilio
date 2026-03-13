@@ -12,6 +12,6 @@ sleep 1
 
 # Start the service as fpp user
 cd "$PLUGIN_DIR"
-su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /home/fpp/media/logs/sms_plugin.log 2>&1 &"
+su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /dev/null 2>/home/fpp/media/logs/sms_plugin.log &"
 
 exit 0

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import re
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from twilio.rest import Client
 from collections import deque
 import os
@@ -40,12 +41,22 @@ WHITELIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "whitelist_added.txt")
 LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
 BLOCKLIST_FILE = "/home/fpp/media/config/blocked_phones.json"
 
-# Setup logging
+# Setup logging — ensure the log directory exists, then write to file + stderr
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+_log_handlers = [logging.StreamHandler()]  # stderr always available via nohup
+try:
+    _log_handlers.append(logging.FileHandler(LOG_FILE))
+except Exception:
+    pass  # directory may not exist on some FPP installs; stderr is the fallback
 logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=_log_handlers
 )
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+import flask.cli
+flask.cli.show_server_banner = lambda *args: None
 
 app = Flask(__name__)
 
@@ -79,6 +90,13 @@ _whitelist_mtime = None
 _blocklist_cache = None
 _blocklist_mtime = None
 
+_fpp_data_cache = None
+_fpp_data_cache_time = 0
+_FPP_DATA_CACHE_TTL = 60  # seconds
+
+# FPP runs locally — always use localhost
+FPP_HOST = 'http://127.0.0.1'
+
 # Default configuration
 DEFAULT_CONFIG = {
     "enabled": False,
@@ -102,10 +120,12 @@ DEFAULT_CONFIG = {
     "text_font": "FreeSans",
     "text_font_size": 48,
     "text_position": "Center",
+    "text_v_align": "center",
     "message_template": "Merry Christmas {name}!",
-    "scroll_speed": 20,
-    "text_offset_x": 0,
-    "text_offset_y": 0,
+    "scroll_speed": 5,
+    "overlay_model_width": 0,
+    "overlay_model_height": 0,
+    "sms_response_show_not_live": False,
     "sms_response_success": False,
     "sms_response_profanity": False,
     "sms_response_rate_limited": False,
@@ -113,6 +133,7 @@ DEFAULT_CONFIG = {
     "sms_response_invalid_format": False,
     "sms_response_not_whitelisted": False,
     "sms_response_blocked": False,
+    "response_show_not_live": "Ho, Ho, Ho, It looks like our show isn't running now. Try again later.",
     "response_success": "Merry Christmas! Your name will appear on our display soon! 🎄",
     "response_profanity": "Sorry, your message contains inappropriate content and cannot be displayed. Please keep within the Christmas spirit! 🎅",
     "response_blocked": "Sorry, Your phone number has been blocked from sending messages.",
@@ -150,6 +171,11 @@ def load_config():
             save_config()
             logging.info(f"Saved {len(new_keys)} new default setting(s) after update: {new_keys}")
 
+        # Migrate old scroll_speed values (pre-v2.6 stored raw px/s, now 1-10 scale)
+        if config.get('scroll_speed', 5) > 10:
+            config['scroll_speed'] = 5
+            save_config()
+
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
                 config['twilio_account_sid'],
@@ -182,11 +208,11 @@ def save_config():
 def get_fpp_playlists():
     """Get list of playlists from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         playlists = []
         
         try:
-            response = requests.get(f"{fpp_host}/api/playlists", timeout=5)
+            response = requests.get(f"{fpp_host}/api/playlists", timeout=3)
             if response.status_code == 200:
                 data = response.json()
                 if isinstance(data, dict):
@@ -206,42 +232,65 @@ def get_fpp_playlists():
 def get_fpp_sequences():
     """Get list of sequences from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
-        response = requests.get(f"{fpp_host}/api/sequence", timeout=5)
+        fpp_host = FPP_HOST
+        response = requests.get(f"{fpp_host}/api/sequence", timeout=3)
         if response.status_code == 200:
             sequences = response.json()
-            return sequences if isinstance(sequences, list) else []
+            result = sequences if isinstance(sequences, list) else []
+            logging.info(f"FPP sequences raw response: {sequences}")
+            logging.info(f"Found {len(result)} sequences: {result}")
+            return result
+        logging.warning(f"FPP sequences API returned {response.status_code}: {response.text}")
         return []
     except Exception as e:
         logging.error(f"Error fetching FPP sequences: {e}")
         return []
 
 def get_fpp_models():
-    """Get list of overlay models from FPP"""
+    """Get list of overlay models from FPP, including pixel dimensions when available.
+    Tries /api/overlays/models first (has dimensions), falls back to /api/models."""
+    def extract_model(m):
+        if not isinstance(m, dict):
+            return None
+        name = m.get('Name') or m.get('name')
+        if not name:
+            return None
+        # FPP overlay models use rows/cols; channel output models use Width/Height
+        w = int(m.get('Width') or m.get('width') or m.get('Cols') or m.get('cols') or
+                m.get('Columns') or m.get('columns') or 0)
+        h = int(m.get('Height') or m.get('height') or m.get('Rows') or m.get('rows') or 0)
+        return {"name": name, "width": w, "height": h}
+
+    def parse_response(data):
+        models = []
+        if isinstance(data, dict) and 'models' in data:
+            for m in data['models']:
+                obj = extract_model(m)
+                if obj: models.append(obj)
+        elif isinstance(data, list):
+            for m in data:
+                obj = extract_model(m)
+                if obj: models.append(obj)
+        elif isinstance(data, dict):
+            models = [{"name": k, "width": 0, "height": 0} for k in data.keys()]
+        return models
+
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
-        response = requests.get(f"{fpp_host}/api/models", timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            logging.info(f"FPP Models API response: {data}")
-            
-            models = []
-            
-            if isinstance(data, dict) and 'models' in data:
-                for model in data['models']:
-                    if isinstance(model, dict) and 'Name' in model:
-                        models.append(model['Name'])
-            elif isinstance(data, list):
-                for model in data:
-                    if isinstance(model, dict) and 'Name' in model:
-                        models.append(model['Name'])
-            elif isinstance(data, dict):
-                models = list(data.keys())
-            
-            logging.info(f"Extracted {len(models)} models: {models}")
-            return models
-        
-        logging.warning(f"FPP models API returned status {response.status_code}")
+        fpp_host = FPP_HOST
+        # /api/overlays/models is the overlay-specific endpoint and includes dimensions
+        for endpoint in ['/api/overlays/models', '/api/models']:
+            try:
+                response = requests.get(f"{fpp_host}{endpoint}", timeout=3)
+                if response.status_code == 200:
+                    models = parse_response(response.json())
+                    if models:
+                        has_dims = any(m['width'] > 0 or m['height'] > 0 for m in models)
+                        logging.info(f"Got {len(models)} models from {endpoint} (dims: {has_dims})")
+                        return models
+            except Exception:
+                pass
+
+        logging.warning("Could not fetch models from FPP")
         return []
     except Exception as e:
         logging.error(f"Error fetching FPP models: {e}")
@@ -250,8 +299,8 @@ def get_fpp_models():
 def get_fpp_fonts():
     """Get list of supported fonts from FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
-        response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=5)
+        fpp_host = FPP_HOST
+        response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=3)
         if response.status_code == 200:
             fonts = response.json()
             logging.info(f"Found {len(fonts)} fonts from FPP")
@@ -266,8 +315,8 @@ def get_fpp_fonts():
 def test_fpp_connection():
     """Test connection to FPP"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
-        response = requests.get(f"{fpp_host}/api/fppd/status", timeout=5)
+        fpp_host = FPP_HOST
+        response = requests.get(f"{fpp_host}/api/fppd/status", timeout=3)
         if response.status_code == 200:
             status = response.json()
             return True, status.get('fppd', 'Unknown')
@@ -696,13 +745,29 @@ def add_to_queue(name, phone, message):
 def send_to_fpp(name):
     """Send name to FPP - Start name sequence and display text overlay"""
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        fpp_host = FPP_HOST
         name_playlist = config.get('name_display_playlist', '')
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
         
-        # FIXED: Get message template and replace {name} with actual name
+        # Get message template and replace {name} with actual name
         message_template = config.get('message_template', 'Merry Christmas {name}!')
         display_message = message_template.replace('{name}', name)
+
+        # Vertical alignment: pad with newlines to shift text on the matrix.
+        # FPP "Center" centers the full text block vertically, so:
+        #   top    → append trailing newlines (block grows down → text rises)
+        #   bottom → prepend leading newlines (block grows up → text sinks)
+        #   center → no change (FPP centers naturally)
+        v_align = config.get('text_v_align', 'center')
+        model_height = config.get('overlay_model_height', 0)
+        font_size = config.get('text_font_size', 48)
+        if v_align != 'center' and model_height > font_size:
+            pad = max(0, (model_height // font_size) - 1)
+            if pad > 0:
+                if v_align == 'top':
+                    display_message = display_message + '\n' * pad
+                elif v_align == 'bottom':
+                    display_message = '\n' * pad + display_message
         
         logging.info(f"🎄 ========== STARTING DISPLAY FOR: {name} ==========")
         logging.info(f"📺 FPP Host: {fpp_host}")
@@ -714,24 +779,28 @@ def send_to_fpp(name):
         # Step 1: Start the name display playlist/sequence (background)
         if name_playlist:
             try:
-                logging.info(f"⏸️  STEP 1: Stopping all playlists...")
-                requests.get(f"{fpp_host}/api/playlists/stop", timeout=5)
+                logging.info(f"⏸️  STEP 1: Stopping any running playlist...")
+                requests.get(f"{fpp_host}/api/playlists/stop", timeout=3)
+                # Note: background FSEQ Effect is NOT stopped here — the names sequence
+                # (foreground) will automatically suppress it and it auto-resumes after.
                 time.sleep(0.1)
 
                 logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
 
                 import urllib.parse
                 if name_playlist.startswith('seq:'):
-                    seq_file = name_playlist[4:]
-                    command = "Start Sequence"
-                    command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(seq_file)}"
+                    # FSEQ Effect (loop=true, background=true): plays as background so
+                    # overlay model renders on top with correct text colors.
+                    seq_name = name_playlist[4:].removesuffix('.fseq')
+                    effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
+                    start_response = requests.get(effect_url, timeout=3)
+                    logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
                 else:
                     command = "Start Playlist"
                     encoded_playlist = urllib.parse.quote(name_playlist)
                     command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_playlist}/true/false"
-
-                start_response = requests.get(command_url, timeout=5)
-                logging.info(f"   Start response: {start_response.status_code}")
+                    start_response = requests.get(command_url, timeout=3)
+                    logging.info(f"   Start playlist response: {start_response.status_code}")
 
                 time.sleep(0.3)
                 
@@ -742,74 +811,66 @@ def send_to_fpp(name):
         if overlay_model:
             try:
                 logging.info(f"📝 STEP 3: Displaying text on model: {overlay_model}")
-                
+
                 text_position = config.get('text_position', 'Center')
                 text_color = config.get('text_color', '#FF0000')
                 text_font = config.get('text_font', 'FreeSans')
                 font_size = config.get('text_font_size', 48)
                 scroll_speed = config.get('scroll_speed', 20)
-                
+
                 import urllib.parse
-                
-                # Handle newlines for multi-line support
-                # Replace actual newlines with URL-encoded version
-                display_message_encoded = display_message.replace('\n', '%0A')
-                
-                # URL encode the message (keeping %0A intact)
-                message_for_url = urllib.parse.quote(display_message_encoded, safe='%')
-                
-                encoded_model = urllib.parse.quote(overlay_model)
-                
+
                 if not text_color.startswith('#'):
                     text_color = '#' + text_color
-                
-                command = "Overlay Model Effect"
-                auto_enable = "Transparent"
-                
-                # Build command based on text position
-                if text_position in ['L2R', 'R2L', 'T2B', 'B2T']:
-                    # Scrolling text
-                    effect = "Scroll Text"
-                    direction = text_position
-                    position_value = "Center"
-                    
-                    color_encoded = urllib.parse.quote(text_color)
-                    
-                    # Command: Model/AutoEnable/Effect/Message/Color/Position/Speed/Font/FontSize/AntiAlias/Direction/Iterate
-                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{message_for_url}/{color_encoded}/{urllib.parse.quote(position_value)}/{scroll_speed}/{urllib.parse.quote(text_font)}/{font_size}/1/{direction}/1"
-                    
-                    logging.info(f"📡 Sending Overlay Model Effect (Scroll Text):")
-                    logging.info(f"   Message to display: {display_message}")
-                    logging.info(f"   Encoded for URL: {message_for_url}")
-                    logging.info(f"   Full URL: {fpp_url}")
-                    
-                    response = requests.get(fpp_url, timeout=10)
-                    logging.info(f"   Response: {response.status_code} - {response.text}")
-                    
-                else:
-                    # Static text
-                    effect = "Text"
-                    position_value = "Center"
-                    display_duration = config.get('display_duration', 30)
-                    
-                    color_encoded = urllib.parse.quote(text_color)
-                    
-                    # Command: Model/AutoEnable/Effect/Color/Font/FontSize/AntiAlias/Position/0/Duration/Text
-                    fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}/{auto_enable}/{urllib.parse.quote(effect)}/{color_encoded}/{urllib.parse.quote(text_font)}/{font_size}/1/{position_value}/0/{display_duration}/{message_for_url}"
-                    
-                    logging.info(f"📡 Sending Overlay Model Effect (Static Text):")
-                    logging.info(f"   Message to display: {display_message}")
-                    logging.info(f"   Encoded for URL: {message_for_url}")
-                    logging.info(f"   Full URL: {fpp_url}")
-                    
-                    response = requests.get(fpp_url, timeout=10)
-                    logging.info(f"   Response: {response.status_code} - {response.text}")
-                
+
+                encoded_model = urllib.parse.quote(overlay_model)
+
+                # Map config abbreviations to FPP API full strings
+                position_map = {
+                    'Center': 'Center',
+                    'L2R': 'Left to Right',
+                    'R2L': 'Right to Left',
+                    'T2B': 'Top to Bottom',
+                    'B2T': 'Bottom to Top',
+                }
+                fpp_position = position_map.get(text_position, 'Center')
+
+                state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
+                text_url  = f"{fpp_host}/api/overlays/model/{encoded_model}/text"
+
+                # Order matters to avoid flash of previous name:
+                # 1. Disable overlay (State 0) — hides it
+                # 2. Load new text while hidden — buffer has new name, not old one
+                # 3. Enable overlay (State 3 Transparent RGB) — activates cleanly
+                requests.put(state_url, json={"State": 0}, timeout=3)
+
+                text_payload = {
+                    "Message": display_message,
+                    "Color": text_color,
+                    "Font": text_font,
+                    "FontSize": font_size,
+                    "Position": fpp_position,
+                    "PixelsPerSecond": scroll_speed * 20,
+                    "AntiAlias": True,
+                    "AutoEnable": False
+                }
+                response = requests.put(text_url, json=text_payload, timeout=10)
+
+                logging.info(f"   Payload: {text_payload}")
+                logging.info(f"   Response: {response.status_code} - {response.text}")
+
+                state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
+                logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
+
+                logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
+                logging.info(f"   Payload: {text_payload}")
+                logging.info(f"   Response: {response.status_code} - {response.text}")
+
                 if response.status_code == 200:
-                    logging.info(f"✅ Overlay Model Effect command sent successfully")
+                    logging.info(f"✅ Text sent successfully")
                 else:
-                    logging.error(f"❌ OVERLAY MODEL EFFECT FAILED! Status: {response.status_code}")
-                
+                    logging.error(f"❌ TEXT API FAILED! Status: {response.status_code}")
+
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
                 import traceback
@@ -823,60 +884,103 @@ def send_to_fpp(name):
         import traceback
         logging.error(traceback.format_exc())
         return False
-def return_to_default_playlist():
-    """Clear text and trigger next scheduled item"""
+def start_default_playlist():
+    """Start the configured default waiting playlist/sequence.
+    For sequences (seq:), uses FSEQ Effect (loop=true, background=true) so it loops
+    seamlessly as a background effect."""
+    import urllib.parse
+    fpp_host = FPP_HOST
+    default_playlist = config.get('default_playlist', '')
+
+    if not default_playlist:
+        logging.info("ℹ️  No default playlist configured — skipping auto-start")
+        return False
+
     try:
-        fpp_host = config.get('fpp_host', 'http://127.0.0.1')
+        if default_playlist.startswith('seq:'):
+            # FSEQ Effect Start uses the display name WITHOUT .fseq extension
+            seq_name = default_playlist[4:]
+            seq_name = seq_name.removesuffix('.fseq')
+
+            # loop=true, background=true: loops natively, auto-suppressed by foreground
+            # sequences, auto-resumes when foreground stops
+            effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
+            logging.info(f"▶️  Starting FSEQ Effect Start (loop+background): {seq_name}")
+            logging.info(f"   URL: {effect_url}")
+            response = requests.get(effect_url, timeout=3)
+            logging.info(f"   Response: {response.status_code} - {response.text}")
+
+            if response.status_code == 200:
+                logging.info(f"✅ FSEQ Effect Start — looping in background")
+                return True
+
+            logging.error(f"❌ FSEQ Effect Start failed: {response.status_code} - {response.text}")
+            return False
+        else:
+            command = "Start Playlist"
+            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/true"
+            logging.info(f"▶️  Starting playlist: {default_playlist}")
+            logging.info(f"   URL: {command_url}")
+            response = requests.get(command_url, timeout=3)
+            logging.info(f"   Response: {response.status_code} - {response.text}")
+
+            if response.status_code == 200:
+                logging.info(f"✅ Playlist started")
+                return True
+            else:
+                logging.error(f"❌ Failed to start playlist: {response.status_code}")
+                return False
+    except Exception as e:
+        logging.error(f"Error starting default playlist: {e}")
+        return False
+
+
+def return_to_default_playlist():
+    """Clear text overlay and stop the names sequence/playlist.
+    If the default is a seq: (FSEQ Effect background), the background auto-resumes.
+    If the default is a playlist, restart it explicitly."""
+    try:
+        fpp_host = FPP_HOST
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
-        
+
         if overlay_model:
             try:
                 logging.info(f"🧹 Clearing text from model: {overlay_model}")
                 import urllib.parse
-                
-                command = "Overlay Model Clear"
                 encoded_model = urllib.parse.quote(overlay_model)
-                fpp_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{encoded_model}"
-                
-                logging.info(f"   Clear URL: {fpp_url}")
-                response = requests.get(fpp_url, timeout=5)
-                logging.info(f"   Clear response: {response.status_code} - {response.text}")
-                
+                # Disable the overlay model (State 0) to stop rendering text
+                state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
+                response = requests.put(state_url, json={"State": 0}, timeout=3)
+                logging.info(f"   Disable overlay (State 0): {response.status_code} - {response.text}")
                 if response.status_code == 200:
                     logging.info(f"✅ Text cleared")
                 else:
                     logging.warning(f"⚠️  Could not clear text: {response.status_code}")
             except Exception as e:
                 logging.warning(f"Could not clear text: {e}")
-        
+
         with queue_lock:
             queue_length = len(message_queue)
-        
+
         if queue_length > 0:
-            logging.info(f"📋 Queue has {queue_length} more names - NOT returning to scheduled item")
+            logging.info(f"📋 Queue has {queue_length} more names — skipping return-to-default")
             return
-        
-        try:
-            logging.info(f"🔄 Queue empty - Starting Next Scheduled Item")
-            
-            import urllib.parse
-            command = "Start Next Scheduled Item"
-            command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}"
-            
-            logging.info(f"   Command URL: {command_url}")
-            response = requests.get(command_url, timeout=5)
-            logging.info(f"   Response: {response.status_code} - {response.text}")
-            
-            if response.status_code == 200:
-                logging.info(f"✅ Started next scheduled item")
-            else:
-                logging.error(f"❌ Failed to start next scheduled item: {response.status_code}")
-                
-        except Exception as e:
-            logging.error(f"Error starting next scheduled item: {e}")
-    
+
+        import urllib.parse
+        name_playlist = config.get('name_display_playlist', '')
+
+        if name_playlist.startswith('seq:'):
+            # Stop the names FSEQ Effect — waiting FSEQ keeps running underneath
+            seq_name = name_playlist[4:].removesuffix('.fseq')
+            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=3)
+            logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
+        else:
+            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
+            logging.info(f"⏹️  Stop Now ({r.status_code})")
+
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
+
 
 def display_worker():
     """Background worker that displays messages from the queue"""
@@ -889,10 +993,15 @@ def display_worker():
             with queue_lock:
                 if len(message_queue) == 0:
                     currently_displaying = None
-                    time.sleep(1)
-                    continue
-                
-                currently_displaying = message_queue.popleft()
+                    _next_item = None
+                else:
+                    _next_item = message_queue.popleft()
+
+            if _next_item is None:
+                time.sleep(0.1)
+                continue
+
+            currently_displaying = _next_item
             
             name = currently_displaying['name']
             phone = currently_displaying['phone']
@@ -967,7 +1076,8 @@ def get_queue_status():
     status = {
         "currently_displaying": current,
         "queue": queue_list,
-        "queue_length": len(queue_list)
+        "queue_length": len(queue_list),
+        "show_live": config.get('enabled', False)
     }
     
     return status
@@ -975,42 +1085,54 @@ def get_queue_status():
 def poll_twilio():
     """Poll Twilio for new messages"""
     global last_message_sid, stop_polling
-    
+
     logging.info("🚀 Twilio polling started")
     first_run = last_message_sid is None
-    
+    _current_day = datetime.now().date()
+
     while not stop_polling:
         try:
-            if not config['enabled'] or not twilio_client:
-                time.sleep(config['poll_interval'])
+            # Midnight cleanup — clear message log when the date rolls over
+            today = datetime.now().date()
+            if today != _current_day:
+                _current_day = today
+                try:
+                    with open(MESSAGE_LOG, 'w') as f:
+                        json.dump([], f)
+                    logging.info(f"🌙 Midnight: message log cleared for {today}")
+                except Exception as e:
+                    logging.error(f"Error during midnight cleanup: {e}")
+
+            if not twilio_client:
+                time.sleep(config.get('poll_interval', 2))
                 continue
-            
-            logging.info("📡 Polling Twilio for new messages...")
-            
+
+            logging.debug("📡 Polling Twilio for new messages...")
+
             messages = twilio_client.messages.list(
                 to=config['twilio_phone_number'],
                 date_sent_after=datetime.utcnow() - timedelta(minutes=10),
                 limit=20
             )
-            
-            logging.info(f"📨 Found {len(messages)} total messages in last 10 minutes")
-            
+
+            logging.debug(f"📨 Found {len(messages)} total messages in last 10 minutes")
+
             new_messages = []
             for msg in messages:
                 if last_message_sid and msg.sid == last_message_sid:
-                    logging.info(f"✓ Reached last processed message SID: {last_message_sid[:10]}...")
+                    logging.debug(f"✓ Reached last processed message SID: {last_message_sid[:10]}...")
                     break
                 new_messages.append(msg)
-            
-            logging.info(f"🆕 Found {len(new_messages)} NEW messages to process")
-            
+
+            logging.debug(f"🆕 Found {len(new_messages)} NEW messages to process")
+
             if first_run:
                 if len(messages) > 0:
                     last_message_sid = messages[0].sid
                     save_last_sid(messages[0].sid)
-                    logging.info(f"⚙️ First run: Initialized with message SID {messages[0].sid[:10]}..., will process new messages from now on")
+                    logging.info(f"⚙️ First run: initialized SID {messages[0].sid[:10]}...")
                 else:
-                    logging.info("⚙️ First run: No messages found, will process new messages from now on")
+                    logging.info("⚙️ First run: no messages found, polling from now on")
                 first_run = False
                 time.sleep(config['poll_interval'])
                 continue
@@ -1018,63 +1140,71 @@ def poll_twilio():
             for msg in reversed(new_messages):
                 from_number = msg.from_
                 body = msg.body
-                
-                logging.info(f"📱 NEW SMS from {from_number[-4:]}: '{body}'")
-                
+
+                logging.info(f"📱 SMS from {from_number[-4:]}: '{body[:30]}'")  # keep at INFO — new message is significant
+
                 try:
+                    if not config.get('enabled', False):
+                        # Show not live — reply if enabled, then discard
+                        if not is_blocked(from_number):
+                            send_sms_response(from_number, "show_not_live")
+                            log_message(from_number, body, "", "show_not_live")
+                            logging.info(f"🔴 Show not live reply sent to {from_number[-4:]}")
+                        last_message_sid = msg.sid
+                        save_last_sid(msg.sid)
+                        continue
+
                     # Exactly one branch fires — only one SMS response is ever sent per message
                     if is_blocked(from_number):
-                        logging.info(f"🚫 Blocked number: {from_number}")
+                        logging.info(f"🚫 Blocked: {from_number[-4:]}")
                         log_message(from_number, body, "", "blocked")
                         send_sms_response(from_number, "blocked")
 
                     else:
                         name = extract_name(body)
-                        logging.info(f"👤 Extracted name: '{name}'")
-                        msg_count = get_message_count(from_number)
+                        logging.debug(f"👤 Extracted name: '{name}'")
                         max_msgs = config.get('max_messages_per_phone', 0)
+                        msg_count = get_message_count(from_number) if max_msgs > 0 else 0
                         is_valid, _ = is_valid_name(name)
 
                         if max_msgs > 0 and msg_count >= max_msgs:
-                            logging.info(f"⛔ Rate limited: {from_number}")
+                            logging.info(f"⛔ Rate limited: {from_number[-4:]}")
                             log_message(from_number, body, "", "rate_limited")
                             send_sms_response(from_number, "rate_limited")
 
-                        elif has_sent_name_today(from_number, name):
-                            logging.info(f"🔄 Duplicate name from same phone today: {name} from {from_number[-4:]}")
+                        elif max_msgs > 0 and has_sent_name_today(from_number, name):
+                            logging.info(f"🔄 Duplicate name: {name}")
                             log_message(from_number, body, name, "duplicate_name_today")
                             send_sms_response(from_number, "duplicate")
 
                         elif not is_valid and not config.get('use_whitelist', False):
-                            logging.info(f"❌ Rejected invalid name format: {body}")
+                            logging.info(f"❌ Invalid format: '{body[:20]}'")
                             log_message(from_number, body, name, "invalid_format")
                             send_sms_response(from_number, "invalid_format")
 
                         elif not is_on_whitelist(name):
-                            logging.info(f"❌ Rejected name not on whitelist: {name}")
+                            logging.info(f"❌ Not on whitelist: {name}")
                             log_message(from_number, body, name, "not_on_whitelist")
                             send_sms_response(from_number, "not_whitelisted")
 
                         elif config['profanity_filter'] and contains_profanity(body):
-                            logging.info(f"❌ Rejected profanity from {from_number}")
+                            logging.info(f"❌ Profanity rejected")
                             log_message(from_number, body, name, "profanity")
                             send_sms_response(from_number, "profanity")
 
                         else:
-                            logging.info(f"📋 Adding to queue...")
                             success = add_to_queue(name, from_number, body)
-                            logging.info(f"📋 Add to queue result: {success}")
                             if success:
-                                logging.info(f"✅ SUCCESS! Queued: {name}")
+                                logging.info(f"✅ Queued: {name}")
                                 log_message(from_number, body, name, "queued")
                                 send_sms_response(from_number, "success")
                             else:
-                                logging.info(f"❌ Error queuing: {name}")
+                                logging.warning(f"❌ Queue error: {name}")
                                 log_message(from_number, body, name, "error")
 
                     last_message_sid = msg.sid
                     save_last_sid(msg.sid)
-                    logging.info(f"💾 Saved last message SID: {msg.sid[:10]}...")
+                    logging.debug(f"💾 Saved SID: {msg.sid[:10]}...")
 
                 except Exception as e:
                     logging.error(f"💥 EXCEPTION processing message: {e}")
@@ -1118,6 +1248,11 @@ def index():
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
+            .valign-picker { display: flex; gap: 6px; margin: 4px 0; }
+            .valign-btn { flex: 1; padding: 7px 4px; border: 1px solid #ccc; background: #f5f5f5; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.15s, border-color 0.15s; }
+            .valign-btn.active { background: #4CAF50; color: white; border-color: #388E3C; font-weight: bold; }
+            .valign-btn:hover:not(.active) { background: #e8e8e8; }
+            #message_template { font-family: monospace; min-height: 50px; max-height: 180px; resize: vertical; }
             .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
             .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
             .column .section { flex: 0 0 auto; }
@@ -1172,9 +1307,9 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
-                        <label>Default "Waiting" Playlist:</label>
+                        <label>Default "Waiting" Playlist: <span style="color:#f44336;font-size:12px;">* required</span></label>
                         <select id="default_playlist">
-                            <option value="">-- None (Manual Control) --</option>
+                            <option value="">-- Select a playlist --</option>
                         </select>
                         <p class="help-text">📺 This playlist or sequence loops while waiting for text messages</p>
 
@@ -1184,7 +1319,7 @@ def index():
                         </select>
                         <p class="help-text">🎬 This playlist or sequence plays when displaying a name</p>
 
-                        <label>Overlay Model Name:</label>
+                        <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
                         <select id="overlay_model_name">
                             <option value="">-- None --</option>
                         </select>
@@ -1206,27 +1341,26 @@ def index():
                     </div>
                 </div>
 
-                <!-- RIGHT COLUMN: FPP Connection + Filters + Text Display -->
+                <!-- RIGHT COLUMN: Filters + Text Display -->
                 <div class="column">
                     <div class="section">
-                        <h2>FPP Connection</h2>
-                        <label>FPP Host URL:</label>
-                        <input type="text" id="fpp_host" value="{{ config.fpp_host }}" placeholder="http://127.0.0.1">
-                        <p class="help-text">💡 Use http://127.0.0.1 for local FPP, or http://192.168.x.x for remote</p>
+                        <h2>Filters</h2>
 
-                        <button class="test-btn" onclick="testFPP()">🔌 Test FPP Connection</button>
-                        <div id="fpp_status"></div>
+                        <div id="blacklist_section">
+                            <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState()">
+                            <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
+                            <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
+                        </div>
+                        <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                            ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended.
+                        </div>
+                        <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                            ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
+                        </div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-                        <h2 style="margin-top: 0;">Filters</h2>
 
-                        <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }}>
-                        <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
-                        <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
-
-                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-
-                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules()">
+                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState();">
                         <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 6px;">📋 Manage Whitelist</button>
 
@@ -1248,10 +1382,11 @@ def index():
                                     ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
                                 </div>
                             </div>
-                            <p class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                            <p id="hyphen_note" class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
                         </div>
 
                         <script>
+                        var _formatRulesInitialized = false;
                         function updateFormatRules() {
                             var whitelistOn = document.getElementById('use_whitelist').checked;
                             var inputs = document.getElementById('format_rules_inputs');
@@ -1262,15 +1397,37 @@ def index():
                             if (whitelistOn) {
                                 document.getElementById('one_word_only').checked = false;
                                 document.getElementById('two_words_max').checked = false;
+                            } else if (_formatRulesInitialized) {
+                                // User just turned whitelist off — restore two words as default
+                                document.getElementById('two_words_max').checked = true;
                             }
+                            _formatRulesInitialized = true;
                             checkFormatWarning();
                         }
                         function checkFormatWarning() {
                             var whitelistOn = document.getElementById('use_whitelist').checked;
-                            var warn = !whitelistOn && !document.getElementById('one_word_only').checked && !document.getElementById('two_words_max').checked;
+                            var oneWord = document.getElementById('one_word_only').checked;
+                            var twoWords = document.getElementById('two_words_max').checked;
+                            var warn = !whitelistOn && !oneWord && !twoWords;
+                            var rulesActive = !whitelistOn && (oneWord || twoWords);
                             document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
+                            document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
+                        }
+                        function checkFiltersState() {
+                            var whitelistOn = document.getElementById('use_whitelist').checked;
+                            var profanityOn = document.getElementById('profanity_filter').checked;
+                            var section = document.getElementById('blacklist_section');
+
+                            // Grey out entire blacklist section when whitelist is active
+                            section.style.opacity = whitelistOn ? '0.4' : '1';
+                            section.style.pointerEvents = whitelistOn ? 'none' : '';
+
+                            // Warnings
+                            document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
+                            document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
                         }
                         updateFormatRules();
+                        checkFiltersState();
                         </script>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
@@ -1282,8 +1439,8 @@ def index():
                         <h2 style="margin-top: 0;">Text Display Options</h2>
 
                         <label>Message Template:</label>
-                        <textarea id="message_template" rows="3">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines. Use spaces to shift text position.</p>
+                        <textarea id="message_template">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
+                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines.</p>
 
                         <label>Text Color:</label>
                         <div style="display: flex; align-items: center; gap: 10px;">
@@ -1316,12 +1473,8 @@ def index():
                         <label>Font Size:</label>
                         <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
 
-                        <label>Scroll Speed (pixels per second):</label>
-                        <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 20) }}" min="5" max="100">
-                        <p class="help-text">⚡ Higher = faster scrolling (5=slow, 50=fast)</p>
-
                         <label>Text Position:</label>
-                        <select id="text_position">
+                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
                             <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
                             <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
                             <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
@@ -1329,6 +1482,24 @@ def index():
                             <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
                         </select>
                         <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
+
+                        <div id="scroll_speed_row">
+                            <label>Scroll Speed:</label>
+                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
+                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
+                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
+                        </div>
+
+                        <label>Vertical Alignment:</label>
+                        <div class="valign-picker">
+                            <button type="button" class="valign-btn" data-val="top">▲ Top</button>
+                            <button type="button" class="valign-btn" data-val="center">● Center</button>
+                            <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
+                        </div>
+                        <input type="hidden" id="text_v_align" value="{{ config.get('text_v_align', 'center') }}">
+                        <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
+                        <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
+                        <p class="help-text">↕ Shifts text vertically on the matrix (approximate, based on model size)</p>
                     </div>
                 </div>
 
@@ -1362,11 +1533,20 @@ def index():
                     row.classList.toggle('enabled', document.getElementById('sms_response_' + id).checked);
                 }
                 function initRespRows() {
-                    ['blocked','profanity','duplicate','invalid_format','rate_limited','not_whitelisted','success'].forEach(function(id) {
+                    ['show_not_live','blocked','profanity','duplicate','invalid_format','rate_limited','not_whitelisted','success'].forEach(function(id) {
                         toggleResp(id);
                     });
                 }
                 </script>
+
+                <div id="row_show_not_live" class="resp-row">
+                    <div class="resp-toggle">
+                        <input type="checkbox" id="sms_response_show_not_live" {{ 'checked' if config.get('sms_response_show_not_live', False) else '' }} onchange="toggleResp('show_not_live')">
+                        <label for="sms_response_show_not_live">🔴 Show Not Live — Send Response</label>
+                    </div>
+                    <p class="help-text" style="margin:4px 0 6px;">Sent to anyone who texts while the show is not active (TwilioStop has been called).</p>
+                    <textarea id="response_show_not_live" rows="2">{{ config.get('response_show_not_live', "Ho, Ho, Ho, It looks like our show isn't running now. Try again later.") }}</textarea>
+                </div>
 
                 <div id="row_blocked" class="resp-row">
                     <div class="resp-toggle">
@@ -1436,18 +1616,25 @@ def index():
         <!-- Testing Tab -->
         <div id="tab-testing" class="tab-content">
 
-            <div class="section" style="border: 2px solid #FF9800; margin-top: 20px;">
+            <div id="test_message_section" class="section" style="border: 2px solid #FF9800; margin-top: 20px;">
                 <h2>🧪 Message Testing</h2>
-                <p style="color: #FF9800; font-size: 14px;">
-                    ⚠️ Use this to test messages without sending actual texts. Works without Twilio credentials.
-                </p>
 
-                <label>Test Name:</label>
-                <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+                <div id="show_not_live_banner" style="display:none; background:#ffecb3; border:1px solid #FF9800; border-radius:6px; padding:10px 14px; margin-bottom:14px; color:#7a4f00; font-size:14px;">
+                    🔴 Show is not live — run <strong>TwilioStart</strong> from the FPP scheduler to activate the display before testing.
+                </div>
 
-                <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
+                <div id="test_form_inner">
+                    <p style="color: #FF9800; font-size: 14px;">
+                        ⚠️ Use this to test messages without sending actual texts. Works without Twilio credentials.
+                    </p>
 
-                <div id="test_result" style="margin-top: 10px;"></div>
+                    <label>Test Name:</label>
+                    <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+
+                    <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
+
+                    <div id="test_result" style="margin-top: 10px;"></div>
+                </div>
             </div>
 
             <div class="section" style="border: 2px solid #FF9800;">
@@ -1478,10 +1665,58 @@ def index():
         </div>
 
         <script>
+            function updateLiveStatus() {
+                fetch('/api/queue/status').then(r => r.json()).then(data => {
+                    const live = data.show_live === true;
+                    const banner = document.getElementById('show_not_live_banner');
+                    const form = document.getElementById('test_form_inner');
+                    if (banner) banner.style.display = live ? 'none' : 'block';
+                    if (form) {
+                        form.style.opacity = live ? '1' : '0.4';
+                        form.style.pointerEvents = live ? '' : 'none';
+                    }
+                }).catch(() => {});
+            }
+
+            function updateScrollSpeedVisibility() {
+                var pos = document.getElementById('text_position').value;
+                var row = document.getElementById('scroll_speed_row');
+                if (row) row.style.display = (pos === 'Center') ? 'none' : '';
+            }
+
+            function updateModelAspect(width, height) {
+                var ta = document.getElementById('message_template');
+                if (ta && width > 0 && height > 0) {
+                    ta.style.aspectRatio = (width / height).toFixed(2);
+                    ta.style.height = 'auto';
+                }
+            }
+
+            function initValignButtons() {
+                var current = document.getElementById('text_v_align').value || 'center';
+                document.querySelectorAll('.valign-btn').forEach(function(btn) {
+                    btn.classList.toggle('active', btn.dataset.val === current);
+                    btn.addEventListener('click', function() {
+                        document.querySelectorAll('.valign-btn').forEach(function(b) { b.classList.remove('active'); });
+                        this.classList.add('active');
+                        document.getElementById('text_v_align').value = this.dataset.val;
+                        saveConfig();
+                    });
+                });
+            }
+
             window.onload = function() {
                 loadFPPData();
                 initRespRows();
                 setupAutoSave();
+                updateLiveStatus();
+                setInterval(updateLiveStatus, 5000);
+                updateScrollSpeedVisibility();
+                initValignButtons();
+                // Apply saved model aspect ratio on load
+                var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
+                var h = parseInt(document.getElementById('overlay_model_height').value) || 0;
+                if (w > 0 && h > 0) updateModelAspect(w, h);
             };
 
             function showTab(tabName, btn) {
@@ -1495,6 +1730,13 @@ def index():
                 });
             }
 
+            function refreshFPPLists(btn) {
+                if (btn) { btn.disabled = true; btn.textContent = '...'; }
+                fetch('/api/fpp/refresh', {method:'POST'})
+                    .then(() => loadFPPData())
+                    .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh Lists'; } });
+            }
+
             function loadFPPData() {
                 fetch('/api/fpp/data')
                 .then(r => r.json())
@@ -1504,7 +1746,7 @@ def index():
                     const currentDefault = "{{ config.get('default_playlist', '') }}";
                     const currentName = "{{ config.get('name_display_playlist', '') }}";
 
-                    defaultSelect.innerHTML = '<option value="">-- None (Manual Control) --</option>';
+                    defaultSelect.innerHTML = '<option value="">-- Select a playlist --</option>';
                     nameSelect.innerHTML = '<option value="">-- None (No Playlist Change) --</option>';
 
                     if (data.playlists && data.playlists.length > 0) {
@@ -1537,13 +1779,29 @@ def index():
                     const modelSelect = document.getElementById('overlay_model_name');
                     const currentModel = "{{ config.get('overlay_model_name', 'Texting Matrix') }}";
                     modelSelect.innerHTML = '<option value="">-- None --</option>';
+                    window.fppModels = data.models || [];
 
                     if (data.models && data.models.length > 0) {
                         data.models.forEach(model => {
-                            const opt = new Option(model, model, false, model === currentModel);
+                            const name = typeof model === 'object' ? model.name : model;
+                            const opt = new Option(name, name, false, name === currentModel);
                             modelSelect.add(opt);
                         });
+                        // Set aspect ratio for the currently selected model
+                        const cur = data.models.find(m => (typeof m === 'object' ? m.name : m) === currentModel);
+                        if (cur && cur.width && cur.height) updateModelAspect(cur.width, cur.height);
                     }
+
+                    modelSelect.addEventListener('change', function() {
+                        const selected = this.value;
+                        const m = (window.fppModels || []).find(m => (typeof m === 'object' ? m.name : m) === selected);
+                        if (m && m.width && m.height) {
+                            updateModelAspect(m.width, m.height);
+                            document.getElementById('overlay_model_width').value = m.width;
+                            document.getElementById('overlay_model_height').value = m.height;
+                        }
+                        saveConfig();
+                    });
 
                     const fontSelect = document.getElementById('text_font');
                     const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
@@ -1562,28 +1820,7 @@ def index():
             }
 
 
-            function testFPP() {
-                document.getElementById('fpp_status').innerHTML = '<p>Testing FPP connection...</p>';
-                const fppHost = document.getElementById('fpp_host').value;
-
-                fetch('/api/fpp/test', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({fpp_host: fppHost})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        document.getElementById('fpp_status').innerHTML =
-                            '<p class="success">✅ FPP connection successful! Status: ' + data.status + '</p>';
-                    } else {
-                        document.getElementById('fpp_status').innerHTML =
-                            '<p class="error">❌ Connection failed: ' + data.error + '</p>';
-                    }
-                });
-            }
-
-            var _saveTimer = null;
+var _saveTimer = null;
             function saveConfig() {
                 clearTimeout(_saveTimer);
                 _saveTimer = setTimeout(_doSave, 300);
@@ -1594,7 +1831,6 @@ def index():
                 status.textContent = 'Saving...';
 
                 const data = {
-                    enabled: document.getElementById('enabled').checked,
                     twilio_account_sid: document.getElementById('account_sid').value,
                     twilio_auth_token: document.getElementById('auth_token').value,
                     twilio_phone_number: document.getElementById('phone_number').value,
@@ -1606,7 +1842,6 @@ def index():
                     two_words_max: document.getElementById('two_words_max')?.checked ?? true,
                     profanity_filter: document.getElementById('profanity_filter').checked,
                     use_whitelist: document.getElementById('use_whitelist').checked,
-                    fpp_host: document.getElementById('fpp_host').value,
                     default_playlist: document.getElementById('default_playlist').value,
                     name_display_playlist: document.getElementById('name_display_playlist').value,
                     overlay_model_name: document.getElementById('overlay_model_name').value,
@@ -1615,7 +1850,11 @@ def index():
                     text_font_size: parseInt(document.getElementById('text_font_size').value),
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
                     text_position: document.getElementById('text_position').value,
+                    text_v_align: document.getElementById('text_v_align').value,
+                    overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
+                    overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
                     message_template: document.getElementById('message_template').value,
+                    sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
                     sms_response_rate_limited: document.getElementById('sms_response_rate_limited').checked,
@@ -1629,7 +1868,8 @@ def index():
                     response_duplicate: document.getElementById('response_duplicate').value,
                     response_invalid_format: document.getElementById('response_invalid_format').value,
                     response_not_whitelisted: document.getElementById('response_not_whitelisted').value,
-                    response_blocked: document.getElementById('response_blocked').value
+                    response_blocked: document.getElementById('response_blocked').value,
+                    response_show_not_live: document.getElementById('response_show_not_live').value
                 };
 
                 fetch('/api/config', {
@@ -1650,8 +1890,19 @@ def index():
             }
 
             function setupAutoSave() {
+                // enabled has its own handler — saves only itself so it never
+                // clobbers the runtime state set by TwilioStart/TwilioStop
+                var enabledEl = document.getElementById('enabled');
+                if (enabledEl) enabledEl.addEventListener('change', function() {
+                    fetch('/api/config', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({enabled: this.checked})
+                    });
+                });
+
                 // Checkboxes, selects, color picker — save immediately on change
-                ['enabled','profanity_filter','use_whitelist','text_color',
+                ['profanity_filter','use_whitelist','text_color',
                  'default_playlist','name_display_playlist','overlay_model_name',
                  'text_font','text_position','scroll_speed',
                  'one_word_only','two_words_max',
@@ -1663,7 +1914,7 @@ def index():
                     if (el) el.addEventListener('change', saveConfig);
                 });
                 // Text, number, textarea — save when user clicks away
-                ['account_sid','auth_token','phone_number','fpp_host',
+                ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
                  'text_color_hex','text_font_size',
                  'message_template',
@@ -1780,31 +2031,42 @@ def update_config():
 
 @app.route('/api/fpp/data')
 def get_fpp_data():
+    global _fpp_data_cache, _fpp_data_cache_time
     try:
-        playlists = get_fpp_playlists()
-        sequences = get_fpp_sequences()
-        models = get_fpp_models()
-        fonts = get_fpp_fonts()
-        
-        return jsonify({
-            "playlists": playlists,
-            "sequences": sequences,
-            "models": models,
-            "fonts": fonts
-        })
+        # Return cached result if still fresh
+        if _fpp_data_cache and (time.time() - _fpp_data_cache_time) < _FPP_DATA_CACHE_TTL:
+            return jsonify(_fpp_data_cache)
+
+        # Fetch all 4 in parallel instead of sequentially
+        results = {}
+        tasks = {
+            'playlists': get_fpp_playlists,
+            'sequences': get_fpp_sequences,
+            'models':    get_fpp_models,
+            'fonts':     get_fpp_fonts,
+        }
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(fn): key for key, fn in tasks.items()}
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+
+        _fpp_data_cache = results
+        _fpp_data_cache_time = time.time()
+        return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)})
+
+@app.route('/api/fpp/refresh', methods=['POST'])
+def refresh_fpp_data():
+    global _fpp_data_cache, _fpp_data_cache_time
+    _fpp_data_cache = None
+    _fpp_data_cache_time = 0
+    return jsonify({"success": True})
 
 @app.route('/api/fpp/test', methods=['POST'])
 def test_fpp_api():
     try:
-        data = request.json
-        old_host = config.get('fpp_host')
-        config['fpp_host'] = data.get('fpp_host', 'http://127.0.0.1')
-        
         success, status = test_fpp_connection()
-        config['fpp_host'] = old_host
-        
         return jsonify({"success": success, "status": status})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -1853,46 +2115,34 @@ def test_message_submission():
     try:
         data = request.json
         test_name = data.get('name', '').strip()
-        test_phone = data.get('phone', '+15555550000')
+        test_phone = data.get('phone', 'Local Testing')
         
-        logging.info(f"🧪 ===== TEST MESSAGE RECEIVED =====")
-        logging.info(f"🧪 Raw input: '{test_name}'")
-        
+        if not config.get('enabled', False):
+            return jsonify({"success": False, "error": "Show is not live — run TwilioStart first"})
+
         if not test_name:
-            logging.warning(f"🧪 TEST FAILED: Name is empty")
             return jsonify({"success": False, "error": "Name is required"})
-        
+
         test_name = extract_name(test_name)
-        logging.info(f"🧪 Extracted name (proper case): '{test_name}'")
-        
-        logging.info(f"🧪 Checking name format...")
         is_valid, validation_msg = is_valid_name(test_name)
-        logging.info(f"🧪 Name format valid: {is_valid}")
-        
+
         if not is_valid:
-            logging.warning(f"🧪 TEST FAILED: Invalid format - {validation_msg}")
             return jsonify({"success": False, "error": validation_msg, "reason": "invalid_format"})
-        
-        logging.info(f"🧪 Checking whitelist...")
+
         if not is_on_whitelist(test_name):
-            logging.warning(f"🧪 TEST FAILED: Not on whitelist")
             return jsonify({"success": False, "error": "Name not on whitelist", "reason": "not_on_whitelist"})
-        
-        logging.info(f"🧪 Checking profanity...")
+
         if config['profanity_filter'] and contains_profanity(test_name):
-            logging.warning(f"🧪 TEST FAILED: Profanity detected")
             return jsonify({"success": False, "error": "Profanity detected", "reason": "profanity"})
-        
-        logging.info(f"🧪 Adding to queue...")
+
         success = add_to_queue(test_name, test_phone, f"TEST: {test_name}")
-        logging.info(f"🧪 Add to queue result: {success}")
-        
+
         if success:
-            logging.info(f"🧪 ✅ TEST MESSAGE QUEUED: {test_name}")
+            logging.info(f"🧪 Queued: {test_name}")
             log_message(test_phone, f"TEST: {test_name}", test_name, "queued")
             return jsonify({"success": True, "message": f"Test message '{test_name}' queued successfully!"})
         else:
-            logging.error(f"🧪 ❌ TEST FAILED: Could not add to queue")
+            logging.error(f"🧪 Queue error: {test_name}")
             return jsonify({"success": False, "error": "Failed to add to queue"})
             
     except Exception as e:
@@ -1915,7 +2165,7 @@ def test_sms_response():
         if not config.get('send_sms_responses', False):
             return jsonify({"success": False, "error": "SMS responses are disabled. Enable them in settings first!"})
         
-        logging.info(f"🧪 TEST SMS: Sending '{message_type}' response to {phone}")
+        logging.debug(f"🧪 TEST SMS: '{message_type}' to {phone}")
         
         success = send_sms_response(phone, message_type)
         
@@ -2048,13 +2298,25 @@ def api_add_whitelist():
         name = data.get('name', '').strip().lower()
         if not name:
             return jsonify({"success": False, "error": "Name is required"})
-        # Check if already in global list
         global_names = set()
         if os.path.exists(WHITELIST_FILE):
             with open(WHITELIST_FILE, 'r', encoding='latin-1') as f:
                 global_names = {line.strip().lower() for line in f if line.strip()}
+        removed = load_removed_names()
+
         if name in global_names:
-            return jsonify({"success": False, "error": "Name already in whitelist"})
+            if name in removed:
+                # Name was blocked by user — un-remove it to make it active again
+                removed.discard(name)
+                with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(sorted(removed)) + '\n')
+                _whitelist_cache = None
+                _whitelist_mtime = None
+                logging.info(f"Re-enabled '{name}' in whitelist")
+                return jsonify({"success": True})
+            else:
+                return jsonify({"success": False, "error": "Name already in whitelist"})
+
         # Add to user-added list
         added = load_whitelist_added()
         if name in added:
@@ -2063,7 +2325,6 @@ def api_add_whitelist():
         with open(WHITELIST_ADDED_FILE, 'w', encoding='utf-8') as f:
             f.write('\n'.join(sorted(added)) + '\n')
         # If name was previously removed from global, un-remove it
-        removed = load_removed_names()
         if name in removed:
             removed.discard(name)
             with open(WHITELIST_REMOVED_FILE, 'w', encoding='utf-8') as f:
@@ -2730,6 +2991,8 @@ def view_messages():
             var useWhitelist = {{ config.get('use_whitelist', False) | tojson }};
             var modalOpen = false;
             var refreshTimer = null;
+            var prevQueueJson = null;
+            var prevMessagesJson = null;
 
             function scheduleRefresh() {
                 clearTimeout(refreshTimer);
@@ -2755,6 +3018,9 @@ def view_messages():
             }
 
             function renderQueue(status) {
+                var json = JSON.stringify(status);
+                if (json === prevQueueJson) return;
+                prevQueueJson = json;
                 var html = '';
                 if (status.currently_displaying) {
                     html += '<div class="current-display">🎄 NOW DISPLAYING: ' + esc(status.currently_displaying.name) +
@@ -2775,6 +3041,9 @@ def view_messages():
             }
 
             function renderMessages(messages) {
+                var json = JSON.stringify(messages);
+                if (json === prevMessagesJson) return;
+                prevMessagesJson = json;
                 document.getElementById('msg-count').textContent = messages.length;
                 if (messages.length === 0) {
                     document.getElementById('messages-content').innerHTML =
@@ -2784,8 +3053,11 @@ def view_messages():
                 var statusLabel = {'displaying':'🎬 DISPLAYING NOW','queued':'📋 Queued','displayed':'✅ Displayed'};
                 var rows = messages.map(function(msg) {
                     var label = statusLabel[msg.status] || esc(msg.status);
-                    var btn = '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
-                              '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
+                    var isTest = (msg.phone_full === 'Local Testing');
+                    var btn = isTest
+                        ? '<button class="block-btn" disabled style="opacity:0.35;cursor:not-allowed;" title="Cannot block the local test number">🚫 Block</button>'
+                        : '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
+                          '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
                     return '<tr class="' + esc(msg.status) + '">' +
                         '<td>' + esc(msg.timestamp) + '</td>' +
                         '<td>' + esc(msg.phone) + '</td>' +
@@ -2865,6 +3137,69 @@ def view_messages():
     """
     return render_template_string(html, config=config)
 
+
+@app.route('/api/activate', methods=['GET', 'POST'])
+def api_activate():
+    """FPP scheduler hook: enable the plugin, start SMS polling, and start the waiting playlist."""
+    global polling_thread, stop_polling
+
+    # Require a default waiting playlist — without one the show has no defined state
+    if not config.get('default_playlist', '').strip():
+        msg = "ERROR: No Default Waiting Playlist configured. Set one in the plugin settings before running TwilioStart."
+        logging.error(msg)
+        return jsonify({"success": False, "error": msg}), 400
+
+    config['enabled'] = True
+    stop_polling = False
+    save_config()
+
+    # Start polling thread if not already running
+    if twilio_client:
+        if not polling_thread or not polling_thread.is_alive():
+            polling_thread = threading.Thread(target=poll_twilio, daemon=True)
+            polling_thread.start()
+            logging.info("▶️  Activate: SMS polling started")
+    else:
+        logging.warning("⚠️  Activate: Twilio credentials not configured, polling not started")
+
+    # Start the default waiting playlist
+    result = start_default_playlist()
+
+    logging.info(f"✅ TwilioStart activated — playlist {'started' if result else 'FAILED to start'}")
+    return jsonify({"success": True, "playlist_started": result,
+                    "message": "Twilio SMS plugin activated"})
+
+
+@app.route('/api/deactivate', methods=['GET', 'POST'])
+def api_deactivate():
+    """FPP scheduler hook: disable plugin and stop the current playlist/sequence.
+    Polling thread keeps running in standby to send show_not_live replies."""
+    config['enabled'] = False
+    save_config()
+
+    # Stop the current sequence/playlist and any background FSEQ effect
+    try:
+        import urllib.parse
+
+        default = config.get('default_playlist', '')
+        if default.startswith('seq:'):
+            # FSEQ Effect Stop also uses display name without .fseq
+            seq_name = default[4:].removesuffix('.fseq')
+            effect_stop_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}"
+            r = requests.get(effect_stop_url, timeout=3)
+            logging.info(f"🛑 FSEQ Effect Stop: {r.status_code} - {r.text}")
+
+        # Stop Now catches playlists and any foreground sequences
+        command_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('Stop Now')}"
+        r2 = requests.get(command_url, timeout=3)
+        logging.info(f"🛑 Stop Now: {r2.status_code} - {r2.text}")
+    except Exception as e:
+        logging.warning(f"Could not stop FPP playback: {e}")
+
+    logging.info("🛑 TwilioStop: disabled, polling stopped, playlist stopped")
+    return jsonify({"success": True, "message": "Twilio SMS plugin deactivated"})
+
+
 if __name__ == '__main__':
     load_config()
 
@@ -2882,10 +3217,19 @@ if __name__ == '__main__':
     display_thread = threading.Thread(target=display_worker, daemon=True)
     display_thread.start()
 
-    # Polling thread only starts when plugin is enabled (requires Twilio credentials)
-    if config['enabled']:
+    # Polling thread starts if Twilio is configured — runs in standby (show_not_live
+    # replies) when disabled, and processes names normally when enabled
+    if twilio_client:
         polling_thread = threading.Thread(target=poll_twilio, daemon=True)
         polling_thread.start()
 
+    # Start the default waiting playlist on launch if the plugin is already enabled
+    if config['enabled']:
+        def _start_default():
+            import time
+            time.sleep(3)  # brief delay to let FPP settle before sending commands
+            start_default_playlist()
+        threading.Thread(target=_start_default, daemon=True).start()
+
     logging.info("FPP SMS Plugin v2.5 starting...")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
