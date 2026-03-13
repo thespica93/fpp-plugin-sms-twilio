@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 import re
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from twilio.rest import Client
 from collections import deque
 import os
@@ -88,6 +89,10 @@ _whitelist_mtime = None
 
 _blocklist_cache = None
 _blocklist_mtime = None
+
+_fpp_data_cache = None
+_fpp_data_cache_time = 0
+_FPP_DATA_CACHE_TTL = 60  # seconds
 
 # FPP runs locally — always use localhost
 FPP_HOST = 'http://127.0.0.1'
@@ -1309,7 +1314,7 @@ def index():
                         </select>
                         <p class="help-text">🎬 This playlist or sequence plays when displaying a name</p>
 
-                        <label>Overlay Model Name:</label>
+                        <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
                         <select id="overlay_model_name">
                             <option value="">-- None --</option>
                         </select>
@@ -1720,6 +1725,13 @@ def index():
                 });
             }
 
+            function refreshFPPLists(btn) {
+                if (btn) { btn.disabled = true; btn.textContent = '...'; }
+                fetch('/api/fpp/refresh', {method:'POST'})
+                    .then(() => loadFPPData())
+                    .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh Lists'; } });
+            }
+
             function loadFPPData() {
                 fetch('/api/fpp/data')
                 .then(r => r.json())
@@ -2014,20 +2026,37 @@ def update_config():
 
 @app.route('/api/fpp/data')
 def get_fpp_data():
+    global _fpp_data_cache, _fpp_data_cache_time
     try:
-        playlists = get_fpp_playlists()
-        sequences = get_fpp_sequences()
-        models = get_fpp_models()
-        fonts = get_fpp_fonts()
-        
-        return jsonify({
-            "playlists": playlists,
-            "sequences": sequences,
-            "models": models,
-            "fonts": fonts
-        })
+        # Return cached result if still fresh
+        if _fpp_data_cache and (time.time() - _fpp_data_cache_time) < _FPP_DATA_CACHE_TTL:
+            return jsonify(_fpp_data_cache)
+
+        # Fetch all 4 in parallel instead of sequentially
+        results = {}
+        tasks = {
+            'playlists': get_fpp_playlists,
+            'sequences': get_fpp_sequences,
+            'models':    get_fpp_models,
+            'fonts':     get_fpp_fonts,
+        }
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(fn): key for key, fn in tasks.items()}
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+
+        _fpp_data_cache = results
+        _fpp_data_cache_time = time.time()
+        return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)})
+
+@app.route('/api/fpp/refresh', methods=['POST'])
+def refresh_fpp_data():
+    global _fpp_data_cache, _fpp_data_cache_time
+    _fpp_data_cache = None
+    _fpp_data_cache_time = 0
+    return jsonify({"success": True})
 
 @app.route('/api/fpp/test', methods=['POST'])
 def test_fpp_api():
