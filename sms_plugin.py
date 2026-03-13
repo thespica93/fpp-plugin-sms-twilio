@@ -1833,7 +1833,9 @@ def index():
             }
 
             // ── Canvas drag-to-position preview ──────────────────────────────
-            (function() {
+            // Runs inside window.onload so any runtime error cannot prevent
+            // loadFPPData() from being called.
+            function initCanvasPreview() { try {
                 var canvas = document.getElementById('matrix_canvas');
                 if (!canvas) return;
                 var ctx = canvas.getContext('2d');
@@ -1952,9 +1954,10 @@ def index():
                 });
 
                 renderCanvasPreview();
-            })();
+            } catch(e) { console.error('Canvas init error:', e); } }
 
             window.onload = function() {
+                initCanvasPreview();
                 loadFPPData();
                 initRespRows();
                 setupAutoSave();
