@@ -836,14 +836,14 @@ def send_to_fpp(name):
                 fpp_position = position_map.get(text_position, 'Center')
 
                 state_url = f"{fpp_host}/api/overlays/model/{encoded_model}/state"
-                # Reset to State 0 first so scroll position starts fresh each time
-                requests.put(state_url, json={"State": 0}, timeout=3)
-                # State 3 = Transparent RGB: text pixels replace underlying FSEQ pixels
-                # (correct color), non-text pixels stay transparent (FSEQ shows through)
-                state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
-                logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
+                text_url  = f"{fpp_host}/api/overlays/model/{encoded_model}/text"
 
-                # Use the direct text API (same as fpp-matrixtools plugin)
+                # Order matters to avoid flash of previous name:
+                # 1. Disable overlay (State 0) — hides it
+                # 2. Load new text while hidden — buffer has new name, not old one
+                # 3. Enable overlay (State 3 Transparent RGB) — activates cleanly
+                requests.put(state_url, json={"State": 0}, timeout=3)
+
                 text_payload = {
                     "Message": display_message,
                     "Color": text_color,
@@ -854,8 +854,13 @@ def send_to_fpp(name):
                     "AntiAlias": True,
                     "AutoEnable": False
                 }
-                text_url = f"{fpp_host}/api/overlays/model/{encoded_model}/text"
                 response = requests.put(text_url, json=text_payload, timeout=10)
+
+                logging.info(f"   Payload: {text_payload}")
+                logging.info(f"   Response: {response.status_code} - {response.text}")
+
+                state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
+                logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
 
                 logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
                 logging.info(f"   Payload: {text_payload}")
@@ -1302,9 +1307,9 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
-                        <label>Default "Waiting" Playlist:</label>
+                        <label>Default "Waiting" Playlist: <span style="color:#f44336;font-size:12px;">* required</span></label>
                         <select id="default_playlist">
-                            <option value="">-- None (Manual Control) --</option>
+                            <option value="">-- Select a playlist --</option>
                         </select>
                         <p class="help-text">📺 This playlist or sequence loops while waiting for text messages</p>
 
@@ -1741,7 +1746,7 @@ def index():
                     const currentDefault = "{{ config.get('default_playlist', '') }}";
                     const currentName = "{{ config.get('name_display_playlist', '') }}";
 
-                    defaultSelect.innerHTML = '<option value="">-- None (Manual Control) --</option>';
+                    defaultSelect.innerHTML = '<option value="">-- Select a playlist --</option>';
                     nameSelect.innerHTML = '<option value="">-- None (No Playlist Change) --</option>';
 
                     if (data.playlists && data.playlists.length > 0) {
@@ -3137,6 +3142,13 @@ def view_messages():
 def api_activate():
     """FPP scheduler hook: enable the plugin, start SMS polling, and start the waiting playlist."""
     global polling_thread, stop_polling
+
+    # Require a default waiting playlist — without one the show has no defined state
+    if not config.get('default_playlist', '').strip():
+        msg = "ERROR: No Default Waiting Playlist configured. Set one in the plugin settings before running TwilioStart."
+        logging.error(msg)
+        return jsonify({"success": False, "error": msg}), 400
+
     config['enabled'] = True
     stop_polling = False
     save_config()

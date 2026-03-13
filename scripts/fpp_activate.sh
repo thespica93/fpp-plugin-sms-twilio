@@ -14,6 +14,12 @@ for i in $(seq 1 5); do
         echo "TwilioStart OK: $BODY"
         exit 0
     fi
+    # 400 = configuration error (e.g. no default playlist) — don't retry, fail immediately
+    if [ "$HTTP_CODE" = "400" ]; then
+        ERROR=$(echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error','Unknown error'))" 2>/dev/null || echo "$BODY")
+        echo "TwilioStart FAILED: $ERROR"
+        exit 1
+    fi
     echo "TwilioStart: plugin not ready (attempt $i), retrying in 3s..."
     sleep 3
 done
