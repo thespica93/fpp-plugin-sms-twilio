@@ -1590,13 +1590,27 @@ def index():
                         <input type="hidden" id="text_x" value="{{ config.get('text_x', -1) }}">
                         <input type="hidden" id="text_y" value="{{ config.get('text_y', -1) }}">
 
-                        <label>Vertical Alignment:</label>
-                        <div class="valign-picker">
-                            <button type="button" class="valign-btn" data-val="top">▲ Top</button>
-                            <button type="button" class="valign-btn" data-val="center">● Center</button>
-                            <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
+                        <!-- Canvas: shown for Static mode -->
+                        <div id="canvas_section" style="display:none;">
+                            <label>Text Position: <span style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
+                            <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Center</button>
+                                <span id="pos_display" style="font-size:12px; color:#666;"></span>
+                            </div>
+                            <p class="help-text">🖱️ Drag text on the matrix preview to set its position. Reset returns to auto-center.</p>
                         </div>
-                        <p class="help-text">↕ Shifts text vertically on the matrix</p>
+
+                        <!-- Valign: shown for Scroll modes -->
+                        <div id="valign_section">
+                            <label>Vertical Alignment:</label>
+                            <div class="valign-picker">
+                                <button type="button" class="valign-btn" data-val="top">▲ Top</button>
+                                <button type="button" class="valign-btn" data-val="center">● Center</button>
+                                <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
+                            </div>
+                            <p class="help-text">↕ Shifts text vertically on the matrix</p>
+                        </div>
                     </div>
                 </div>
 
@@ -1777,8 +1791,13 @@ def index():
 
             function updateScrollSpeedVisibility() {
                 var pos = document.getElementById('text_position').value;
+                var isStatic = (pos === 'Center');
                 var row = document.getElementById('scroll_speed_row');
-                if (row) row.style.display = (pos === 'Center') ? 'none' : '';
+                if (row) row.style.display = isStatic ? 'none' : '';
+                var cs = document.getElementById('canvas_section');
+                if (cs) cs.style.display = isStatic ? '' : 'none';
+                var vs = document.getElementById('valign_section');
+                if (vs) vs.style.display = isStatic ? 'none' : '';
             }
 
             function updateModelAspect(width, height) {
@@ -1786,6 +1805,13 @@ def index():
                 if (ta && width > 0 && height > 0) {
                     ta.style.aspectRatio = (width / height).toFixed(2);
                     ta.style.height = 'auto';
+                }
+                if (width > 0 && height > 0) {
+                    window._canvasModelW = width;
+                    window._canvasModelH = height;
+                    var c = document.getElementById('matrix_canvas');
+                    if (c) { c.width = 640; c.height = Math.round(640 * height / width); }
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 }
             }
 
@@ -1802,7 +1828,94 @@ def index():
                 });
             }
 
+            function initCanvasPreview() {
+                var canvas = document.getElementById('matrix_canvas');
+                if (!canvas) return;
+                var ctx = canvas.getContext('2d');
+                if (!ctx) return;
+
+                window._canvasModelW = parseInt(document.getElementById('overlay_model_width').value) || 640;
+                window._canvasModelH = parseInt(document.getElementById('overlay_model_height').value) || 360;
+                canvas.width  = 640;
+                canvas.height = Math.round(640 * window._canvasModelH / window._canvasModelW);
+
+                var textX = parseInt(document.getElementById('text_x').value);
+                var textY = parseInt(document.getElementById('text_y').value);
+                var dragging = false;
+
+                function renderCanvasPreview() {
+                    var mw = window._canvasModelW || 640;
+                    var mh = window._canvasModelH || 360;
+                    ctx.fillStyle = '#000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    var fontSize = parseInt(document.getElementById('text_font_size').value) || 48;
+                    var color = document.getElementById('text_color').value || '#ff0000';
+                    var tmpl = document.getElementById('message_template').value || '{name}';
+                    var text = tmpl.replace('{name}', 'Santa').replace(/\n/g, ' ').trim();
+                    var scaledFont = Math.round(fontSize * canvas.width / mw);
+                    ctx.font = 'bold ' + scaledFont + 'px sans-serif';
+                    ctx.fillStyle = color;
+                    ctx.textBaseline = 'top';
+                    var drawX, drawY;
+                    if (textX < 0 || textY < 0) {
+                        var m = ctx.measureText(text);
+                        drawX = (canvas.width - m.width) / 2;
+                        drawY = (canvas.height - scaledFont) / 2;
+                    } else {
+                        drawX = textX * canvas.width / mw;
+                        drawY = textY * canvas.height / mh;
+                    }
+                    ctx.fillText(text, drawX, drawY);
+                    var posEl = document.getElementById('pos_display');
+                    if (posEl) posEl.textContent = (textX < 0 || textY < 0)
+                        ? 'Position: Center (auto)'
+                        : 'X:' + textX + ' Y:' + textY;
+                }
+                window.renderCanvasPreview = renderCanvasPreview;
+
+                function posFromEvent(e) {
+                    var rect = canvas.getBoundingClientRect();
+                    var mw = window._canvasModelW || 640;
+                    var mh = window._canvasModelH || 360;
+                    return {
+                        x: Math.max(0, Math.min(mw-1, Math.round((e.clientX-rect.left)*mw/rect.width))),
+                        y: Math.max(0, Math.min(mh-1, Math.round((e.clientY-rect.top)*mh/rect.height)))
+                    };
+                }
+
+                canvas.addEventListener('mousedown', function(e) {
+                    dragging = true;
+                    var p = posFromEvent(e); textX = p.x; textY = p.y;
+                    document.getElementById('text_x').value = textX;
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview(); saveConfig();
+                });
+                canvas.addEventListener('mousemove', function(e) {
+                    if (!dragging) return;
+                    var p = posFromEvent(e); textX = p.x; textY = p.y;
+                    document.getElementById('text_x').value = textX;
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview();
+                });
+                canvas.addEventListener('mouseup',    function() { dragging = false; saveConfig(); });
+                canvas.addEventListener('mouseleave', function() { dragging = false; });
+
+                window.resetTextPosition = function() {
+                    textX = -1; textY = -1;
+                    document.getElementById('text_x').value = -1;
+                    document.getElementById('text_y').value = -1;
+                    renderCanvasPreview(); saveConfig();
+                };
+
+                document.getElementById('message_template').addEventListener('input',  renderCanvasPreview);
+                document.getElementById('text_color').addEventListener('change',        renderCanvasPreview);
+                document.getElementById('text_font_size').addEventListener('change',    renderCanvasPreview);
+
+                renderCanvasPreview();
+            }
+
             // All DOM elements are above this script block — call init functions directly.
+            initCanvasPreview();
             loadFPPData();
             initRespRows();
             setupAutoSave();
