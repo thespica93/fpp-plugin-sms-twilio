@@ -141,7 +141,12 @@ Any public URL that references your display or the plugin is acceptable.
 
 4. Submit — approval typically takes **1–3 business days**
 
-> Once approved, your toll-free number can send SMS to any US phone number. Until then, inbound messages will still be received but outbound replies will be blocked by carriers.
+> **While you wait for approval:**
+> - Inbound messages (people texting your number) work **immediately**
+> - The display will show names as normal
+> - Outbound SMS auto-replies back to texters will be blocked by carriers until verification is approved
+>
+> You can start testing your display right away — just disable SMS auto-responses in the plugin settings until verification completes.
 
 ### Local Number (10DLC) — Not Recommended
 
