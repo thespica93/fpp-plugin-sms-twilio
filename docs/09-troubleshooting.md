@@ -11,6 +11,7 @@
 - [Twilio Connection Fails](#twilio-connection-fails)
 - [Messages Not Being Received](#messages-not-being-received)
 - [Names Not Appearing on Display](#names-not-appearing-on-display)
+- [Text Appears in Wrong Position](#text-appears-in-wrong-position)
 - [Auto-Responses Not Sending](#auto-responses-not-sending)
 - [Whitelist / Blacklist Issues](#whitelist--blacklist-issues)
 - [Plugin Not Listed in FPP Plugin Manager](#plugin-not-listed-in-fpp-plugin-manager)
@@ -159,6 +160,37 @@ Free trial Twilio accounts can only send SMS **to** verified numbers. They can s
 **Check 4 — Is the display playlist running?**
 - Check that FPP is running and the "Name Displaying" playlist exists
 - FPP must be in a running state (not stopped) for playlist switching to work
+
+---
+
+## Text Appears in Wrong Position
+
+**Symptom:** Text shows at center or an unexpected position despite setting it on the canvas
+
+**Check 1 — Confirm PIL is active and dimensions are saved**
+
+Check the log for the `📐 Overlay` line emitted on every display:
+```bash
+grep "📐 Overlay" /home/fpp/media/logs/sms_plugin.log | tail -5
+```
+The line should show non-zero `overlay_size` and end with `PIL=True`. Example of a healthy line:
+```
+📐 Overlay: model=Texting Matrix overlay_size=128x32 canvas_pos=(10,12) mode=Center PIL=True
+```
+
+- If `overlay_size=0x0` — the model dimensions weren't saved. Open the config page, switch the Overlay Model dropdown to a different model and back again, then click **Save Configuration**.
+- If `PIL=False` — Pillow is not installed. Run `bash scripts/fpp_install.sh` to install it.
+
+**Check 2 — Check for shared memory permission errors**
+
+```bash
+grep -E "Permission denied|render_to_shm|scroll_via_shm" /home/fpp/media/logs/sms_plugin.log | tail -10
+```
+If you see `[Errno 13] Permission denied: '/dev/shm/FPP-Model-Data-...'`, the sudoers rule that allows the plugin to fix shm permissions may not be installed. Run `bash scripts/fpp_install.sh` to install it, then restart FPP.
+
+**Check 3 — Verify the canvas position was saved**
+
+On the config page, open the canvas preview and check the position display below the canvas. If it says **Position: center (auto)**, your drag was not saved — click **Save Configuration** after repositioning.
 
 ---
 

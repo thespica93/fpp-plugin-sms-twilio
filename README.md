@@ -49,6 +49,8 @@ Visitor texts name → Twilio → Plugin polls & receives → Filters applied �
 ## Features
 
 - **Message Queue** — Names queue up and display one at a time, no overlap
+- **Pixel-Accurate Text Positioning** — Drag text anywhere on a live canvas preview; PIL renders directly to FPP shared memory at exact coordinates
+- **Five Display Modes** — Static, Scroll Left-to-Right, Right-to-Left, Top-to-Bottom, and Bottom-to-Top
 - **Profanity Filter** — Customizable blocked word list (includes a large default list)
 - **Name Whitelist** — Optional: only show pre-approved names (22,000+ included)
 - **Phone Blocklist** — Block specific numbers from texting in

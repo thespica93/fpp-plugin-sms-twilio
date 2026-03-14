@@ -27,6 +27,15 @@ from twilio.rest import Client
 from collections import deque
 import os
 
+# PIL/Pillow for pixel-accurate text rendering (optional — falls back to FPP text API if unavailable)
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+_scroll_thread = None   # background PIL scroll animation thread
+
 # Configuration
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
@@ -120,8 +129,9 @@ DEFAULT_CONFIG = {
     "text_font": "FreeSans",
     "text_font_size": 48,
     "text_position": "Center",
-    "text_v_align": "center",
-    "message_template": "Merry Christmas {name}!",
+    "message_template": "Merry Christmas {name}!",  # legacy — migrated to message_lines on load
+    "message_lines": ["Merry Christmas", "{name}!", "", ""],
+    "line_positions": [{"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}],
     "scroll_speed": 5,
     "overlay_model_width": 0,
     "overlay_model_height": 0,
@@ -176,6 +186,14 @@ def load_config():
             config['scroll_speed'] = 5
             save_config()
 
+        # Migrate old message_template to message_lines (introduced in v2.6)
+        if 'message_lines' not in loaded and 'message_template' in loaded:
+            tmpl = loaded.get('message_template', 'Merry Christmas {name}!')
+            config['message_lines'] = [tmpl, '', '', '']
+            config['line_positions'] = [{'x': -1, 'y': -1}] * 4
+            save_config()
+            logging.info(f"Migrated message_template '{tmpl}' to message_lines[0]")
+
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
                 config['twilio_account_sid'],
@@ -204,6 +222,224 @@ def save_config():
         logging.info("Configuration saved")
     except Exception as e:
         logging.error(f"Error saving config: {e}")
+
+def _find_font(font_name, font_size):
+    """Locate a PIL ImageFont matching font_name. Returns ImageFont or None."""
+    if not PIL_AVAILABLE:
+        return None
+    search_dirs = [
+        '/usr/share/fonts/truetype/freefont',
+        '/usr/share/fonts/truetype',
+        '/usr/share/fonts',
+        '/usr/share/fpp/fonts',
+        '/home/fpp/media/fonts',
+    ]
+    font_name_lower = font_name.lower()
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+        for dirpath, _, filenames in os.walk(search_dir):
+            for fname in filenames:
+                if fname.lower().endswith(('.ttf', '.otf')) and font_name_lower in fname.lower():
+                    try:
+                        return ImageFont.truetype(os.path.join(dirpath, fname), font_size)
+                    except Exception:
+                        pass
+    try:
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def render_to_shm(line_items, model_name, width, height, font_name, font_size, color_hex):
+    """Render multiple text lines to FPP shared memory, each at its own (x, y) position.
+    line_items: list of (text, x, y) tuples. x/y < 0 means auto-center that line.
+    Returns True on success, False on failure."""
+    if not PIL_AVAILABLE or width <= 0 or height <= 0:
+        return False
+    try:
+        hex_str = color_hex.lstrip('#')
+        color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+
+        img = Image.new('RGB', (width, height), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        font = _find_font(font_name, font_size)
+
+        for (text, x, y) in line_items:
+            if not text:
+                continue
+            if font is not None:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            else:
+                text_w = len(text) * 6
+                text_h = font_size
+
+            draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
+            draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
+            draw.text((draw_x, draw_y), text, fill=color, font=font)
+
+        shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
+        raw = img.tobytes()
+        expected = width * height * 3
+        if len(raw) != expected:
+            logging.error(f"render_to_shm: size mismatch ({len(raw)} != {expected})")
+            return False
+
+        def _write():
+            with open(shm_path, 'r+b') as f:
+                f.write(raw)
+
+        try:
+            _write()
+        except PermissionError:
+            # FPP creates shm files as root after postStart.sh runs.
+            # Use the sudoers rule added by fpp_install.sh to fix permissions once.
+            logging.warning(f"render_to_shm: permission denied on {shm_path} — running sudo chmod")
+            import subprocess
+            result = subprocess.run(
+                ['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
+                capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                _write()
+            else:
+                logging.error(f"render_to_shm: sudo chmod failed: {result.stderr.decode().strip()}")
+                logging.error("render_to_shm: restart FPPD to apply shm permissions from postStart.sh")
+                return False
+
+        logging.info(f"render_to_shm: wrote {len(raw)} bytes to {shm_path} ({len(line_items)} lines)")
+        return True
+    except Exception as e:
+        logging.error(f"render_to_shm failed: {e}")
+        return False
+
+
+def scroll_via_shm(line_items, model_name, width, height, scroll_dir,
+                   font_name, font_size, color_hex, scroll_speed, duration):
+    """Animate per-line scrolling text in FPP shared memory.
+    All lines share the same scroll position so they move together.
+    Runs in a background thread for `duration` seconds then stops.
+
+    scroll_dir 'L2R'|'R2L': line_items = [(text, y_pos), ...]
+        Each line scrolls horizontally at its own fixed y_pos.
+        y_pos < 0 means auto-center that line vertically.
+    scroll_dir 'T2B'|'B2T': line_items = [(text, x_pos), ...]
+        Each line scrolls vertically at its own fixed x_pos.
+        x_pos < 0 means auto-center that line horizontally.
+    Returns True if the thread started, False on error."""
+    global _scroll_thread
+    if not PIL_AVAILABLE or width <= 0 or height <= 0:
+        return False
+    try:
+        hex_str = color_hex.lstrip('#')
+        color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+        font = _find_font(font_name, font_size)
+
+        # Pre-render each line to its own image strip
+        probe = Image.new('RGB', (1, 1))
+        pdraw = ImageDraw.Draw(probe)
+        strips = []
+        for (text, fixed_pos) in line_items:
+            if not text:
+                continue
+            if font:
+                bbox = pdraw.textbbox((0, 0), text, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            else:
+                tw, th = len(text) * 6, font_size
+            tw, th = max(1, tw), max(1, th)
+            strip = Image.new('RGB', (tw, th), (0, 0, 0))
+            ImageDraw.Draw(strip).text((0, 0), text, fill=color, font=font)
+            strips.append((strip, tw, th, fixed_pos))
+
+        if not strips:
+            return False
+
+        max_tw = max(s[1] for s in strips)
+        max_th = max(s[2] for s in strips)
+
+        shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
+        fps = 30
+        pixels_per_sec = max(10, scroll_speed * 20)
+        step_px = max(1.0, pixels_per_sec / fps)
+
+        if os.path.exists(shm_path) and not os.access(shm_path, os.W_OK):
+            import subprocess
+            subprocess.run(['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
+                           capture_output=True, timeout=5)
+
+        logging.info(f"🎬 scroll_via_shm: {scroll_dir} model={model_name} "
+                     f"size={width}x{height} lines={len(strips)} "
+                     f"speed={pixels_per_sec}px/s duration={duration}s")
+
+        def _animate():
+            import time as _time
+            start = _time.time()
+
+            if scroll_dir in ('L2R', 'R2L'):
+                # Resolve y positions (auto-center vertically when < 0)
+                resolved = []
+                for (strip, tw, th, yp) in strips:
+                    dy = max(0, (height - th) // 2) if yp < 0 else max(0, min(height - th, yp))
+                    resolved.append((strip, tw, th, dy))
+                pos = float(width) if scroll_dir == 'R2L' else float(-max_tw)
+                direction = -1.0 if scroll_dir == 'R2L' else 1.0
+                loop_start = float(width) if scroll_dir == 'R2L' else float(-max_tw)
+                loop_end   = float(-max_tw) if scroll_dir == 'R2L' else float(width)
+
+                while _time.time() - start < duration:
+                    frame = Image.new('RGB', (width, height), (0, 0, 0))
+                    ix = int(pos)
+                    for (strip, tw, th, dy) in resolved:
+                        src_x = max(0, -ix);  dst_x = max(0, ix)
+                        vis_w = min(tw - src_x, width - dst_x)
+                        if vis_w > 0:
+                            frame.paste(strip.crop((src_x, 0, src_x + vis_w, th)), (dst_x, dy))
+                    try:
+                        with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
+                    except Exception:
+                        pass
+                    pos += direction * step_px
+                    if (direction < 0 and pos < loop_end) or (direction > 0 and pos > loop_end):
+                        pos = loop_start
+                    _time.sleep(1.0 / fps)
+
+            elif scroll_dir in ('T2B', 'B2T'):
+                # Resolve x positions (auto-center horizontally when < 0)
+                resolved = []
+                for (strip, tw, th, xp) in strips:
+                    dx = max(0, (width - tw) // 2) if xp < 0 else max(0, min(width - tw, xp))
+                    resolved.append((strip, tw, th, dx))
+                pos = float(height) if scroll_dir == 'B2T' else float(-max_th)
+                direction = -1.0 if scroll_dir == 'B2T' else 1.0
+                loop_start = float(height) if scroll_dir == 'B2T' else float(-max_th)
+                loop_end   = float(-max_th) if scroll_dir == 'B2T' else float(height)
+
+                while _time.time() - start < duration:
+                    frame = Image.new('RGB', (width, height), (0, 0, 0))
+                    iy = int(pos)
+                    for (strip, tw, th, dx) in resolved:
+                        src_y = max(0, -iy);  dst_y = max(0, iy)
+                        vis_h = min(th - src_y, height - dst_y)
+                        if vis_h > 0:
+                            frame.paste(strip.crop((0, src_y, tw, src_y + vis_h)), (dx, dst_y))
+                    try:
+                        with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
+                    except Exception:
+                        pass
+                    pos += direction * step_px
+                    if (direction < 0 and pos < loop_end) or (direction > 0 and pos > loop_end):
+                        pos = loop_start
+                    _time.sleep(1.0 / fps)
+
+        _scroll_thread = threading.Thread(target=_animate, daemon=True)
+        _scroll_thread.start()
+        return True
+    except Exception as e:
+        logging.error(f"scroll_via_shm failed: {e}")
+        return False
+
 
 def get_fpp_playlists():
     """Get list of playlists from FPP"""
@@ -749,31 +985,47 @@ def send_to_fpp(name):
         name_playlist = config.get('name_display_playlist', '')
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
         
-        # Get message template and replace {name} with actual name
-        message_template = config.get('message_template', 'Merry Christmas {name}!')
-        display_message = message_template.replace('{name}', name)
+        # Build per-line rendered items from message_lines config
+        message_lines = config.get('message_lines', ['Merry Christmas', '{name}!', '', ''])
+        line_positions_cfg = config.get('line_positions', [])
+        font_size_cfg  = config.get('text_font_size', 48)
+        line_h_px      = int(font_size_cfg * 1.2)  # approximate line height in model pixels
 
-        # Vertical alignment: pad with newlines to shift text on the matrix.
-        # FPP "Center" centers the full text block vertically, so:
-        #   top    → append trailing newlines (block grows down → text rises)
-        #   bottom → prepend leading newlines (block grows up → text sinks)
-        #   center → no change (FPP centers naturally)
-        v_align = config.get('text_v_align', 'center')
-        model_height = config.get('overlay_model_height', 0)
-        font_size = config.get('text_font_size', 48)
-        if v_align != 'center' and model_height > font_size:
-            pad = max(0, (model_height // font_size) - 1)
-            if pad > 0:
-                if v_align == 'top':
-                    display_message = display_message + '\n' * pad
-                elif v_align == 'bottom':
-                    display_message = '\n' * pad + display_message
-        
+        # Collect non-empty rendered lines + their saved positions
+        rendered_lines = []  # [(rendered_text, px, py), ...]
+        for i, tmpl_line in enumerate(message_lines):
+            if not tmpl_line.strip():
+                continue
+            rendered = tmpl_line.replace('{name}', name)
+            pos = line_positions_cfg[i] if i < len(line_positions_cfg) else {'x': -1, 'y': -1}
+            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1)))
+
+        # Compute stacked Y defaults (group centered vertically, spaced by line_h_px)
+        mh_pre = config.get('overlay_model_height', 0)
+        non_empty_count = len(rendered_lines)
+        stack_start_y = max(0, (mh_pre - non_empty_count * line_h_px) // 2) if mh_pre > 0 else 0
+
+        # line_items for static PIL: replace y=-1 with stacked default
+        line_items = []
+        for idx, (rendered, px, py) in enumerate(rendered_lines):
+            resolved_y = stack_start_y + idx * line_h_px if py < 0 else py
+            line_items.append((rendered, px, resolved_y))
+
+        # scroll_line_items for L2R/R2L: [(text, y_pos), ...]
+        scroll_lr_items = [(rendered, stack_start_y + idx * line_h_px if py < 0 else py)
+                           for idx, (rendered, px, py) in enumerate(rendered_lines)]
+        # scroll_line_items for T2B/B2T: [(text, x_pos), ...] — x=-1 means auto-center
+        scroll_tb_items = [(rendered, px)
+                           for (rendered, px, py) in rendered_lines]
+
+        # FPP API fallback: join lines with newline
+        display_message = '\n'.join(r for r, _, _ in rendered_lines) if rendered_lines else name
+
         logging.info(f"🎄 ========== STARTING DISPLAY FOR: {name} ==========")
         logging.info(f"📺 FPP Host: {fpp_host}")
         logging.info(f"🎬 Name Display Playlist: {name_playlist}")
         logging.info(f"📝 Overlay Model: {overlay_model}")
-        logging.info(f"📝 Message Template: {message_template}")
+        logging.info(f"📝 Message Lines: {message_lines}")
         logging.info(f"📝 Display Message: {display_message}")
         
         # Step 1: Start the name display playlist/sequence (background)
@@ -840,36 +1092,60 @@ def send_to_fpp(name):
 
                 # Order matters to avoid flash of previous name:
                 # 1. Disable overlay (State 0) — hides it
-                # 2. Load new text while hidden — buffer has new name, not old one
+                # 2. Write new frame (PIL shm or FPP text API)
                 # 3. Enable overlay (State 3 Transparent RGB) — activates cleanly
                 requests.put(state_url, json={"State": 0}, timeout=3)
 
-                text_payload = {
-                    "Message": display_message,
-                    "Color": text_color,
-                    "Font": text_font,
-                    "FontSize": font_size,
-                    "Position": fpp_position,
-                    "PixelsPerSecond": scroll_speed * 20,
-                    "AntiAlias": True,
-                    "AutoEnable": False
-                }
-                response = requests.put(text_url, json=text_payload, timeout=10)
+                mw = config.get('overlay_model_width', 0)
+                mh = config.get('overlay_model_height', 0)
+                logging.info(f"📐 Overlay: model={overlay_model} overlay_size={mw}x{mh} "
+                             f"lines={len(line_items)} mode={text_position} PIL={PIL_AVAILABLE}")
 
-                logging.info(f"   Payload: {text_payload}")
-                logging.info(f"   Response: {response.status_code} - {response.text}")
+                shm_rendered = False
+                scroll_started = False
+
+                if PIL_AVAILABLE and mw > 0 and mh > 0:
+                    if text_position == 'Center':
+                        shm_rendered = render_to_shm(
+                            line_items, overlay_model,
+                            mw, mh, text_font, font_size, text_color
+                        )
+                    elif text_position in ('L2R', 'R2L', 'T2B', 'B2T'):
+                        duration = config.get('display_duration', 30)
+                        items = scroll_lr_items if text_position in ('L2R', 'R2L') else scroll_tb_items
+                        scroll_started = scroll_via_shm(
+                            items, overlay_model,
+                            mw, mh, text_position,
+                            text_font, font_size, text_color,
+                            scroll_speed, duration
+                        )
+                        if scroll_started:
+                            time.sleep(0.05)  # let first frame land before enabling overlay
+                elif mw == 0 or mh == 0:
+                    logging.warning(f"⚠️ PIL skipped: overlay dimensions not saved ({mw}x{mh}). "
+                                    f"Re-select the model in config to save dimensions.")
+                elif not PIL_AVAILABLE:
+                    logging.warning("⚠️ Pillow not installed — using FPP text API (no X/Y positioning). "
+                                    "Run plugin install to add Pillow.")
+
+                if not shm_rendered and not scroll_started:
+                    text_payload = {
+                        "Message": display_message,
+                        "Color": text_color,
+                        "Font": text_font,
+                        "FontSize": font_size,
+                        "Position": fpp_position,
+                        "PixelsPerSecond": scroll_speed * 20,
+                        "AntiAlias": True,
+                        "AutoEnable": False
+                    }
+                    response = requests.put(text_url, json=text_payload, timeout=10)
+                    logging.info(f"📡 FPP text API fallback: {response.status_code}")
+                else:
+                    logging.info(f"✅ PIL {'scroll' if scroll_started else 'static'} render active")
 
                 state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
-                logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
-
-                logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
-                logging.info(f"   Payload: {text_payload}")
-                logging.info(f"   Response: {response.status_code} - {response.text}")
-
-                if response.status_code == 200:
-                    logging.info(f"✅ Text sent successfully")
-                else:
-                    logging.error(f"❌ TEXT API FAILED! Status: {response.status_code}")
+                logging.info(f"   Overlay state=3: {state_resp.status_code}")
 
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
@@ -1248,11 +1524,6 @@ def index():
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
-            .valign-picker { display: flex; gap: 6px; margin: 4px 0; }
-            .valign-btn { flex: 1; padding: 7px 4px; border: 1px solid #ccc; background: #f5f5f5; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.15s, border-color 0.15s; }
-            .valign-btn.active { background: #4CAF50; color: white; border-color: #388E3C; font-weight: bold; }
-            .valign-btn:hover:not(.active) { background: #e8e8e8; }
-            #message_template { font-family: monospace; min-height: 50px; max-height: 180px; resize: vertical; }
             .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
             .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
             .column .section { flex: 0 0 auto; }
@@ -1438,9 +1709,69 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">Text Display Options</h2>
 
-                        <label>Message Template:</label>
-                        <textarea id="message_template">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines.</p>
+                        <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
+                        <style>
+                            .line-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+                            .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
+                            .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
+                            .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
+                            .reset-line-btn:hover { background:#666; }
+                        </style>
+                        {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
+                        {% set lp = config.get('line_positions') or [] %}
+                        <div id="message_lines_section">
+                            <div class="line-row">
+                                <span class="line-label">Line 1:</span>
+                                <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_1_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
+                            </div>
+                            <div class="line-row">
+                                <span class="line-label">Line 2:</span>
+                                <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" placeholder="e.g. {name}!" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_2_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
+                            </div>
+                            <div class="line-row">
+                                <span class="line-label">Line 3:</span>
+                                <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_3_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
+                            </div>
+                            <div class="line-row">
+                                <span class="line-label">Line 4:</span>
+                                <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_4_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
+                            </div>
+                        </div>
+
+                        <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
+                        <div id="canvas_section">
+                            <label>Position Preview: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click a line to select, drag to reposition</span></label>
+                            <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
+                                <span id="pos_display" style="font-size:12px; color:#888;"></span>
+                            </div>
+                            <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
+                        </div>
+
+                        <label>Text Movement:</label>
+                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
+                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
+                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
+                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
+                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                        </select>
+
+                        <div id="scroll_speed_row">
+                            <label>Scroll Speed:</label>
+                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
+                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
+                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
+                        </div>
 
                         <label>Text Color:</label>
                         <div style="display: flex; align-items: center; gap: 10px;">
@@ -1449,7 +1780,6 @@ def index():
                             <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
                                    placeholder="#FF0000" style="width: 100px;"
                                    onchange="document.getElementById('text_color').value = this.value">
-                            <span id="color_preview" style="padding: 8px 20px; border-radius: 4px; background: {{ config.get('text_color', '#FF0000') }}; color: white; font-weight: bold;">Preview</span>
                         </div>
                         <script>
                             document.getElementById('text_color').addEventListener('change', function() {
@@ -1468,38 +1798,13 @@ def index():
                         <select id="text_font">
                             <option value="">Loading fonts...</option>
                         </select>
-                        <p class="help-text">🔤 Select from FPP-supported fonts</p>
 
                         <label>Font Size:</label>
                         <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
 
-                        <label>Text Position:</label>
-                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
-                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
-                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
-                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
-                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                        </select>
-                        <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
-
-                        <div id="scroll_speed_row">
-                            <label>Scroll Speed:</label>
-                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
-                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
-                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
-                        </div>
-
-                        <label>Vertical Alignment:</label>
-                        <div class="valign-picker">
-                            <button type="button" class="valign-btn" data-val="top">▲ Top</button>
-                            <button type="button" class="valign-btn" data-val="center">● Center</button>
-                            <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
-                        </div>
-                        <input type="hidden" id="text_v_align" value="{{ config.get('text_v_align', 'center') }}">
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
-                        <p class="help-text">↕ Shifts text vertically on the matrix (approximate, based on model size)</p>
+                        <input type="hidden" id="line_positions_json" value="{{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }}">
                     </div>
                 </div>
 
@@ -1680,44 +1985,348 @@ def index():
 
             function updateScrollSpeedVisibility() {
                 var pos = document.getElementById('text_position').value;
+                var isStatic = (pos === 'Center');
                 var row = document.getElementById('scroll_speed_row');
-                if (row) row.style.display = (pos === 'Center') ? 'none' : '';
+                if (row) row.style.display = isStatic ? 'none' : '';
+
+                // Update canvas hint text based on mode
+                var hint = document.getElementById('canvas_hint');
+                var help = document.getElementById('canvas_help');
+                if (pos === 'L2R' || pos === 'R2L') {
+                    if (hint) hint.textContent = 'drag each line up/down to set its vertical position';
+                    if (help) help.textContent = 'Each line scrolls horizontally at its own Y position. Click a line then drag up/down to reposition it.';
+                } else if (pos === 'T2B' || pos === 'B2T') {
+                    if (hint) hint.textContent = 'drag each line left/right to set its horizontal position';
+                    if (help) help.textContent = 'Each line scrolls vertically at its own X position. Click a line then drag left/right to reposition it.';
+                } else {
+                    if (hint) hint.textContent = 'click a line to select, drag to reposition';
+                    if (help) help.textContent = 'Click a line on the preview then drag it anywhere on the canvas.';
+                }
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
             }
 
             function updateModelAspect(width, height) {
-                var ta = document.getElementById('message_template');
-                if (ta && width > 0 && height > 0) {
-                    ta.style.aspectRatio = (width / height).toFixed(2);
-                    ta.style.height = 'auto';
+                if (width > 0 && height > 0) {
+                    window._canvasModelW = width;
+                    window._canvasModelH = height;
+                    var c = document.getElementById('matrix_canvas');
+                    if (c) { c.width = 640; c.height = Math.round(640 * height / width); }
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 }
             }
 
             function initValignButtons() {
-                var current = document.getElementById('text_v_align').value || 'center';
-                document.querySelectorAll('.valign-btn').forEach(function(btn) {
-                    btn.classList.toggle('active', btn.dataset.val === current);
-                    btn.addEventListener('click', function() {
-                        document.querySelectorAll('.valign-btn').forEach(function(b) { b.classList.remove('active'); });
-                        this.classList.add('active');
-                        document.getElementById('text_v_align').value = this.dataset.val;
-                        saveConfig();
-                    });
-                });
+                // No-op: v_align removed; per-line Y positioning handles vertical placement.
             }
 
-            window.onload = function() {
-                loadFPPData();
-                initRespRows();
-                setupAutoSave();
-                updateLiveStatus();
-                setInterval(updateLiveStatus, 5000);
-                updateScrollSpeedVisibility();
-                initValignButtons();
-                // Apply saved model aspect ratio on load
+            function initCanvasPreview() {
+                var canvas = document.getElementById('matrix_canvas');
+                if (!canvas) return;
+                var ctx = canvas.getContext('2d');
+                if (!ctx) return;
+
+                window._canvasModelW = parseInt(document.getElementById('overlay_model_width').value) || 640;
+                window._canvasModelH = parseInt(document.getElementById('overlay_model_height').value) || 360;
+                canvas.width  = 640;
+                canvas.height = Math.round(640 * window._canvasModelH / window._canvasModelW);
+
+                // Load per-line positions from config
+                var initLP = [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
+                var lpEl = document.getElementById('line_positions_json');
+                if (lpEl && lpEl.value) { try { initLP = JSON.parse(lpEl.value); } catch(e) {} }
+                while (initLP.length < 4) initLP.push({x:-1,y:-1});
+                window._linePositions = initLP;
+
+                var selectedLine = -1;
+                var hoveredLine  = -1;
+                var lineRects    = [null, null, null, null]; // canvas-pixel rects, filled by render
+                var dragging     = false;
+                var dragOffX     = 0, dragOffY = 0;
+
+                function getLineText(i) {
+                    var el = document.getElementById('line_' + (i + 1));
+                    return el ? el.value.replace('{name}', 'Santa') : '';
+                }
+
+                // Returns array of indices (0-3) for non-empty lines
+                function getNonEmptyIdx() {
+                    var r = [];
+                    for (var i = 0; i < 4; i++) { if (getLineText(i)) r.push(i); }
+                    return r;
+                }
+
+                function updateBadges() {
+                    var pos = document.getElementById('text_position').value;
+                    for (var i = 0; i < 4; i++) {
+                        var badge = document.getElementById('line_' + (i + 1) + '_pos');
+                        if (!badge) continue;
+                        var lp = window._linePositions[i];
+                        var txt;
+                        if (pos === 'L2R' || pos === 'R2L') {
+                            txt = lp.y < 0 ? 'auto' : ('Y:' + lp.y);
+                        } else if (pos === 'T2B' || pos === 'B2T') {
+                            txt = lp.x < 0 ? 'auto' : ('X:' + lp.x);
+                        } else {
+                            txt = (lp.x < 0 && lp.y < 0) ? 'auto' : ('X:' + lp.x + ' Y:' + lp.y);
+                        }
+                        badge.textContent = txt;
+                        badge.style.color = (i === selectedLine) ? '#4CAF50' : '#888';
+                    }
+                }
+
+                function drawLineDecoration(drawX, drawY, lw2, lh2, i) {
+                    if (i === selectedLine) {
+                        ctx.save();
+                        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.setLineDash([]);
+                        ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                        ctx.restore();
+                    } else if (i === hoveredLine) {
+                        ctx.save();
+                        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+                        ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                        ctx.restore();
+                    }
+                }
+
+                function renderCanvasPreview() {
+                    var mw = window._canvasModelW || 640;
+                    var mh = window._canvasModelH || 360;
+                    var pos = document.getElementById('text_position').value;
+                    ctx.fillStyle = '#000';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
+                    var color      = document.getElementById('text_color').value || '#ff0000';
+                    var scaledFont = Math.round(fontSize * canvas.width / mw);
+                    var lineH      = Math.round(scaledFont * 1.2);
+                    ctx.font = 'bold ' + scaledFont + 'px sans-serif';
+                    ctx.textBaseline = 'top';
+
+                    lineRects = [null, null, null, null];
+
+                    var nonEmptyIdx = getNonEmptyIdx();
+                    var nLines = nonEmptyIdx.length || 1;
+                    // Stacked-group Y: center the group, space lines by lineH
+                    var stackStartY = (canvas.height - nLines * lineH) / 2;
+
+                    var posLabel = 'Click a line to select, then drag';
+
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        // Per-line Y control; text scrolls full width at each line's Y
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                        ctx.font = 'bold ' + Math.max(8, Math.round(scaledFont * 0.5)) + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        var arrowTxt = pos === 'L2R' ? '→' : '←';
+                        var arrowX = pos === 'L2R' ? 4 : canvas.width - ctx.measureText(arrowTxt).width - 4;
+                        ctx.fillText(arrowTxt, arrowX, 4);
+                        ctx.restore();
+                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+
+                        var stackIdx = 0;
+                        for (var i = 0; i < 4; i++) {
+                            var lineText = getLineText(i);
+                            if (!lineText) { lineRects[i] = null; continue; }
+                            var lp  = window._linePositions[i];
+                            var lw2 = ctx.measureText(lineText).width;
+                            var lh2 = scaledFont;
+                            var drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
+                            var drawX = (canvas.width - lw2) / 2;
+                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                            // Dashed guide line at this Y
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(0, drawY + lh2/2); ctx.lineTo(canvas.width, drawY + lh2/2); ctx.stroke();
+                            ctx.restore();
+                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            if (i === selectedLine)
+                                posLabel = 'Line ' + (i+1) + ' Y: ' + (lp.y < 0 ? 'auto' : lp.y) + ' — drag up/down';
+                            stackIdx++;
+                        }
+
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        // Per-line X control; text scrolls full height at each line's X
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                        ctx.font = 'bold ' + Math.max(8, Math.round(scaledFont * 0.5)) + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        var sarrow = pos === 'T2B' ? '↓' : '↑';
+                        ctx.fillText(sarrow, canvas.width / 2 - ctx.measureText(sarrow).width / 2, 4);
+                        ctx.restore();
+                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+
+                        var stackIdx = 0;
+                        for (var i = 0; i < 4; i++) {
+                            var lineText = getLineText(i);
+                            if (!lineText) { lineRects[i] = null; continue; }
+                            var lp  = window._linePositions[i];
+                            var lw2 = ctx.measureText(lineText).width;
+                            var lh2 = scaledFont;
+                            var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                            drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
+                            var drawY = (canvas.height - lh2) / 2;
+                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                            // Dashed guide at this X
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(drawX + lw2/2, 0); ctx.lineTo(drawX + lw2/2, canvas.height); ctx.stroke();
+                            ctx.restore();
+                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            if (i === selectedLine)
+                                posLabel = 'Line ' + (i+1) + ' X: ' + (lp.x < 0 ? 'auto' : lp.x) + ' — drag left/right';
+                            stackIdx++;
+                        }
+
+                    } else {
+                        // Static mode: each line at its own X,Y with stacked Y default
+                        var stackIdx = 0;
+                        for (var i = 0; i < 4; i++) {
+                            var lineText = getLineText(i);
+                            if (!lineText) { lineRects[i] = null; continue; }
+                            var lp  = window._linePositions[i];
+                            var lw2 = ctx.measureText(lineText).width;
+                            var lh2 = scaledFont;
+                            var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                            var drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
+                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
+                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            if (i === selectedLine)
+                                posLabel = (lp.x < 0 && lp.y < 0)
+                                    ? 'Line ' + (i+1) + ': auto-stacked'
+                                    : 'Line ' + (i+1) + ':  X:' + lp.x + '  Y:' + lp.y;
+                            stackIdx++;
+                        }
+                    }
+
+                    var posEl = document.getElementById('pos_display');
+                    if (posEl) posEl.textContent = posLabel;
+                    updateBadges();
+                }
+                window.renderCanvasPreview = renderCanvasPreview;
+
+                function hitTestLine(cx, cy) {
+                    var PAD = 8;
+                    for (var i = lineRects.length - 1; i >= 0; i--) {
+                        var r = lineRects[i];
+                        if (!r) continue;
+                        if (cx >= r.x - PAD && cx <= r.x + r.w + PAD &&
+                            cy >= r.y - PAD && cy <= r.y + r.h + PAD) { return i; }
+                    }
+                    return -1;
+                }
+
+                function canvasXY(e) {
+                    var rect = canvas.getBoundingClientRect();
+                    return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
+                }
+
+                function dragCursor(pos) {
+                    return (pos === 'L2R' || pos === 'R2L') ? 'ns-resize' :
+                           (pos === 'T2B' || pos === 'B2T') ? 'ew-resize' : 'grabbing';
+                }
+                function hoverCursor(pos) {
+                    return (pos === 'L2R' || pos === 'R2L') ? 'ns-resize' :
+                           (pos === 'T2B' || pos === 'B2T') ? 'ew-resize' : 'grab';
+                }
+
+                canvas.addEventListener('mousedown', function(e) {
+                    var pos = document.getElementById('text_position').value;
+                    var c = canvasXY(e);
+                    var hit = hitTestLine(c.cx, c.cy);
+                    selectedLine = hit;
+                    if (hit >= 0) {
+                        dragging = true;
+                        var r   = lineRects[hit];
+                        var lp  = window._linePositions[hit];
+                        var mw2 = window._canvasModelW || 640;
+                        var mh2 = window._canvasModelH || 360;
+                        // For L2R/R2L: anchor Y offset; for T2B/B2T: anchor X; static: both
+                        dragOffX = c.cx - (lp.x < 0 ? r.x : lp.x * canvas.width  / mw2);
+                        dragOffY = c.cy - (lp.y < 0 ? r.y : lp.y * canvas.height / mh2);
+                        canvas.style.cursor = dragCursor(pos);
+                    }
+                    renderCanvasPreview();
+                    e.preventDefault();
+                });
+
+                canvas.addEventListener('mousemove', function(e) {
+                    var mw2 = window._canvasModelW || 640;
+                    var mh2 = window._canvasModelH || 360;
+                    var pos = document.getElementById('text_position').value;
+                    var c   = canvasXY(e);
+                    if (dragging && selectedLine >= 0) {
+                        var r  = lineRects[selectedLine] || {w: 20, h: 20};
+                        var lp = window._linePositions[selectedLine];
+                        var newX = Math.round(Math.max(0, Math.min(canvas.width  - r.w, c.cx - dragOffX)) * mw2 / canvas.width);
+                        var newY = Math.round(Math.max(0, Math.min(canvas.height - r.h, c.cy - dragOffY)) * mh2 / canvas.height);
+                        if (pos === 'L2R' || pos === 'R2L') {
+                            window._linePositions[selectedLine] = {x: lp.x, y: newY};
+                        } else if (pos === 'T2B' || pos === 'B2T') {
+                            window._linePositions[selectedLine] = {x: newX, y: lp.y};
+                        } else {
+                            window._linePositions[selectedLine] = {x: newX, y: newY};
+                        }
+                        renderCanvasPreview();
+                    } else if (!dragging) {
+                        var prev = hoveredLine;
+                        hoveredLine = hitTestLine(c.cx, c.cy);
+                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(pos) : 'default';
+                        if (hoveredLine !== prev) renderCanvasPreview();
+                    }
+                });
+
+                window.addEventListener('mouseup', function() {
+                    if (dragging) {
+                        dragging = false;
+                        var pos = document.getElementById('text_position').value;
+                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(pos) : 'default';
+                        saveConfig();
+                    }
+                });
+                canvas.addEventListener('mouseleave', function() {
+                    if (!dragging) { hoveredLine = -1; canvas.style.cursor = 'default'; renderCanvasPreview(); }
+                });
+
+                window.resetLine = function(i) {
+                    window._linePositions[i] = {x: -1, y: -1};
+                    renderCanvasPreview(); saveConfig();
+                };
+                window.resetAllLines = function() {
+                    window._linePositions = [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
+                    selectedLine = -1;
+                    renderCanvasPreview(); saveConfig();
+                };
+
+                // Re-render on text / color / font-size changes
+                for (var li = 1; li <= 4; li++) {
+                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li));
+                }
+                document.getElementById('text_color').addEventListener('change',     renderCanvasPreview);
+                document.getElementById('text_font_size').addEventListener('change', renderCanvasPreview);
+
+                updateBadges();
+                renderCanvasPreview();
+            }
+
+            // All DOM elements are above this script block — call init functions directly.
+            try { initCanvasPreview(); } catch(e) { console.error('Canvas init error:', e); }
+            loadFPPData();
+            initRespRows();
+            setupAutoSave();
+            updateLiveStatus();
+            setInterval(updateLiveStatus, 5000);
+            updateScrollSpeedVisibility();
+            initValignButtons();
+            (function() {
                 var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
                 var h = parseInt(document.getElementById('overlay_model_height').value) || 0;
                 if (w > 0 && h > 0) updateModelAspect(w, h);
-            };
+            })();
 
             function showTab(tabName, btn) {
                 document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -1787,9 +2396,14 @@ def index():
                             const opt = new Option(name, name, false, name === currentModel);
                             modelSelect.add(opt);
                         });
-                        // Set aspect ratio for the currently selected model
+                        // Set aspect ratio and save dimensions for the currently selected model
                         const cur = data.models.find(m => (typeof m === 'object' ? m.name : m) === currentModel);
-                        if (cur && cur.width && cur.height) updateModelAspect(cur.width, cur.height);
+                        if (cur && cur.width && cur.height) {
+                            updateModelAspect(cur.width, cur.height);
+                            document.getElementById('overlay_model_width').value = cur.width;
+                            document.getElementById('overlay_model_height').value = cur.height;
+                            saveConfig();
+                        }
                     }
 
                     modelSelect.addEventListener('change', function() {
@@ -1816,7 +2430,8 @@ def index():
                     } else {
                         fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
                     }
-                });
+                })
+                .catch(function(e) { console.error('FPP data load failed:', e); });
             }
 
 
@@ -1850,10 +2465,15 @@ var _saveTimer = null;
                     text_font_size: parseInt(document.getElementById('text_font_size').value),
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
                     text_position: document.getElementById('text_position').value,
-                    text_v_align: document.getElementById('text_v_align').value,
                     overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
                     overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
-                    message_template: document.getElementById('message_template').value,
+                    message_lines: [
+                        document.getElementById('line_1').value,
+                        document.getElementById('line_2').value,
+                        document.getElementById('line_3').value,
+                        document.getElementById('line_4').value,
+                    ],
+                    line_positions: window._linePositions || [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}],
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
@@ -1913,11 +2533,11 @@ var _saveTimer = null;
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', saveConfig);
                 });
-                // Text, number, textarea — save when user clicks away
+                // Text, number inputs — save when user clicks away
                 ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
                  'text_color_hex','text_font_size',
-                 'message_template',
+                 'line_1','line_2','line_3','line_4',
                  'response_success','response_profanity','response_rate_limited',
                  'response_duplicate','response_invalid_format',
                  'response_not_whitelisted','response_blocked'
