@@ -1675,7 +1675,7 @@ def index():
 
                         <label>Message Template:</label>
                         <textarea id="message_template">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-                        <p class="help-text">💬 Use {name} as placeholder. Press Enter for new lines.</p>
+                        <p class="help-text">💬 Use {name} as placeholder.</p>
 
                         <label>Text Color:</label>
                         <div style="display: flex; align-items: center; gap: 10px;">
@@ -1703,7 +1703,6 @@ def index():
                         <select id="text_font">
                             <option value="">Loading fonts...</option>
                         </select>
-                        <p class="help-text">🔤 Select from FPP-supported fonts</p>
 
                         <label>Font Size:</label>
                         <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
@@ -1716,7 +1715,6 @@ def index():
                             <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
                             <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
                         </select>
-                        <p class="help-text">💡 Choose "Static" for centered text or select scroll direction</p>
 
                         <div id="scroll_speed_row">
                             <label>Scroll Speed:</label>
@@ -1734,24 +1732,28 @@ def index():
                         <!-- Canvas: shown for ALL modes. Axis locked based on scroll direction. -->
                         <div id="canvas_section">
                             <label>Text Position: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
-                            <div style="display:flex; gap:4px;">
-                                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;">
-                                    <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
-                                    <input type="range" id="hscroll" min="0" max="640" step="1" value="320"
-                                           style="width:100%; cursor:ew-resize; display:block;"
-                                           oninput="window._onHscroll && window._onHscroll(this.value)">
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div style="display:flex; gap:4px; align-items:stretch;">
+                                    <canvas id="matrix_canvas" style="flex:1; min-width:0; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
+                                    <!-- Vertical scrollbar: rotate trick is cross-browser reliable -->
+                                    <div id="vscroll_wrap" style="flex-shrink:0; width:22px; position:relative; overflow:hidden;">
+                                        <input type="range" id="vscroll" min="0" max="360" step="1" value="180"
+                                               style="position:absolute; left:0; top:200px; width:200px; height:22px; transform:rotate(-90deg); transform-origin:0 0; margin:0; padding:0; cursor:ns-resize;"
+                                               oninput="window._onVscroll && window._onVscroll(this.value)">
+                                    </div>
                                 </div>
-                                <input type="range" id="vscroll" orient="vertical" min="0" max="360" step="1" value="180"
-                                       style="writing-mode:vertical-lr; flex-shrink:0; width:200px; height:20px; padding:0; cursor:ns-resize;"
-                                       oninput="window._onVscroll && window._onVscroll(this.value)">
+                                <input type="range" id="hscroll" min="0" max="640" step="1" value="320"
+                                       style="width:calc(100% - 26px); display:block; cursor:ew-resize;"
+                                       oninput="window._onHscroll && window._onHscroll(this.value)">
                             </div>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center; flex-wrap:wrap;">
                                 <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
                                 <span id="pos_display" style="font-size:12px; color:#666;"></span>
                                 <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
-                                    <label style="font-size:12px; color:#888; white-space:nowrap;">Preview as:</label>
+                                    <label style="font-size:12px; color:#888; white-space:nowrap;" title="Replaces {name} in your message template for the preview">Preview {name} as:</label>
                                     <input type="text" id="canvas_preview_name" value="Santa" maxlength="20"
                                            style="width:80px; background:#222; color:#fff; border:1px solid #555; padding:3px 7px; font-size:12px; border-radius:3px;"
+                                           placeholder="e.g. Santa"
                                            oninput="if(typeof window.renderCanvasPreview==='function') window.renderCanvasPreview()">
                                 </span>
                             </div>
@@ -2191,13 +2193,14 @@ def index():
                     renderCanvasPreview(); saveConfig();
                 };
 
-                // Keep vertical scrollbar height in sync with canvas rendered height
-                if (window.ResizeObserver) {
+                // Keep vertical scrollbar sized to match canvas height (rotate trick)
+                var vwrap = document.getElementById('vscroll_wrap');
+                if (vwrap && window.ResizeObserver) {
                     new ResizeObserver(function(entries) {
                         var h = Math.round(entries[0].contentRect.height);
                         var v = document.getElementById('vscroll');
-                        if (v && h > 0) v.style.width = h + 'px';
-                    }).observe(canvas);
+                        if (v && h > 0) { v.style.width = h + 'px'; v.style.top = h + 'px'; }
+                    }).observe(vwrap);
                 }
 
                 renderCanvasPreview();
