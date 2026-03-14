@@ -2646,6 +2646,11 @@ def update_config():
     try:
         new_config = request.json
         config.update(new_config)
+
+        # Normalize phone number to E.164 (strip spaces, dashes, parens — keep + and digits)
+        if config.get('twilio_phone_number'):
+            config['twilio_phone_number'] = re.sub(r'[^\d+]', '', config['twilio_phone_number'])
+
         save_config()
 
         if config['twilio_account_sid'] and config['twilio_auth_token']:
