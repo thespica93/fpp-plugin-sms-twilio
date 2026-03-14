@@ -129,13 +129,12 @@ DEFAULT_CONFIG = {
     "text_font": "FreeSans",
     "text_font_size": 48,
     "text_position": "Center",
-    "text_v_align": "center",
-    "message_template": "Merry Christmas {name}!",
+    "message_template": "Merry Christmas {name}!",  # legacy — migrated to message_lines on load
+    "message_lines": ["Merry Christmas", "{name}!", "", ""],
+    "line_positions": [{"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}],
     "scroll_speed": 5,
     "overlay_model_width": 0,
     "overlay_model_height": 0,
-    "text_x": -1,  # -1 = auto-center; >= 0 = pixel X in model space (PIL mode only)
-    "text_y": -1,  # -1 = auto-center; >= 0 = pixel Y in model space (PIL mode only)
     "sms_response_show_not_live": False,
     "sms_response_success": False,
     "sms_response_profanity": False,
@@ -186,6 +185,14 @@ def load_config():
         if config.get('scroll_speed', 5) > 10:
             config['scroll_speed'] = 5
             save_config()
+
+        # Migrate old message_template to message_lines (introduced in v2.6)
+        if 'message_lines' not in loaded and 'message_template' in loaded:
+            tmpl = loaded.get('message_template', 'Merry Christmas {name}!')
+            config['message_lines'] = [tmpl, '', '', '']
+            config['line_positions'] = [{'x': -1, 'y': -1}] * 4
+            save_config()
+            logging.info(f"Migrated message_template '{tmpl}' to message_lines[0]")
 
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
@@ -244,9 +251,10 @@ def _find_font(font_name, font_size):
         return None
 
 
-def render_to_shm(display_message, model_name, width, height, x, y, font_name, font_size, color_hex):
-    """Render text to FPP shared memory at a pixel-accurate position using Pillow.
-    x/y < 0 means auto-center. Returns True on success, False on failure."""
+def render_to_shm(line_items, model_name, width, height, font_name, font_size, color_hex):
+    """Render multiple text lines to FPP shared memory, each at its own (x, y) position.
+    line_items: list of (text, x, y) tuples. x/y < 0 means auto-center that line.
+    Returns True on success, False on failure."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
@@ -257,21 +265,19 @@ def render_to_shm(display_message, model_name, width, height, x, y, font_name, f
         draw = ImageDraw.Draw(img)
         font = _find_font(font_name, font_size)
 
-        # Strip newline padding (used only by the old valign trick — PIL uses x/y directly)
-        text = display_message.strip('\n')
+        for (text, x, y) in line_items:
+            if not text:
+                continue
+            if font is not None:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            else:
+                text_w = len(text) * 6
+                text_h = font_size
 
-        # Measure text for auto-centering
-        if font is not None:
-            bbox = draw.textbbox((0, 0), text, font=font)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        else:
-            text_w = len(text) * 6
-            text_h = font_size
-
-        draw_x = max(0, (width - text_w) // 2) if x < 0 else x
-        draw_y = max(0, (height - text_h) // 2) if y < 0 else y
-
-        draw.text((draw_x, draw_y), text, fill=color, font=font)
+            draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
+            draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
+            draw.text((draw_x, draw_y), text, fill=color, font=font)
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         raw = img.tobytes()
@@ -302,7 +308,7 @@ def render_to_shm(display_message, model_name, width, height, x, y, font_name, f
                 logging.error("render_to_shm: restart FPPD to apply shm permissions from postStart.sh")
                 return False
 
-        logging.info(f"render_to_shm: wrote {len(raw)} bytes to {shm_path} at ({draw_x},{draw_y})")
+        logging.info(f"render_to_shm: wrote {len(raw)} bytes to {shm_path} ({len(line_items)} lines)")
         return True
     except Exception as e:
         logging.error(f"render_to_shm failed: {e}")
@@ -958,31 +964,26 @@ def send_to_fpp(name):
         name_playlist = config.get('name_display_playlist', '')
         overlay_model = config.get('overlay_model_name', 'Texting Matrix')
         
-        # Get message template and replace {name} with actual name
-        message_template = config.get('message_template', 'Merry Christmas {name}!')
-        display_message = message_template.replace('{name}', name)
+        # Build per-line rendered items from message_lines config
+        message_lines = config.get('message_lines', ['Merry Christmas', '{name}!', '', ''])
+        line_positions_cfg = config.get('line_positions', [])
+        line_items = []   # [(rendered_text, x, y), ...] for PIL static rendering
+        all_rendered = [] # rendered non-empty lines for scroll/FPP-API fallback
+        for i, tmpl_line in enumerate(message_lines):
+            if not tmpl_line.strip():
+                continue
+            rendered = tmpl_line.replace('{name}', name)
+            pos = line_positions_cfg[i] if i < len(line_positions_cfg) else {'x': -1, 'y': -1}
+            line_items.append((rendered, pos.get('x', -1), pos.get('y', -1)))
+            all_rendered.append(rendered)
+        # FPP API fallback / scroll modes: join lines with newline
+        display_message = '\n'.join(all_rendered) if all_rendered else name
 
-        # Vertical alignment: pad with newlines to shift text on the matrix.
-        # FPP "Center" centers the full text block vertically, so:
-        #   top    → append trailing newlines (block grows down → text rises)
-        #   bottom → prepend leading newlines (block grows up → text sinks)
-        #   center → no change (FPP centers naturally)
-        v_align = config.get('text_v_align', 'center')
-        model_height = config.get('overlay_model_height', 0)
-        font_size = config.get('text_font_size', 48)
-        if v_align != 'center' and model_height > font_size:
-            pad = max(0, (model_height // font_size) - 1)
-            if pad > 0:
-                if v_align == 'top':
-                    display_message = display_message + '\n' * pad
-                elif v_align == 'bottom':
-                    display_message = '\n' * pad + display_message
-        
         logging.info(f"🎄 ========== STARTING DISPLAY FOR: {name} ==========")
         logging.info(f"📺 FPP Host: {fpp_host}")
         logging.info(f"🎬 Name Display Playlist: {name_playlist}")
         logging.info(f"📝 Overlay Model: {overlay_model}")
-        logging.info(f"📝 Message Template: {message_template}")
+        logging.info(f"📝 Message Lines: {message_lines}")
         logging.info(f"📝 Display Message: {display_message}")
         
         # Step 1: Start the name display playlist/sequence (background)
@@ -1055,10 +1056,8 @@ def send_to_fpp(name):
 
                 mw = config.get('overlay_model_width', 0)
                 mh = config.get('overlay_model_height', 0)
-                tx = config.get('text_x', -1)
-                ty = config.get('text_y', -1)
                 logging.info(f"📐 Overlay: model={overlay_model} overlay_size={mw}x{mh} "
-                             f"canvas_pos=({tx},{ty}) mode={text_position} PIL={PIL_AVAILABLE}")
+                             f"lines={len(line_items)} mode={text_position} PIL={PIL_AVAILABLE}")
 
                 shm_rendered = False
                 scroll_started = False
@@ -1066,15 +1065,14 @@ def send_to_fpp(name):
                 if PIL_AVAILABLE and mw > 0 and mh > 0:
                     if text_position == 'Center':
                         shm_rendered = render_to_shm(
-                            display_message, overlay_model,
-                            mw, mh, tx, ty,
-                            text_font, font_size, text_color
+                            line_items, overlay_model,
+                            mw, mh, text_font, font_size, text_color
                         )
                     elif text_position in ('L2R', 'R2L', 'T2B', 'B2T'):
                         duration = config.get('display_duration', 30)
                         scroll_started = scroll_via_shm(
                             display_message, overlay_model,
-                            mw, mh, text_position, tx, ty,
+                            mw, mh, text_position, -1, -1,
                             text_font, font_size, text_color,
                             scroll_speed, duration
                         )
@@ -1483,11 +1481,6 @@ def index():
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
             select#text_font option { padding: 8px; font-size: 14px; }
-            .valign-picker { display: flex; gap: 6px; margin: 4px 0; }
-            .valign-btn { flex: 1; padding: 7px 4px; border: 1px solid #ccc; background: #f5f5f5; border-radius: 4px; cursor: pointer; font-size: 13px; transition: background 0.15s, border-color 0.15s; }
-            .valign-btn.active { background: #4CAF50; color: white; border-color: #388E3C; font-weight: bold; }
-            .valign-btn:hover:not(.active) { background: #e8e8e8; }
-            #message_template { font-family: monospace; min-height: 50px; max-height: 180px; resize: vertical; }
             .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
             .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
             .column .section { flex: 0 0 auto; }
@@ -1673,35 +1666,55 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">Text Display Options</h2>
 
-                        <label>Message Template:</label>
-                        <textarea id="message_template">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
-                        <p class="help-text">💬 Use {name} as placeholder.</p>
-
-                        <!-- Canvas: shown for ALL modes. Axis locked based on scroll direction. -->
-                        <div id="canvas_section">
-                            <label>Position Preview: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
-                            <div style="display:flex; flex-direction:column; gap:4px;">
-                                <div style="display:flex; gap:4px; align-items:stretch;">
-                                    <canvas id="matrix_canvas" style="flex:1; min-width:0; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
-                                    <!-- Vertical scrollbar: rotate trick is cross-browser reliable -->
-                                    <div id="vscroll_wrap" style="flex-shrink:0; width:22px; position:relative; overflow:hidden;">
-                                        <input type="range" id="vscroll" min="0" max="360" step="1" value="180"
-                                               style="position:absolute; left:22px; top:0; width:200px; height:22px; transform:rotate(90deg); transform-origin:0 0; margin:0; padding:0; cursor:ns-resize;"
-                                               oninput="window._onVscroll && window._onVscroll(this.value)">
-                                    </div>
-                                </div>
-                                <input type="range" id="hscroll" min="0" max="640" step="1" value="320"
-                                       style="width:calc(100% - 26px); display:block; cursor:ew-resize;"
-                                       oninput="window._onHscroll && window._onHscroll(this.value)">
+                        <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
+                        <style>
+                            .line-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+                            .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
+                            .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
+                            .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
+                            .reset-line-btn:hover { background:#666; }
+                        </style>
+                        {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
+                        {% set lp = config.get('line_positions') or [] %}
+                        <div id="message_lines_section">
+                            <div class="line-row">
+                                <span class="line-label">Line 1:</span>
+                                <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_1_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
                             </div>
-                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
-                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
-                                <span id="pos_display" style="font-size:12px; color:#666;"></span>
+                            <div class="line-row">
+                                <span class="line-label">Line 2:</span>
+                                <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" placeholder="e.g. {name}!" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_2_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
                             </div>
-                            <p class="help-text" id="canvas_help">Drag text on the matrix preview to set its position.</p>
+                            <div class="line-row">
+                                <span class="line-label">Line 3:</span>
+                                <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_3_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
+                            </div>
+                            <div class="line-row">
+                                <span class="line-label">Line 4:</span>
+                                <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                <span id="line_4_pos" class="pos-badge">auto</span>
+                                <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
+                            </div>
                         </div>
 
-                        <label>Text Position:</label>
+                        <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
+                        <div id="canvas_section">
+                            <label>Position Preview: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click a line to select, drag to reposition</span></label>
+                            <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
+                                <span id="pos_display" style="font-size:12px; color:#888;"></span>
+                            </div>
+                            <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
+                        </div>
+
+                        <label>Text Movement:</label>
                         <select id="text_position" onchange="updateScrollSpeedVisibility()">
                             <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
                             <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
@@ -1746,11 +1759,9 @@ def index():
                         <label>Font Size:</label>
                         <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
 
-                        <input type="hidden" id="text_v_align" value="{{ config.get('text_v_align', 'center') }}">
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
-                        <input type="hidden" id="text_x" value="{{ config.get('text_x', -1) }}">
-                        <input type="hidden" id="text_y" value="{{ config.get('text_y', -1) }}">
+                        <input type="hidden" id="line_positions_json" value="{{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }}">
                     </div>
                 </div>
 
@@ -1935,66 +1946,34 @@ def index():
                 var row = document.getElementById('scroll_speed_row');
                 if (row) row.style.display = isStatic ? 'none' : '';
 
-                // Update canvas cursor, hint text, and scrollbar visibility based on mode
-                var c = document.getElementById('matrix_canvas');
+                // Update canvas hint text based on mode
                 var hint = document.getElementById('canvas_hint');
                 var help = document.getElementById('canvas_help');
-                var vs = document.getElementById('vscroll');
-                var hs = document.getElementById('hscroll');
-                if (c) {
-                    if (pos === 'L2R' || pos === 'R2L') {
-                        c.style.cursor = 'ns-resize';
-                        if (hint) hint.textContent = 'drag up/down to set vertical position';
-                        if (help) help.textContent = 'Text scrolls the full width at the height you set. Drag vertically to reposition.';
-                        if (vs) vs.style.visibility = 'visible';
-                        if (hs) hs.style.visibility = 'hidden';
-                    } else if (pos === 'T2B' || pos === 'B2T') {
-                        c.style.cursor = 'ew-resize';
-                        if (hint) hint.textContent = 'drag left/right to set horizontal position';
-                        if (help) help.textContent = 'Text scrolls the full height at the column you set. Drag horizontally to reposition.';
-                        if (vs) vs.style.visibility = 'hidden';
-                        if (hs) hs.style.visibility = 'visible';
-                    } else {
-                        c.style.cursor = 'crosshair';
-                        if (hint) hint.textContent = 'click or drag to reposition';
-                        if (help) help.textContent = 'Drag text on the matrix preview to set its position.';
-                        if (vs) vs.style.visibility = 'visible';
-                        if (hs) hs.style.visibility = 'visible';
-                    }
+                if (pos === 'L2R' || pos === 'R2L') {
+                    if (hint) hint.textContent = 'scroll mode — lines render as one block';
+                    if (help) help.textContent = 'Text scrolls horizontally. All lines display as a single block.';
+                } else if (pos === 'T2B' || pos === 'B2T') {
+                    if (hint) hint.textContent = 'scroll mode — lines render as one block';
+                    if (help) help.textContent = 'Text scrolls vertically. All lines display as a single block.';
+                } else {
+                    if (hint) hint.textContent = 'click a line to select, drag to reposition';
+                    if (help) help.textContent = 'In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.';
                 }
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
             }
 
             function updateModelAspect(width, height) {
-                var ta = document.getElementById('message_template');
-                if (ta && width > 0 && height > 0) {
-                    ta.style.aspectRatio = (width / height).toFixed(2);
-                    ta.style.height = 'auto';
-                }
                 if (width > 0 && height > 0) {
                     window._canvasModelW = width;
                     window._canvasModelH = height;
                     var c = document.getElementById('matrix_canvas');
                     if (c) { c.width = 640; c.height = Math.round(640 * height / width); }
-                    var vs = document.getElementById('vscroll');
-                    var hs = document.getElementById('hscroll');
-                    if (vs) vs.max = height;
-                    if (hs) hs.max = width;
                     if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 }
             }
 
             function initValignButtons() {
-                var current = document.getElementById('text_v_align').value || 'center';
-                document.querySelectorAll('.valign-btn').forEach(function(btn) {
-                    btn.classList.toggle('active', btn.dataset.val === current);
-                    btn.addEventListener('click', function() {
-                        document.querySelectorAll('.valign-btn').forEach(function(b) { b.classList.remove('active'); });
-                        this.classList.add('active');
-                        document.getElementById('text_v_align').value = this.dataset.val;
-                        saveConfig();
-                    });
-                });
+                // No-op: v_align removed; per-line Y positioning handles vertical placement.
             }
 
             function initCanvasPreview() {
@@ -2008,203 +1987,221 @@ def index():
                 canvas.width  = 640;
                 canvas.height = Math.round(640 * window._canvasModelH / window._canvasModelW);
 
-                var textX = parseInt(document.getElementById('text_x').value);
-                var textY = parseInt(document.getElementById('text_y').value);
-                var dragging = false;
+                // Load per-line positions from config
+                var initLP = [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
+                var lpEl = document.getElementById('line_positions_json');
+                if (lpEl && lpEl.value) { try { initLP = JSON.parse(lpEl.value); } catch(e) {} }
+                while (initLP.length < 4) initLP.push({x:-1,y:-1});
+                window._linePositions = initLP;
+
+                var selectedLine = -1;
+                var hoveredLine  = -1;
+                var lineRects    = [null, null, null, null]; // canvas-pixel rects, filled by render
+                var dragging     = false;
+                var dragOffX     = 0, dragOffY = 0;
+
+                function getLineText(i) {
+                    var el = document.getElementById('line_' + (i + 1));
+                    return el ? el.value.replace('{name}', 'Santa') : '';
+                }
+
+                function updateBadges() {
+                    for (var i = 0; i < 4; i++) {
+                        var badge = document.getElementById('line_' + (i + 1) + '_pos');
+                        if (!badge) continue;
+                        var lp = window._linePositions[i];
+                        badge.textContent = (lp.x < 0 && lp.y < 0) ? 'auto' : ('X:' + lp.x + ' Y:' + lp.y);
+                        badge.style.color = (i === selectedLine) ? '#4CAF50' : '#888';
+                    }
+                }
 
                 function renderCanvasPreview() {
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
                     var pos = document.getElementById('text_position').value;
+                    var isStatic = (pos === 'Center');
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    var fontSize = parseInt(document.getElementById('text_font_size').value) || 48;
-                    var color = document.getElementById('text_color').value || '#ff0000';
-                    var tmpl = document.getElementById('message_template').value || '{name}';
-                    var previewName = (document.getElementById('canvas_preview_name') || {}).value || 'Santa';
-                    var rawText = tmpl.replace('{name}', previewName).replace(/\\r/g, '').trim();
-                    var lines = rawText.split(/\\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-                    if (!lines.length) lines = [''];
+                    var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
+                    var color      = document.getElementById('text_color').value || '#ff0000';
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
-                    var lineH = Math.round(scaledFont * 1.2);
+                    var lineH      = Math.round(scaledFont * 1.2);
                     ctx.font = 'bold ' + scaledFont + 'px sans-serif';
                     ctx.textBaseline = 'top';
-                    var tw = 0;
-                    lines.forEach(function(l) { tw = Math.max(tw, ctx.measureText(l).width); });
-                    var th = lines.length * lineH;
-                    var drawX, drawY, posLabel;
 
-                    if (pos === 'L2R' || pos === 'R2L') {
-                        // Only Y is set by user; preview text centered horizontally
-                        drawX = (canvas.width - tw) / 2;
-                        drawY = (textY < 0) ? (canvas.height - th) / 2 : textY * canvas.height / mh;
-                        // Dashed horizontal guide at text midline
-                        var gy = drawY + th / 2;
-                        ctx.save();
-                        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-                        ctx.setLineDash([4, 4]);
-                        ctx.lineWidth = 1;
-                        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvas.width, gy); ctx.stroke();
-                        ctx.restore();
-                        // Scroll direction hint
-                        ctx.save();
-                        ctx.fillStyle = 'rgba(255,255,255,0.3)';
-                        ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
-                        ctx.textBaseline = 'middle';
-                        var arrow = pos === 'L2R' ? '→ scrolls →' : '← scrolls ←';
-                        ctx.fillText(arrow, (canvas.width - ctx.measureText(arrow).width) / 2, drawY - th * 0.6);
-                        ctx.restore();
-                        ctx.font = 'bold ' + scaledFont + 'px sans-serif';
-                        ctx.textBaseline = 'top';
-                        posLabel = textY < 0 ? 'Vertical: center (auto)' : 'Vertical Y=' + textY;
+                    lineRects = [null, null, null, null];
 
-                    } else if (pos === 'T2B' || pos === 'B2T') {
-                        // Only X is set by user; preview text centered vertically
-                        drawX = (textX < 0) ? (canvas.width - tw) / 2 : textX * canvas.width / mw;
-                        drawY = (canvas.height - th) / 2;
-                        // Dashed vertical guide at text midline
-                        var gx = drawX + tw / 2;
-                        ctx.save();
-                        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-                        ctx.setLineDash([4, 4]);
-                        ctx.lineWidth = 1;
-                        ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, canvas.height); ctx.stroke();
-                        ctx.restore();
-                        // Scroll direction arrows
-                        ctx.save();
-                        ctx.fillStyle = 'rgba(255,255,255,0.3)';
-                        ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
-                        ctx.textBaseline = 'top';
-                        var sarrow = pos === 'T2B' ? '↓' : '↑';
-                        ctx.fillText(sarrow, gx - ctx.measureText(sarrow).width / 2, pos === 'T2B' ? canvas.height - scaledFont : 4);
-                        ctx.restore();
-                        ctx.font = 'bold ' + scaledFont + 'px sans-serif';
-                        ctx.textBaseline = 'top';
-                        posLabel = textX < 0 ? 'Horizontal: center (auto)' : 'Horizontal X=' + textX;
+                    if (!isStatic) {
+                        // Scroll mode: render all non-empty lines as one centered block
+                        var allLines = [];
+                        for (var i = 0; i < 4; i++) { var t = getLineText(i); if (t) allLines.push(t); }
+                        if (!allLines.length) allLines = [''];
+                        var tw = 0;
+                        allLines.forEach(function(l) { tw = Math.max(tw, ctx.measureText(l).width); });
+                        var th = allLines.length * lineH;
+                        var bx = (canvas.width - tw) / 2;
+                        var by = (canvas.height - th) / 2;
 
-                    } else {
-                        // Center (static) — both axes free
-                        if (textX < 0 || textY < 0) {
-                            drawX = (canvas.width - tw) / 2;
-                            drawY = (canvas.height - th) / 2;
-                            posLabel = 'Position: center (auto)';
-                        } else {
-                            drawX = textX * canvas.width / mw;
-                            drawY = textY * canvas.height / mh;
-                            posLabel = 'X:' + textX + ' Y:' + textY;
+                        if (pos === 'L2R' || pos === 'R2L') {
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(0, by + th/2); ctx.lineTo(canvas.width, by + th/2); ctx.stroke();
+                            ctx.restore();
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                            ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
+                            ctx.textBaseline = 'middle';
+                            var arrow = pos === 'L2R' ? '→ scrolls →' : '← scrolls ←';
+                            ctx.fillText(arrow, (canvas.width - ctx.measureText(arrow).width) / 2, by - th * 0.6);
+                            ctx.restore();
+                            ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+                        } else if (pos === 'T2B' || pos === 'B2T') {
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(bx + tw/2, 0); ctx.lineTo(bx + tw/2, canvas.height); ctx.stroke();
+                            ctx.restore();
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                            ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
+                            ctx.textBaseline = 'top';
+                            var sarrow = pos === 'T2B' ? '↓' : '↑';
+                            ctx.fillText(sarrow, bx + tw/2 - ctx.measureText(sarrow).width/2,
+                                         pos === 'T2B' ? canvas.height - scaledFont : 4);
+                            ctx.restore();
+                            ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
                         }
+                        ctx.fillStyle = color;
+                        allLines.forEach(function(l, i) {
+                            var lw = ctx.measureText(l).width;
+                            ctx.fillText(l, bx + (tw - lw) / 2, by + i * lineH);
+                        });
+                        var posEl = document.getElementById('pos_display');
+                        if (posEl) posEl.textContent = 'Scroll mode — lines render as one block';
+                        updateBadges();
+                        return;
                     }
 
-                    // Clamp text block fully within canvas bounds
-                    drawX = Math.max(0, Math.min(canvas.width - tw, drawX));
-                    drawY = Math.max(0, Math.min(canvas.height - th, drawY));
-                    ctx.fillStyle = color;
-                    lines.forEach(function(l, i) {
-                        var lw = ctx.measureText(l).width;
-                        ctx.fillText(l, drawX + (tw - lw) / 2, drawY + i * lineH);
-                    });
+                    // Static mode: render each line independently at its own position
+                    var posLabel = 'Click a line to select, then drag';
+                    for (var i = 0; i < 4; i++) {
+                        var lineText = getLineText(i);
+                        if (!lineText) { lineRects[i] = null; continue; }
+                        var lp  = window._linePositions[i];
+                        var lw2 = ctx.measureText(lineText).width;
+                        var lh2 = scaledFont;
+                        var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                        var drawY = lp.y < 0 ? (canvas.height - lh2) / 2 : lp.y * canvas.height / mh;
+                        drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
+                        drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
+                        lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+
+                        if (i === selectedLine) {
+                            ctx.save();
+                            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1; ctx.setLineDash([]);
+                            ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                            ctx.restore();
+                            posLabel = (lp.x < 0 && lp.y < 0)
+                                ? 'Line ' + (i + 1) + ': auto-centered'
+                                : 'Line ' + (i + 1) + ':  X:' + lp.x + '  Y:' + lp.y;
+                        } else if (i === hoveredLine) {
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+                            ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                            ctx.restore();
+                        }
+                        ctx.fillStyle = color;
+                        ctx.fillText(lineText, drawX, drawY);
+                    }
                     var posEl = document.getElementById('pos_display');
                     if (posEl) posEl.textContent = posLabel;
-                    // Sync scrollbars to current position
-                    var hs = document.getElementById('hscroll');
-                    var vs = document.getElementById('vscroll');
-                    if (hs) { hs.max = mw; hs.value = textX < 0 ? Math.round(mw / 2) : textX; }
-                    if (vs) { vs.max = mh; vs.value = textY < 0 ? Math.round(mh / 2) : textY; }
+                    updateBadges();
                 }
                 window.renderCanvasPreview = renderCanvasPreview;
 
-                function posFromEvent(e) {
-                    var rect = canvas.getBoundingClientRect();
-                    var mw = window._canvasModelW || 640;
-                    var mh = window._canvasModelH || 360;
-                    return {
-                        x: Math.max(0, Math.min(mw-1, Math.round((e.clientX-rect.left)*mw/rect.width))),
-                        y: Math.max(0, Math.min(mh-1, Math.round((e.clientY-rect.top)*mh/rect.height)))
-                    };
+                function hitTestLine(cx, cy) {
+                    var PAD = 8;
+                    for (var i = lineRects.length - 1; i >= 0; i--) {
+                        var r = lineRects[i];
+                        if (!r) continue;
+                        if (cx >= r.x - PAD && cx <= r.x + r.w + PAD &&
+                            cy >= r.y - PAD && cy <= r.y + r.h + PAD) { return i; }
+                    }
+                    return -1;
                 }
 
-                function applyDrag(p) {
-                    var pos = document.getElementById('text_position').value;
-                    var vs = document.getElementById('vscroll');
-                    var hs = document.getElementById('hscroll');
-                    if (pos === 'L2R' || pos === 'R2L') {
-                        textY = p.y;
-                        document.getElementById('text_y').value = textY;
-                        if (vs) vs.value = textY;
-                    } else if (pos === 'T2B' || pos === 'B2T') {
-                        textX = p.x;
-                        document.getElementById('text_x').value = textX;
-                        if (hs) hs.value = textX;
-                    } else {
-                        textX = p.x; textY = p.y;
-                        document.getElementById('text_x').value = textX;
-                        document.getElementById('text_y').value = textY;
-                        if (hs) hs.value = textX;
-                        if (vs) vs.value = textY;
-                    }
+                function canvasXY(e) {
+                    var rect = canvas.getBoundingClientRect();
+                    return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
                 }
 
                 canvas.addEventListener('mousedown', function(e) {
-                    dragging = true;
-                    applyDrag(posFromEvent(e));
-                    renderCanvasPreview(); saveConfig();
-                });
-                canvas.addEventListener('mousemove', function(e) {
-                    if (!dragging) return;
-                    applyDrag(posFromEvent(e));
+                    if (document.getElementById('text_position').value !== 'Center') return;
+                    var c = canvasXY(e);
+                    var hit = hitTestLine(c.cx, c.cy);
+                    selectedLine = hit;
+                    if (hit >= 0) {
+                        dragging = true;
+                        var r   = lineRects[hit];
+                        var lp  = window._linePositions[hit];
+                        var mw2 = window._canvasModelW || 640;
+                        var mh2 = window._canvasModelH || 360;
+                        // Anchor offset from line's top-left corner
+                        var dx  = lp.x < 0 ? (canvas.width - r.w) / 2 : lp.x * canvas.width / mw2;
+                        var dy  = lp.y < 0 ? (canvas.height - r.h) / 2 : lp.y * canvas.height / mh2;
+                        dragOffX = c.cx - dx;
+                        dragOffY = c.cy - dy;
+                        canvas.style.cursor = 'grabbing';
+                    }
                     renderCanvasPreview();
+                    e.preventDefault();
                 });
-                canvas.addEventListener('mouseup',    function() { dragging = false; saveConfig(); });
-                canvas.addEventListener('mouseleave', function() { dragging = false; });
 
-                window.resetTextPosition = function() {
-                    var pos = document.getElementById('text_position').value;
+                canvas.addEventListener('mousemove', function(e) {
                     var mw2 = window._canvasModelW || 640;
                     var mh2 = window._canvasModelH || 360;
-                    var vs = document.getElementById('vscroll');
-                    var hs = document.getElementById('hscroll');
-                    if (pos === 'L2R' || pos === 'R2L') {
-                        textY = -1; document.getElementById('text_y').value = -1;
-                        if (vs) vs.value = Math.round(mh2 / 2);
-                    } else if (pos === 'T2B' || pos === 'B2T') {
-                        textX = -1; document.getElementById('text_x').value = -1;
-                        if (hs) hs.value = Math.round(mw2 / 2);
-                    } else {
-                        textX = -1; textY = -1;
-                        document.getElementById('text_x').value = -1;
-                        document.getElementById('text_y').value = -1;
-                        if (vs) vs.value = Math.round(mh2 / 2);
-                        if (hs) hs.value = Math.round(mw2 / 2);
+                    var c   = canvasXY(e);
+                    if (dragging && selectedLine >= 0) {
+                        var r    = lineRects[selectedLine] || {w: 20, h: 20};
+                        var newX = Math.max(0, Math.min(canvas.width  - r.w, c.cx - dragOffX));
+                        var newY = Math.max(0, Math.min(canvas.height - r.h, c.cy - dragOffY));
+                        window._linePositions[selectedLine] = {
+                            x: Math.round(newX * mw2 / canvas.width),
+                            y: Math.round(newY * mh2 / canvas.height)
+                        };
+                        renderCanvasPreview();
+                    } else if (!dragging && document.getElementById('text_position').value === 'Center') {
+                        var prev = hoveredLine;
+                        hoveredLine = hitTestLine(c.cx, c.cy);
+                        canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default';
+                        if (hoveredLine !== prev) renderCanvasPreview();
                     }
+                });
+
+                window.addEventListener('mouseup', function() {
+                    if (dragging) { dragging = false; canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default'; saveConfig(); }
+                });
+                canvas.addEventListener('mouseleave', function() {
+                    if (!dragging) { hoveredLine = -1; canvas.style.cursor = 'default'; renderCanvasPreview(); }
+                });
+
+                window.resetLine = function(i) {
+                    window._linePositions[i] = {x: -1, y: -1};
+                    renderCanvasPreview(); saveConfig();
+                };
+                window.resetAllLines = function() {
+                    window._linePositions = [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
+                    selectedLine = -1;
                     renderCanvasPreview(); saveConfig();
                 };
 
-                document.getElementById('message_template').addEventListener('input',  renderCanvasPreview);
-                document.getElementById('text_color').addEventListener('change',        renderCanvasPreview);
-                document.getElementById('text_font_size').addEventListener('change',    renderCanvasPreview);
-
-                // Scrollbar input handlers
-                window._onVscroll = function(val) {
-                    textY = parseInt(val);
-                    document.getElementById('text_y').value = textY;
-                    renderCanvasPreview(); saveConfig();
-                };
-                window._onHscroll = function(val) {
-                    textX = parseInt(val);
-                    document.getElementById('text_x').value = textX;
-                    renderCanvasPreview(); saveConfig();
-                };
-
-                // Keep vertical scrollbar sized to match canvas height (rotate trick)
-                var vwrap = document.getElementById('vscroll_wrap');
-                if (vwrap && window.ResizeObserver) {
-                    new ResizeObserver(function(entries) {
-                        var h = Math.round(entries[0].contentRect.height);
-                        var v = document.getElementById('vscroll');
-                        if (v && h > 0) { v.style.width = h + 'px'; }
-                    }).observe(vwrap);
+                // Re-render on text / color / font-size changes
+                for (var li = 1; li <= 4; li++) {
+                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li));
                 }
+                document.getElementById('text_color').addEventListener('change',     renderCanvasPreview);
+                document.getElementById('text_font_size').addEventListener('change', renderCanvasPreview);
 
+                updateBadges();
                 renderCanvasPreview();
             }
 
@@ -2360,12 +2357,15 @@ var _saveTimer = null;
                     text_font_size: parseInt(document.getElementById('text_font_size').value),
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
                     text_position: document.getElementById('text_position').value,
-                    text_v_align: document.getElementById('text_v_align').value,
                     overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
                     overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
-                    text_x: parseInt(document.getElementById('text_x').value) || -1,
-                    text_y: parseInt(document.getElementById('text_y').value) || -1,
-                    message_template: document.getElementById('message_template').value,
+                    message_lines: [
+                        document.getElementById('line_1').value,
+                        document.getElementById('line_2').value,
+                        document.getElementById('line_3').value,
+                        document.getElementById('line_4').value,
+                    ],
+                    line_positions: window._linePositions || [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}],
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
@@ -2425,11 +2425,11 @@ var _saveTimer = null;
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', saveConfig);
                 });
-                // Text, number, textarea — save when user clicks away
+                // Text, number inputs — save when user clicks away
                 ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
                  'text_color_hex','text_font_size',
-                 'message_template',
+                 'line_1','line_2','line_3','line_4',
                  'response_success','response_profanity','response_rate_limited',
                  'response_duplicate','response_invalid_format',
                  'response_not_whitelisted','response_blocked'
