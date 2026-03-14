@@ -18,7 +18,7 @@ from flask import Flask, request, jsonify, render_template_string
 import logging
 import json
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
 import time
 import threading
@@ -1364,6 +1364,7 @@ def poll_twilio():
 
     logging.info("🚀 Twilio polling started")
     first_run = last_message_sid is None
+    thread_start_time = datetime.now(timezone.utc)  # used to skip pre-start messages on first run
     _current_day = datetime.now().date()
 
     while not stop_polling:
@@ -1403,15 +1404,24 @@ def poll_twilio():
             logging.debug(f"🆕 Found {len(new_messages)} NEW messages to process")
 
             if first_run:
-                if len(messages) > 0:
+                # Anchor to the newest SID so future polls don't re-process old messages
+                if messages:
                     last_message_sid = messages[0].sid
                     save_last_sid(messages[0].sid)
-                    logging.info(f"⚙️ First run: initialized SID {messages[0].sid[:10]}...")
-                else:
-                    logging.info("⚙️ First run: no messages found, polling from now on")
+                # Filter new_messages to only those that arrived after this thread started
+                # so we don't replay messages that predate the polling session
+                new_messages = [
+                    m for m in new_messages
+                    if m.date_sent and m.date_sent >= thread_start_time
+                ]
+                logging.info(
+                    f"⚙️ First run: baseline SID set, {len(new_messages)} post-start message(s) to process"
+                )
                 first_run = False
-                time.sleep(config['poll_interval'])
-                continue
+                if not new_messages:
+                    time.sleep(config['poll_interval'])
+                    continue
+                # fall through to process any messages that arrived after thread start
             
             for msg in reversed(new_messages):
                 from_number = msg.from_
@@ -1567,7 +1577,7 @@ def index():
                         <input type="password" id="auth_token" value="{{ config.twilio_auth_token }}">
 
                         <label>Twilio Phone Number:</label>
-                        <input type="text" id="phone_number" value="{{ config.twilio_phone_number }}" placeholder="+18555551234">
+                        <input type="text" id="phone_number" value="{{ config.twilio_phone_number }}" placeholder="+1234567890">
 
                         <label>Poll Interval (seconds):</label>
                         <input type="number" id="poll_interval" value="{{ config.poll_interval }}" min="1" max="60">
@@ -1945,8 +1955,7 @@ def index():
             <div class="section" style="border: 2px solid #FF9800;">
                 <h2>🧪 SMS Response Testing</h2>
                 <p style="color: #FF9800; font-size: 14px;">
-                    ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials and the response type enabled in the SMS Responses tab.
-                </p>
+                    ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials. </p>
 
                 <label>Phone Number:</label>
                 <input type="text" id="test_sms_phone" placeholder="+18005551234">
@@ -2633,18 +2642,24 @@ var _saveTimer = null;
 
 @app.route('/api/config', methods=['POST'])
 def update_config():
-    global config, twilio_client
+    global config, twilio_client, polling_thread, stop_polling
     try:
         new_config = request.json
         config.update(new_config)
         save_config()
-        
+
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
                 config['twilio_account_sid'],
                 config['twilio_auth_token']
             )
-        
+            # Start polling thread if not already running (e.g. credentials entered
+            # after TwilioStart was called, or updated mid-show)
+            if not polling_thread or not polling_thread.is_alive():
+                polling_thread = threading.Thread(target=poll_twilio, daemon=True)
+                polling_thread.start()
+                logging.error("▶️ Polling thread started after credential update")
+
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
@@ -2773,27 +2788,29 @@ def test_message_submission():
 
 @app.route('/api/test/sms', methods=['POST'])
 def test_sms_response():
-    """Test sending an SMS response"""
+    """Test sending an SMS response — bypasses enabled/disabled toggles so any response can be previewed"""
     try:
         data = request.json
         phone = data.get('phone', '').strip()
         message_type = data.get('message_type', 'success')
-        
+
         if not phone:
             return jsonify({"success": False, "error": "Phone number is required"})
-        
-        if not config.get('send_sms_responses', False):
-            return jsonify({"success": False, "error": "SMS responses are disabled. Enable them in settings first!"})
-        
-        logging.debug(f"🧪 TEST SMS: '{message_type}' to {phone}")
-        
-        success = send_sms_response(phone, message_type)
-        
-        if success:
-            return jsonify({"success": True, "message": f"Test SMS sent to {phone}"})
-        else:
-            return jsonify({"success": False, "error": "Failed to send SMS. Check logs for details."})
-            
+
+        if not twilio_client:
+            return jsonify({"success": False, "error": "Twilio credentials not configured"})
+
+        response_message = config.get(f"response_{message_type}", "")
+        if not response_message:
+            return jsonify({"success": False, "error": f"No message text configured for '{message_type}'"})
+
+        twilio_client.messages.create(
+            body=response_message,
+            from_=config['twilio_phone_number'],
+            to=phone
+        )
+        return jsonify({"success": True, "message": f"Test SMS sent to {phone}"})
+
     except Exception as e:
         logging.error(f"Error in test SMS: {e}")
         return jsonify({"success": False, "error": str(e)})
