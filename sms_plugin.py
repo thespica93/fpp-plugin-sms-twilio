@@ -1677,6 +1677,46 @@ def index():
                         <textarea id="message_template">{{ config.get('message_template', 'Merry Christmas {name}!') }}</textarea>
                         <p class="help-text">💬 Use {name} as placeholder.</p>
 
+                        <!-- Canvas: shown for ALL modes. Axis locked based on scroll direction. -->
+                        <div id="canvas_section">
+                            <label>Position Preview: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
+                            <div style="display:flex; flex-direction:column; gap:4px;">
+                                <div style="display:flex; gap:4px; align-items:stretch;">
+                                    <canvas id="matrix_canvas" style="flex:1; min-width:0; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
+                                    <!-- Vertical scrollbar: rotate trick is cross-browser reliable -->
+                                    <div id="vscroll_wrap" style="flex-shrink:0; width:22px; position:relative; overflow:hidden;">
+                                        <input type="range" id="vscroll" min="0" max="360" step="1" value="180"
+                                               style="position:absolute; left:22px; top:0; width:200px; height:22px; transform:rotate(90deg); transform-origin:0 0; margin:0; padding:0; cursor:ns-resize;"
+                                               oninput="window._onVscroll && window._onVscroll(this.value)">
+                                    </div>
+                                </div>
+                                <input type="range" id="hscroll" min="0" max="640" step="1" value="320"
+                                       style="width:calc(100% - 26px); display:block; cursor:ew-resize;"
+                                       oninput="window._onHscroll && window._onHscroll(this.value)">
+                            </div>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
+                                <span id="pos_display" style="font-size:12px; color:#666;"></span>
+                            </div>
+                            <p class="help-text" id="canvas_help">Drag text on the matrix preview to set its position.</p>
+                        </div>
+
+                        <label>Text Position:</label>
+                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
+                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
+                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
+                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
+                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                        </select>
+
+                        <div id="scroll_speed_row">
+                            <label>Scroll Speed:</label>
+                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
+                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
+                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
+                        </div>
+
                         <label>Text Color:</label>
                         <div style="display: flex; align-items: center; gap: 10px;">
                             <input type="color" id="text_color" value="{{ config.get('text_color', '#FF0000') }}"
@@ -1706,51 +1746,11 @@ def index():
                         <label>Font Size:</label>
                         <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
 
-                        <label>Text Position:</label>
-                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
-                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
-                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
-                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
-                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                        </select>
-
-                        <div id="scroll_speed_row">
-                            <label>Scroll Speed:</label>
-                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
-                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
-                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
-                        </div>
-
                         <input type="hidden" id="text_v_align" value="{{ config.get('text_v_align', 'center') }}">
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
                         <input type="hidden" id="text_x" value="{{ config.get('text_x', -1) }}">
                         <input type="hidden" id="text_y" value="{{ config.get('text_y', -1) }}">
-
-                        <!-- Canvas: shown for ALL modes. Axis locked based on scroll direction. -->
-                        <div id="canvas_section">
-                            <label>Text Position: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
-                            <div style="display:flex; flex-direction:column; gap:4px;">
-                                <div style="display:flex; gap:4px; align-items:stretch;">
-                                    <canvas id="matrix_canvas" style="flex:1; min-width:0; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
-                                    <!-- Vertical scrollbar: rotate trick is cross-browser reliable -->
-                                    <div id="vscroll_wrap" style="flex-shrink:0; width:22px; position:relative; overflow:hidden;">
-                                        <input type="range" id="vscroll" min="0" max="360" step="1" value="180"
-                                               style="position:absolute; left:22px; top:0; width:200px; height:22px; transform:rotate(90deg); transform-origin:0 0; margin:0; padding:0; cursor:ns-resize;"
-                                               oninput="window._onVscroll && window._onVscroll(this.value)">
-                                    </div>
-                                </div>
-                                <input type="range" id="hscroll" min="0" max="640" step="1" value="320"
-                                       style="width:calc(100% - 26px); display:block; cursor:ew-resize;"
-                                       oninput="window._onHscroll && window._onHscroll(this.value)">
-                            </div>
-                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
-                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
-                                <span id="pos_display" style="font-size:12px; color:#666;"></span>
-                            </div>
-                            <p class="help-text" id="canvas_help">Drag text on the matrix preview to set its position.</p>
-                        </div>
                     </div>
                 </div>
 
@@ -2023,7 +2023,7 @@ def index():
                     var tmpl = document.getElementById('message_template').value || '{name}';
                     var previewName = (document.getElementById('canvas_preview_name') || {}).value || 'Santa';
                     var rawText = tmpl.replace('{name}', previewName).replace(/\\r/g, '').trim();
-                    var lines = rawText.split(/\\n/).filter(function(l) { return l.length > 0; });
+                    var lines = rawText.split(/\\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
                     if (!lines.length) lines = [''];
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
                     var lineH = Math.round(scaledFont * 1.2);
@@ -2099,7 +2099,10 @@ def index():
                     drawX = Math.max(0, Math.min(canvas.width - tw, drawX));
                     drawY = Math.max(0, Math.min(canvas.height - th, drawY));
                     ctx.fillStyle = color;
-                    lines.forEach(function(l, i) { ctx.fillText(l, drawX, drawY + i * lineH); });
+                    lines.forEach(function(l, i) {
+                        var lw = ctx.measureText(l).width;
+                        ctx.fillText(l, drawX + (tw - lw) / 2, drawY + i * lineH);
+                    });
                     var posEl = document.getElementById('pos_display');
                     if (posEl) posEl.textContent = posLabel;
                     // Sync scrollbars to current position
