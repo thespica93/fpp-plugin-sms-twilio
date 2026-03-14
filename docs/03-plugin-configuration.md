@@ -150,11 +150,46 @@ The Filters section has three sub-sections:
 | **Font Size** | Text size in pixels. |
 | **Font Color** | Hex color for the text (e.g., `#FFFFFF` for white). |
 | **Background Color** | Hex color for the text background (e.g., `#000000` for black, or transparent). |
-| **Effect** | Text display effect: **Static Text** (stays fixed) or **Scroll Text** (scrolls across the display). |
+| **Text Position** | How the text is displayed on the overlay. See modes below. |
+| **Scroll Speed** | Pixels per second for scroll modes. Only shown when a scroll mode is selected. |
 | **One Word Only** | If checked, only single-word names are accepted (e.g., "Sarah" but not "Sarah M"). |
 | **Two Words Max** | If checked, names up to two words are accepted. *Mutually exclusive with One Word Only.* |
 
 > 💡 **One Word Only** and **Two Words Max** are mutually exclusive — checking one unchecks the other automatically.
+
+### Text Position Modes
+
+| Mode | Description |
+|------|-------------|
+| **Static** | Text is rendered at a fixed position you set. Drag the canvas to place text anywhere on the overlay. |
+| **Scroll Left to Right** | Text enters from off the left edge and scrolls right across the full width. Set the vertical (Y) position. |
+| **Scroll Right to Left** | Text enters from off the right edge and scrolls left across the full width. Set the vertical (Y) position. |
+| **Scroll Top to Bottom** | Text enters from above the top edge and scrolls down the full height. Set the horizontal (X) position. |
+| **Scroll Bottom to Top** | Text enters from below the bottom edge and scrolls up the full height. Set the horizontal (X) position. |
+
+> 💡 **Pixel-accurate rendering:** All modes use Pillow (PIL) to write text directly into FPP's shared memory at the exact pixel coordinates you set — bypassing the FPP text API and giving you full control over placement. Pillow is installed automatically by `fpp_install.sh`.
+
+### Canvas Position Preview
+
+Below the Text Position dropdown is a live canvas preview of your overlay model at its correct aspect ratio. Use it to visually position the text before displaying it.
+
+| Control | Description |
+|---------|-------------|
+| **Canvas drag** | Click and drag the preview text to move it. The cursor changes to indicate which axes are available. |
+| **Vertical scrollbar** (right of canvas) | Drag or click to set the Y position (up/down). Shown for **Static** and **Left/Right scroll** modes. |
+| **Horizontal scrollbar** (below canvas) | Drag or click to set the X position (left/right). Shown for **Static** and **Top/Bottom scroll** modes. |
+| **Reset to Auto** | Clears your custom position and returns to auto-centered placement. |
+| **Preview as** | Type any name here to preview your full message template on the canvas. Defaults to `Santa`. |
+
+**Which controls are active per mode:**
+
+| Mode | Canvas drag | V scrollbar | H scrollbar |
+|------|-------------|-------------|-------------|
+| Static | X and Y free | Shown | Shown |
+| Left to Right / Right to Left | Y only | Shown | Hidden |
+| Top to Bottom / Bottom to Top | X only | Hidden | Shown |
+
+> 💡 **Position settings persist through firmware and plugin updates.** X/Y coordinates are saved to `/home/fpp/media/config/plugin.fpp-sms-twilio.json`, which is never touched by FPP or plugin updates.
 
 ---
 
