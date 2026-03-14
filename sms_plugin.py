@@ -1684,7 +1684,6 @@ def index():
                             <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
                                    placeholder="#FF0000" style="width: 100px;"
                                    onchange="document.getElementById('text_color').value = this.value">
-                            <span id="color_preview" style="padding: 8px 20px; border-radius: 4px; background: {{ config.get('text_color', '#FF0000') }}; color: white; font-weight: bold;">Preview</span>
                         </div>
                         <script>
                             document.getElementById('text_color').addEventListener('change', function() {
@@ -1746,16 +1745,9 @@ def index():
                                        style="width:calc(100% - 26px); display:block; cursor:ew-resize;"
                                        oninput="window._onHscroll && window._onHscroll(this.value)">
                             </div>
-                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center; flex-wrap:wrap;">
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
                                 <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
                                 <span id="pos_display" style="font-size:12px; color:#666;"></span>
-                                <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
-                                    <label style="font-size:12px; color:#888; white-space:nowrap;" title="Replaces {name} in your message template for the preview">Preview {name} as:</label>
-                                    <input type="text" id="canvas_preview_name" value="Santa" maxlength="20"
-                                           style="width:80px; background:#222; color:#fff; border:1px solid #555; padding:3px 7px; font-size:12px; border-radius:3px;"
-                                           placeholder="e.g. Santa"
-                                           oninput="if(typeof window.renderCanvasPreview==='function') window.renderCanvasPreview()">
-                                </span>
                             </div>
                             <p class="help-text" id="canvas_help">Drag text on the matrix preview to set its position.</p>
                         </div>
