@@ -1619,9 +1619,9 @@ def index():
                         <div id="max_length_section">
                             <label>Max Message Length:</label>
                             <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
-                            <div id="max_length_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:6px; font-size:13px;">
-                                ⚠️ <strong>Max Message Length is disabled</strong> — whitelist is enabled. Names are validated against the approved list, not by length.
-                            </div>
+                        </div>
+                        <div id="max_length_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:6px; font-size:13px;">
+                            ⚠️ <strong>Max Message Length is disabled</strong> — whitelist is enabled. Names are validated against the approved list, not by length.
                         </div>
 
                     </div>
