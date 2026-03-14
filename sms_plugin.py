@@ -1738,7 +1738,7 @@ def index():
                             </div>
                             <div class="line-row">
                                 <span class="line-label">Line 2:</span>
-                                <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" placeholder="e.g. {name}!" style="flex:1;" onblur="saveConfig()">
+                                <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
                                 <span id="line_2_pos" class="pos-badge">auto</span>
                                 <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
                             </div>
