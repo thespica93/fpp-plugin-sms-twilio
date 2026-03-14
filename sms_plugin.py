@@ -1851,7 +1851,7 @@ def index():
                     var fontSize = parseInt(document.getElementById('text_font_size').value) || 48;
                     var color = document.getElementById('text_color').value || '#ff0000';
                     var tmpl = document.getElementById('message_template').value || '{name}';
-                    var text = tmpl.replace('{name}', 'Santa').replace(/\n/g, ' ').trim();
+                    var text = tmpl.replace('{name}', 'Santa').replace(/\\n/g, ' ').trim();
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
                     ctx.font = 'bold ' + scaledFont + 'px sans-serif';
                     ctx.fillStyle = color;
