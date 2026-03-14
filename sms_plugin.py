@@ -1591,7 +1591,7 @@ def index():
                         <input type="hidden" id="text_y" value="{{ config.get('text_y', -1) }}">
 
                         <!-- Canvas: shown for Static mode -->
-                        <div id="canvas_section" style="display:none;">
+                        <div id="canvas_section" style="{{ 'display:none' if config.get('text_position', 'Center') != 'Center' else '' }}">
                             <label>Text Position: <span style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
                             <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
@@ -1602,7 +1602,7 @@ def index():
                         </div>
 
                         <!-- Valign: shown for Scroll modes -->
-                        <div id="valign_section">
+                        <div id="valign_section" style="{{ '' if config.get('text_position', 'Center') != 'Center' else 'display:none' }}">
                             <label>Vertical Alignment:</label>
                             <div class="valign-picker">
                                 <button type="button" class="valign-btn" data-val="top">▲ Top</button>
@@ -1915,7 +1915,7 @@ def index():
             }
 
             // All DOM elements are above this script block — call init functions directly.
-            initCanvasPreview();
+            try { initCanvasPreview(); } catch(e) { console.error('Canvas init error:', e); }
             loadFPPData();
             initRespRows();
             setupAutoSave();
@@ -2026,7 +2026,8 @@ def index():
                     } else {
                         fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
                     }
-                });
+                })
+                .catch(function(e) { console.error('FPP data load failed:', e); });
             }
 
 
