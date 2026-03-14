@@ -933,12 +933,17 @@ def send_to_fpp(name):
                     ty = config.get('text_y', -1)
                     mw = config.get('overlay_model_width', 0)
                     mh = config.get('overlay_model_height', 0)
+                    logging.info(f"🎨 PIL mode: model={overlay_model} size={mw}x{mh} pos=({tx},{ty})")
                     if mw > 0 and mh > 0:
                         shm_rendered = render_to_shm(
                             display_message, overlay_model,
                             mw, mh, tx, ty,
                             text_font, font_size, text_color
                         )
+                    else:
+                        logging.warning(f"⚠️ PIL skipped: model dimensions not saved (mw={mw} mh={mh}). Select/re-select model in config to save dimensions.")
+                elif text_position == 'Center' and not PIL_AVAILABLE:
+                    logging.warning("⚠️ PIL not available — install Pillow for pixel-accurate positioning. Using FPP text API (Center only).")
 
                 if not shm_rendered:
                     text_payload = {
@@ -1997,9 +2002,14 @@ def index():
                             const opt = new Option(name, name, false, name === currentModel);
                             modelSelect.add(opt);
                         });
-                        // Set aspect ratio for the currently selected model
+                        // Set aspect ratio and save dimensions for the currently selected model
                         const cur = data.models.find(m => (typeof m === 'object' ? m.name : m) === currentModel);
-                        if (cur && cur.width && cur.height) updateModelAspect(cur.width, cur.height);
+                        if (cur && cur.width && cur.height) {
+                            updateModelAspect(cur.width, cur.height);
+                            document.getElementById('overlay_model_width').value = cur.width;
+                            document.getElementById('overlay_model_height').value = cur.height;
+                            saveConfig();
+                        }
                     }
 
                     modelSelect.addEventListener('change', function() {
