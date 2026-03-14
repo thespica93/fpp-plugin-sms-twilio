@@ -72,6 +72,14 @@ fi
 chown fpp:fpp "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
 chmod 664 "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
 
+# Allow fpp user to chmod FPP shared memory files for pixel-accurate text rendering.
+# FPP creates /dev/shm/FPP-Model-Data-* as root AFTER postStart.sh runs, so the
+# plugin needs to be able to fix permissions at runtime without a FPPD restart.
+SUDOERS_FILE="/etc/sudoers.d/90-fpp-sms-shm"
+echo "fpp ALL=(ALL) NOPASSWD: /usr/bin/chmod 666 /dev/shm/FPP-Model-Data-*" > "$SUDOERS_FILE"
+chmod 0440 "$SUDOERS_FILE"
+log_and_show "Sudoers rule installed for pixel rendering (shm access)"
+
 # Set permissions on config/logs directories
 chown -R fpp:fpp /home/fpp/media/config /home/fpp/media/logs 2>/dev/null
 touch /home/fpp/media/logs/sms_plugin.log

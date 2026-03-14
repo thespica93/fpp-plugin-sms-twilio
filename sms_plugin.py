@@ -277,8 +277,29 @@ def render_to_shm(display_message, model_name, width, height, x, y, font_name, f
         if len(raw) != expected:
             logging.error(f"render_to_shm: size mismatch ({len(raw)} != {expected})")
             return False
-        with open(shm_path, 'r+b') as f:
-            f.write(raw)
+
+        def _write():
+            with open(shm_path, 'r+b') as f:
+                f.write(raw)
+
+        try:
+            _write()
+        except PermissionError:
+            # FPP creates shm files as root after postStart.sh runs.
+            # Use the sudoers rule added by fpp_install.sh to fix permissions once.
+            logging.warning(f"render_to_shm: permission denied on {shm_path} — running sudo chmod")
+            import subprocess
+            result = subprocess.run(
+                ['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
+                capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                _write()
+            else:
+                logging.error(f"render_to_shm: sudo chmod failed: {result.stderr.decode().strip()}")
+                logging.error("render_to_shm: restart FPPD to apply shm permissions from postStart.sh")
+                return False
+
         logging.info(f"render_to_shm: wrote {len(raw)} bytes to {shm_path} at ({draw_x},{draw_y})")
         return True
     except Exception as e:
