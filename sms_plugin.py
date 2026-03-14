@@ -1616,8 +1616,13 @@ def index():
                         <label>Max Messages Per Phone (0 = unlimited):</label>
                         <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
 
-                        <label>Max Message Length:</label>
-                        <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
+                        <div id="max_length_section">
+                            <label>Max Message Length:</label>
+                            <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
+                            <div id="max_length_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:6px; font-size:13px;">
+                                ⚠️ <strong>Max Message Length is disabled</strong> — whitelist is enabled. Names are validated against the approved list, not by length.
+                            </div>
+                        </div>
 
                     </div>
                 </div>
@@ -1702,6 +1707,12 @@ def index():
                             // Grey out entire blacklist section when whitelist is active
                             section.style.opacity = whitelistOn ? '0.4' : '1';
                             section.style.pointerEvents = whitelistOn ? 'none' : '';
+
+                            // Grey out max length section when whitelist is active
+                            var maxLenSection = document.getElementById('max_length_section');
+                            maxLenSection.style.opacity = whitelistOn ? '0.4' : '1';
+                            maxLenSection.style.pointerEvents = whitelistOn ? 'none' : '';
+                            document.getElementById('max_length_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
 
                             // Warnings
                             document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
@@ -2299,6 +2310,47 @@ def index():
                 });
                 canvas.addEventListener('mouseleave', function() {
                     if (!dragging) { hoveredLine = -1; canvas.style.cursor = 'default'; renderCanvasPreview(); }
+                });
+
+                // Arrow key nudging — moves selected line 1px per press, 10px with Shift
+                // saveConfig is debounced so holding a key doesn't spam the server
+                var _arrowSaveTimer = null;
+                document.addEventListener('keydown', function(e) {
+                    if (selectedLine < 0) return;
+                    var arrows = {ArrowLeft:1, ArrowRight:1, ArrowUp:1, ArrowDown:1};
+                    if (!arrows[e.key]) return;
+                    e.preventDefault();
+                    var pos  = document.getElementById('text_position').value;
+                    var mw2  = window._canvasModelW || 640;
+                    var mh2  = window._canvasModelH || 360;
+                    var lp   = window._linePositions[selectedLine];
+                    var step = e.shiftKey ? 10 : 1;
+                    // Resolve auto (-1) positions from the rendered rect so the
+                    // first keypress anchors from the visual position, not from 0
+                    var curX = lp.x, curY = lp.y;
+                    var r = lineRects[selectedLine];
+                    if (curX < 0 && r) curX = Math.round(r.x * mw2 / canvas.width);
+                    if (curY < 0 && r) curY = Math.round(r.y * mh2 / canvas.height);
+                    if (curX < 0) curX = Math.round(mw2 / 2);
+                    if (curY < 0) curY = Math.round(mh2 / 2);
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
+                        if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
+                        window._linePositions[selectedLine] = {x: lp.x, y: curY};
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
+                        if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
+                        window._linePositions[selectedLine] = {x: curX, y: lp.y};
+                    } else {
+                        if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
+                        if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
+                        if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
+                        if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
+                        window._linePositions[selectedLine] = {x: curX, y: curY};
+                    }
+                    renderCanvasPreview();
+                    clearTimeout(_arrowSaveTimer);
+                    _arrowSaveTimer = setTimeout(saveConfig, 300);
                 });
 
                 window.resetLine = function(i) {
@@ -3682,6 +3734,22 @@ def view_messages():
                 document.getElementById('queue-box-content').innerHTML = html;
             }
 
+            function fmtTime(ts) {
+                if (!ts) return '';
+                try {
+                    var d = new Date(ts);
+                    var mo = String(d.getMonth() + 1).padStart(2, '0');
+                    var dy = String(d.getDate()).padStart(2, '0');
+                    var yr = d.getFullYear();
+                    var hr = d.getHours();
+                    var mn = String(d.getMinutes()).padStart(2, '0');
+                    var sc = String(d.getSeconds()).padStart(2, '0');
+                    var ampm = hr >= 12 ? 'PM' : 'AM';
+                    hr = hr % 12 || 12;
+                    return mo + '-' + dy + '-' + yr + ' ' + hr + ':' + mn + ':' + sc + ' ' + ampm;
+                } catch(e) { return ts; }
+            }
+
             function renderMessages(messages) {
                 var json = JSON.stringify(messages);
                 if (json === prevMessagesJson) return;
@@ -3701,7 +3769,7 @@ def view_messages():
                         : '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
                           '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
                     return '<tr class="' + esc(msg.status) + '">' +
-                        '<td>' + esc(msg.timestamp) + '</td>' +
+                        '<td>' + fmtTime(msg.timestamp) + '</td>' +
                         '<td>' + esc(msg.phone) + '</td>' +
                         '<td>' + esc(msg.message) + '</td>' +
                         '<td>' + esc(msg.extracted_name) + '</td>' +
