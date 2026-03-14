@@ -34,6 +34,8 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+_scroll_thread = None   # background PIL scroll animation thread
+
 # Configuration
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
@@ -304,6 +306,111 @@ def render_to_shm(display_message, model_name, width, height, x, y, font_name, f
         return True
     except Exception as e:
         logging.error(f"render_to_shm failed: {e}")
+        return False
+
+
+def scroll_via_shm(display_message, model_name, width, height, scroll_dir, x, y,
+                   font_name, font_size, color_hex, scroll_speed, duration):
+    """Animate scrolling text in FPP shared memory at a pixel-accurate position.
+    Runs in a background thread for `duration` seconds then stops.
+    scroll_dir: 'L2R'|'R2L' — y controls vertical position (x ignored)
+                'T2B'|'B2T' — x controls horizontal position (y ignored)
+    Returns True if the thread started, False on error."""
+    global _scroll_thread
+    if not PIL_AVAILABLE or width <= 0 or height <= 0:
+        return False
+    try:
+        hex_str = color_hex.lstrip('#')
+        color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+        font = _find_font(font_name, font_size)
+
+        # Render text once to measure and reuse
+        probe = Image.new('RGB', (1, 1))
+        pdraw = ImageDraw.Draw(probe)
+        if font:
+            bbox = pdraw.textbbox((0, 0), display_message, font=font)
+            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        else:
+            text_w = len(display_message) * 6
+            text_h = font_size
+        text_w = max(1, text_w)
+        text_h = max(1, text_h)
+
+        text_img = Image.new('RGB', (text_w, text_h), (0, 0, 0))
+        ImageDraw.Draw(text_img).text((0, 0), display_message, fill=color, font=font)
+
+        shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
+        fps = 30
+        pixels_per_sec = max(10, scroll_speed * 20)
+        step_px = max(1.0, pixels_per_sec / fps)
+
+        # Ensure write access (sudoers rule installed by fpp_install.sh)
+        if os.path.exists(shm_path) and not os.access(shm_path, os.W_OK):
+            import subprocess
+            subprocess.run(['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
+                           capture_output=True, timeout=5)
+
+        logging.info(f"🎬 scroll_via_shm: {scroll_dir} model={model_name} "
+                     f"size={width}x{height} text={text_w}x{text_h} "
+                     f"x={x} y={y} speed={pixels_per_sec}px/s duration={duration}s")
+
+        def _animate():
+            import time as _time
+            start = _time.time()
+
+            if scroll_dir in ('L2R', 'R2L'):
+                draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
+                pos = float(width) if scroll_dir == 'R2L' else float(-text_w)
+                direction = -1.0 if scroll_dir == 'R2L' else 1.0
+                loop_start = float(width) if scroll_dir == 'R2L' else float(-text_w)
+                loop_end   = float(-text_w) if scroll_dir == 'R2L' else float(width)
+
+                while _time.time() - start < duration:
+                    frame = Image.new('RGB', (width, height), (0, 0, 0))
+                    ix = int(pos)
+                    src_x = max(0, -ix);  dst_x = max(0, ix)
+                    vis_w = min(text_w - src_x, width - dst_x)
+                    if vis_w > 0:
+                        frame.paste(text_img.crop((src_x, 0, src_x + vis_w, text_h)), (dst_x, draw_y))
+                    try:
+                        with open(shm_path, 'r+b') as f:
+                            f.write(frame.tobytes())
+                    except Exception:
+                        pass
+                    pos += direction * step_px
+                    if (direction < 0 and pos < loop_end) or (direction > 0 and pos > loop_end):
+                        pos = loop_start
+                    _time.sleep(1.0 / fps)
+
+            elif scroll_dir in ('T2B', 'B2T'):
+                draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
+                pos = float(height) if scroll_dir == 'B2T' else float(-text_h)
+                direction = -1.0 if scroll_dir == 'B2T' else 1.0
+                loop_start = float(height) if scroll_dir == 'B2T' else float(-text_h)
+                loop_end   = float(-text_h) if scroll_dir == 'B2T' else float(height)
+
+                while _time.time() - start < duration:
+                    frame = Image.new('RGB', (width, height), (0, 0, 0))
+                    iy = int(pos)
+                    src_y = max(0, -iy);  dst_y = max(0, iy)
+                    vis_h = min(text_h - src_y, height - dst_y)
+                    if vis_h > 0:
+                        frame.paste(text_img.crop((0, src_y, text_w, src_y + vis_h)), (draw_x, dst_y))
+                    try:
+                        with open(shm_path, 'r+b') as f:
+                            f.write(frame.tobytes())
+                    except Exception:
+                        pass
+                    pos += direction * step_px
+                    if (direction < 0 and pos < loop_end) or (direction > 0 and pos > loop_end):
+                        pos = loop_start
+                    _time.sleep(1.0 / fps)
+
+        _scroll_thread = threading.Thread(target=_animate, daemon=True)
+        _scroll_thread.start()
+        return True
+    except Exception as e:
+        logging.error(f"scroll_via_shm failed: {e}")
         return False
 
 
@@ -946,27 +1053,41 @@ def send_to_fpp(name):
                 # 3. Enable overlay (State 3 Transparent RGB) — activates cleanly
                 requests.put(state_url, json={"State": 0}, timeout=3)
 
-                # PIL shm rendering for static (Center) mode — gives pixel-accurate x/y positioning.
-                # Scroll modes use the FPP text API (PIL can't animate scrolling).
+                mw = config.get('overlay_model_width', 0)
+                mh = config.get('overlay_model_height', 0)
+                tx = config.get('text_x', -1)
+                ty = config.get('text_y', -1)
+                logging.info(f"📐 Overlay: model={overlay_model} overlay_size={mw}x{mh} "
+                             f"canvas_pos=({tx},{ty}) mode={text_position} PIL={PIL_AVAILABLE}")
+
                 shm_rendered = False
-                if text_position == 'Center' and PIL_AVAILABLE:
-                    tx = config.get('text_x', -1)
-                    ty = config.get('text_y', -1)
-                    mw = config.get('overlay_model_width', 0)
-                    mh = config.get('overlay_model_height', 0)
-                    logging.info(f"🎨 PIL mode: model={overlay_model} size={mw}x{mh} pos=({tx},{ty})")
-                    if mw > 0 and mh > 0:
+                scroll_started = False
+
+                if PIL_AVAILABLE and mw > 0 and mh > 0:
+                    if text_position == 'Center':
                         shm_rendered = render_to_shm(
                             display_message, overlay_model,
                             mw, mh, tx, ty,
                             text_font, font_size, text_color
                         )
-                    else:
-                        logging.warning(f"⚠️ PIL skipped: model dimensions not saved (mw={mw} mh={mh}). Select/re-select model in config to save dimensions.")
-                elif text_position == 'Center' and not PIL_AVAILABLE:
-                    logging.warning("⚠️ PIL not available — install Pillow for pixel-accurate positioning. Using FPP text API (Center only).")
+                    elif text_position in ('L2R', 'R2L', 'T2B', 'B2T'):
+                        duration = config.get('display_duration', 30)
+                        scroll_started = scroll_via_shm(
+                            display_message, overlay_model,
+                            mw, mh, text_position, tx, ty,
+                            text_font, font_size, text_color,
+                            scroll_speed, duration
+                        )
+                        if scroll_started:
+                            time.sleep(0.05)  # let first frame land before enabling overlay
+                elif mw == 0 or mh == 0:
+                    logging.warning(f"⚠️ PIL skipped: overlay dimensions not saved ({mw}x{mh}). "
+                                    f"Re-select the model in config to save dimensions.")
+                elif not PIL_AVAILABLE:
+                    logging.warning("⚠️ Pillow not installed — using FPP text API (no X/Y positioning). "
+                                    "Run plugin install to add Pillow.")
 
-                if not shm_rendered:
+                if not shm_rendered and not scroll_started:
                     text_payload = {
                         "Message": display_message,
                         "Color": text_color,
@@ -978,18 +1099,12 @@ def send_to_fpp(name):
                         "AutoEnable": False
                     }
                     response = requests.put(text_url, json=text_payload, timeout=10)
-                    logging.info(f"📡 PUT /api/overlays/model/{overlay_model}/text")
-                    logging.info(f"   Payload: {text_payload}")
-                    logging.info(f"   Response: {response.status_code} - {response.text}")
-                    if response.status_code == 200:
-                        logging.info(f"✅ Text sent successfully")
-                    else:
-                        logging.error(f"❌ TEXT API FAILED! Status: {response.status_code}")
+                    logging.info(f"📡 FPP text API fallback: {response.status_code}")
                 else:
-                    logging.info(f"✅ PIL shm render succeeded — skipping text API")
+                    logging.info(f"✅ PIL {'scroll' if scroll_started else 'static'} render active")
 
                 state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
-                logging.info(f"   Set state=3 (Transparent RGB): {state_resp.status_code} - {state_resp.text}")
+                logging.info(f"   Overlay state=3: {state_resp.status_code}")
 
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
@@ -1616,26 +1731,15 @@ def index():
                         <input type="hidden" id="text_x" value="{{ config.get('text_x', -1) }}">
                         <input type="hidden" id="text_y" value="{{ config.get('text_y', -1) }}">
 
-                        <!-- Canvas: shown for Static mode -->
-                        <div id="canvas_section" style="{{ 'display:none' if config.get('text_position', 'Center') != 'Center' else '' }}">
-                            <label>Text Position: <span style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
+                        <!-- Canvas: shown for ALL modes. Axis locked based on scroll direction. -->
+                        <div id="canvas_section">
+                            <label>Text Position: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
                             <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
-                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Center</button>
+                                <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
                                 <span id="pos_display" style="font-size:12px; color:#666;"></span>
                             </div>
-                            <p class="help-text">🖱️ Drag text on the matrix preview to set its position. Reset returns to auto-center.</p>
-                        </div>
-
-                        <!-- Valign: shown for Scroll modes -->
-                        <div id="valign_section" style="{{ '' if config.get('text_position', 'Center') != 'Center' else 'display:none' }}">
-                            <label>Vertical Alignment:</label>
-                            <div class="valign-picker">
-                                <button type="button" class="valign-btn" data-val="top">▲ Top</button>
-                                <button type="button" class="valign-btn" data-val="center">● Center</button>
-                                <button type="button" class="valign-btn" data-val="bottom">▼ Bottom</button>
-                            </div>
-                            <p class="help-text">↕ Shifts text vertically on the matrix</p>
+                            <p class="help-text" id="canvas_help">Drag text on the matrix preview to set its position.</p>
                         </div>
                     </div>
                 </div>
@@ -1820,10 +1924,27 @@ def index():
                 var isStatic = (pos === 'Center');
                 var row = document.getElementById('scroll_speed_row');
                 if (row) row.style.display = isStatic ? 'none' : '';
-                var cs = document.getElementById('canvas_section');
-                if (cs) cs.style.display = isStatic ? '' : 'none';
-                var vs = document.getElementById('valign_section');
-                if (vs) vs.style.display = isStatic ? 'none' : '';
+
+                // Update canvas cursor and hint text based on mode
+                var c = document.getElementById('matrix_canvas');
+                var hint = document.getElementById('canvas_hint');
+                var help = document.getElementById('canvas_help');
+                if (c) {
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        c.style.cursor = 'ns-resize';
+                        if (hint) hint.textContent = 'drag up/down to set vertical position';
+                        if (help) help.textContent = 'Text scrolls the full width at the height you set. Drag vertically to reposition.';
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        c.style.cursor = 'ew-resize';
+                        if (hint) hint.textContent = 'drag left/right to set horizontal position';
+                        if (help) help.textContent = 'Text scrolls the full height at the column you set. Drag horizontally to reposition.';
+                    } else {
+                        c.style.cursor = 'crosshair';
+                        if (hint) hint.textContent = 'click or drag to reposition';
+                        if (help) help.textContent = 'Drag text on the matrix preview to set its position.';
+                    }
+                }
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
             }
 
             function updateModelAspect(width, height) {
@@ -1872,6 +1993,7 @@ def index():
                 function renderCanvasPreview() {
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
+                    var pos = document.getElementById('text_position').value;
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                     var fontSize = parseInt(document.getElementById('text_font_size').value) || 48;
@@ -1880,22 +2002,76 @@ def index():
                     var text = tmpl.replace('{name}', 'Santa').replace(/\\n/g, ' ').trim();
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
                     ctx.font = 'bold ' + scaledFont + 'px sans-serif';
-                    ctx.fillStyle = color;
                     ctx.textBaseline = 'top';
-                    var drawX, drawY;
-                    if (textX < 0 || textY < 0) {
-                        var m = ctx.measureText(text);
-                        drawX = (canvas.width - m.width) / 2;
-                        drawY = (canvas.height - scaledFont) / 2;
+                    var m = ctx.measureText(text);
+                    var tw = m.width, th = scaledFont;
+                    var drawX, drawY, posLabel;
+
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        // Only Y is set by user; preview text centered horizontally
+                        drawX = (canvas.width - tw) / 2;
+                        drawY = (textY < 0) ? (canvas.height - th) / 2 : textY * canvas.height / mh;
+                        // Dashed horizontal guide at text midline
+                        var gy = drawY + th / 2;
+                        ctx.save();
+                        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                        ctx.setLineDash([4, 4]);
+                        ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(canvas.width, gy); ctx.stroke();
+                        ctx.restore();
+                        // Scroll direction hint
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                        ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
+                        ctx.textBaseline = 'middle';
+                        var arrow = pos === 'L2R' ? '→ scrolls →' : '← scrolls ←';
+                        ctx.fillText(arrow, (canvas.width - ctx.measureText(arrow).width) / 2, drawY - th * 0.6);
+                        ctx.restore();
+                        ctx.font = 'bold ' + scaledFont + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        posLabel = textY < 0 ? 'Vertical: center (auto)' : 'Vertical Y=' + textY;
+
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        // Only X is set by user; preview text centered vertically
+                        drawX = (textX < 0) ? (canvas.width - tw) / 2 : textX * canvas.width / mw;
+                        drawY = (canvas.height - th) / 2;
+                        // Dashed vertical guide at text midline
+                        var gx = drawX + tw / 2;
+                        ctx.save();
+                        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                        ctx.setLineDash([4, 4]);
+                        ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, canvas.height); ctx.stroke();
+                        ctx.restore();
+                        // Scroll direction arrows
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                        ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        var sarrow = pos === 'T2B' ? '↓' : '↑';
+                        ctx.fillText(sarrow, gx - ctx.measureText(sarrow).width / 2, pos === 'T2B' ? canvas.height - scaledFont : 4);
+                        ctx.restore();
+                        ctx.font = 'bold ' + scaledFont + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        posLabel = textX < 0 ? 'Horizontal: center (auto)' : 'Horizontal X=' + textX;
+
                     } else {
-                        drawX = textX * canvas.width / mw;
-                        drawY = textY * canvas.height / mh;
+                        // Center (static) — both axes free
+                        if (textX < 0 || textY < 0) {
+                            drawX = (canvas.width - tw) / 2;
+                            drawY = (canvas.height - th) / 2;
+                            posLabel = 'Position: center (auto)';
+                        } else {
+                            drawX = textX * canvas.width / mw;
+                            drawY = textY * canvas.height / mh;
+                            posLabel = 'X:' + textX + ' Y:' + textY;
+                        }
                     }
+
+                    ctx.fillStyle = color;
                     ctx.fillText(text, drawX, drawY);
                     var posEl = document.getElementById('pos_display');
-                    if (posEl) posEl.textContent = (textX < 0 || textY < 0)
-                        ? 'Position: Center (auto)'
-                        : 'X:' + textX + ' Y:' + textY;
+                    if (posEl) posEl.textContent = posLabel;
                 }
                 window.renderCanvasPreview = renderCanvasPreview;
 
@@ -1909,27 +2085,45 @@ def index():
                     };
                 }
 
+                function applyDrag(p) {
+                    var pos = document.getElementById('text_position').value;
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        textY = p.y;
+                        document.getElementById('text_y').value = textY;
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        textX = p.x;
+                        document.getElementById('text_x').value = textX;
+                    } else {
+                        textX = p.x; textY = p.y;
+                        document.getElementById('text_x').value = textX;
+                        document.getElementById('text_y').value = textY;
+                    }
+                }
+
                 canvas.addEventListener('mousedown', function(e) {
                     dragging = true;
-                    var p = posFromEvent(e); textX = p.x; textY = p.y;
-                    document.getElementById('text_x').value = textX;
-                    document.getElementById('text_y').value = textY;
+                    applyDrag(posFromEvent(e));
                     renderCanvasPreview(); saveConfig();
                 });
                 canvas.addEventListener('mousemove', function(e) {
                     if (!dragging) return;
-                    var p = posFromEvent(e); textX = p.x; textY = p.y;
-                    document.getElementById('text_x').value = textX;
-                    document.getElementById('text_y').value = textY;
+                    applyDrag(posFromEvent(e));
                     renderCanvasPreview();
                 });
                 canvas.addEventListener('mouseup',    function() { dragging = false; saveConfig(); });
                 canvas.addEventListener('mouseleave', function() { dragging = false; });
 
                 window.resetTextPosition = function() {
-                    textX = -1; textY = -1;
-                    document.getElementById('text_x').value = -1;
-                    document.getElementById('text_y').value = -1;
+                    var pos = document.getElementById('text_position').value;
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        textY = -1; document.getElementById('text_y').value = -1;
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        textX = -1; document.getElementById('text_x').value = -1;
+                    } else {
+                        textX = -1; textY = -1;
+                        document.getElementById('text_x').value = -1;
+                        document.getElementById('text_y').value = -1;
+                    }
                     renderCanvasPreview(); saveConfig();
                 };
 
