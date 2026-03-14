@@ -1734,10 +1734,26 @@ def index():
                         <!-- Canvas: shown for ALL modes. Axis locked based on scroll direction. -->
                         <div id="canvas_section">
                             <label>Text Position: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click or drag to reposition</span></label>
-                            <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
-                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                            <div style="display:flex; gap:4px;">
+                                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:4px;">
+                                    <canvas id="matrix_canvas" style="display:block; width:100%; background:#000; border:2px solid #555; border-radius:4px; cursor:crosshair;"></canvas>
+                                    <input type="range" id="hscroll" min="0" max="640" step="1" value="320"
+                                           style="width:100%; cursor:ew-resize; display:block;"
+                                           oninput="window._onHscroll && window._onHscroll(this.value)">
+                                </div>
+                                <input type="range" id="vscroll" orient="vertical" min="0" max="360" step="1" value="180"
+                                       style="writing-mode:vertical-lr; flex-shrink:0; width:200px; height:20px; padding:0; cursor:ns-resize;"
+                                       oninput="window._onVscroll && window._onVscroll(this.value)">
+                            </div>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center; flex-wrap:wrap;">
                                 <button type="button" onclick="resetTextPosition()" style="background:#555; padding:6px 12px; font-size:12px;">Reset to Auto</button>
                                 <span id="pos_display" style="font-size:12px; color:#666;"></span>
+                                <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+                                    <label style="font-size:12px; color:#888; white-space:nowrap;">Preview as:</label>
+                                    <input type="text" id="canvas_preview_name" value="Santa" maxlength="20"
+                                           style="width:80px; background:#222; color:#fff; border:1px solid #555; padding:3px 7px; font-size:12px; border-radius:3px;"
+                                           oninput="if(typeof window.renderCanvasPreview==='function') window.renderCanvasPreview()">
+                                </span>
                             </div>
                             <p class="help-text" id="canvas_help">Drag text on the matrix preview to set its position.</p>
                         </div>
@@ -1925,23 +1941,31 @@ def index():
                 var row = document.getElementById('scroll_speed_row');
                 if (row) row.style.display = isStatic ? 'none' : '';
 
-                // Update canvas cursor and hint text based on mode
+                // Update canvas cursor, hint text, and scrollbar visibility based on mode
                 var c = document.getElementById('matrix_canvas');
                 var hint = document.getElementById('canvas_hint');
                 var help = document.getElementById('canvas_help');
+                var vs = document.getElementById('vscroll');
+                var hs = document.getElementById('hscroll');
                 if (c) {
                     if (pos === 'L2R' || pos === 'R2L') {
                         c.style.cursor = 'ns-resize';
                         if (hint) hint.textContent = 'drag up/down to set vertical position';
                         if (help) help.textContent = 'Text scrolls the full width at the height you set. Drag vertically to reposition.';
+                        if (vs) vs.style.visibility = 'visible';
+                        if (hs) hs.style.visibility = 'hidden';
                     } else if (pos === 'T2B' || pos === 'B2T') {
                         c.style.cursor = 'ew-resize';
                         if (hint) hint.textContent = 'drag left/right to set horizontal position';
                         if (help) help.textContent = 'Text scrolls the full height at the column you set. Drag horizontally to reposition.';
+                        if (vs) vs.style.visibility = 'hidden';
+                        if (hs) hs.style.visibility = 'visible';
                     } else {
                         c.style.cursor = 'crosshair';
                         if (hint) hint.textContent = 'click or drag to reposition';
                         if (help) help.textContent = 'Drag text on the matrix preview to set its position.';
+                        if (vs) vs.style.visibility = 'visible';
+                        if (hs) hs.style.visibility = 'visible';
                     }
                 }
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
@@ -1958,6 +1982,10 @@ def index():
                     window._canvasModelH = height;
                     var c = document.getElementById('matrix_canvas');
                     if (c) { c.width = 640; c.height = Math.round(640 * height / width); }
+                    var vs = document.getElementById('vscroll');
+                    var hs = document.getElementById('hscroll');
+                    if (vs) vs.max = height;
+                    if (hs) hs.max = width;
                     if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 }
             }
@@ -1999,7 +2027,8 @@ def index():
                     var fontSize = parseInt(document.getElementById('text_font_size').value) || 48;
                     var color = document.getElementById('text_color').value || '#ff0000';
                     var tmpl = document.getElementById('message_template').value || '{name}';
-                    var text = tmpl.replace('{name}', 'Santa').replace(/\\n/g, ' ').trim();
+                    var previewName = (document.getElementById('canvas_preview_name') || {}).value || 'Santa';
+                    var text = tmpl.replace('{name}', previewName).replace(/\\n/g, ' ').trim();
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
                     ctx.font = 'bold ' + scaledFont + 'px sans-serif';
                     ctx.textBaseline = 'top';
@@ -2072,6 +2101,11 @@ def index():
                     ctx.fillText(text, drawX, drawY);
                     var posEl = document.getElementById('pos_display');
                     if (posEl) posEl.textContent = posLabel;
+                    // Sync scrollbars to current position
+                    var hs = document.getElementById('hscroll');
+                    var vs = document.getElementById('vscroll');
+                    if (hs) { hs.max = mw; hs.value = textX < 0 ? Math.round(mw / 2) : textX; }
+                    if (vs) { vs.max = mh; vs.value = textY < 0 ? Math.round(mh / 2) : textY; }
                 }
                 window.renderCanvasPreview = renderCanvasPreview;
 
@@ -2087,16 +2121,22 @@ def index():
 
                 function applyDrag(p) {
                     var pos = document.getElementById('text_position').value;
+                    var vs = document.getElementById('vscroll');
+                    var hs = document.getElementById('hscroll');
                     if (pos === 'L2R' || pos === 'R2L') {
                         textY = p.y;
                         document.getElementById('text_y').value = textY;
+                        if (vs) vs.value = textY;
                     } else if (pos === 'T2B' || pos === 'B2T') {
                         textX = p.x;
                         document.getElementById('text_x').value = textX;
+                        if (hs) hs.value = textX;
                     } else {
                         textX = p.x; textY = p.y;
                         document.getElementById('text_x').value = textX;
                         document.getElementById('text_y').value = textY;
+                        if (hs) hs.value = textX;
+                        if (vs) vs.value = textY;
                     }
                 }
 
@@ -2115,14 +2155,22 @@ def index():
 
                 window.resetTextPosition = function() {
                     var pos = document.getElementById('text_position').value;
+                    var mw2 = window._canvasModelW || 640;
+                    var mh2 = window._canvasModelH || 360;
+                    var vs = document.getElementById('vscroll');
+                    var hs = document.getElementById('hscroll');
                     if (pos === 'L2R' || pos === 'R2L') {
                         textY = -1; document.getElementById('text_y').value = -1;
+                        if (vs) vs.value = Math.round(mh2 / 2);
                     } else if (pos === 'T2B' || pos === 'B2T') {
                         textX = -1; document.getElementById('text_x').value = -1;
+                        if (hs) hs.value = Math.round(mw2 / 2);
                     } else {
                         textX = -1; textY = -1;
                         document.getElementById('text_x').value = -1;
                         document.getElementById('text_y').value = -1;
+                        if (vs) vs.value = Math.round(mh2 / 2);
+                        if (hs) hs.value = Math.round(mw2 / 2);
                     }
                     renderCanvasPreview(); saveConfig();
                 };
@@ -2130,6 +2178,27 @@ def index():
                 document.getElementById('message_template').addEventListener('input',  renderCanvasPreview);
                 document.getElementById('text_color').addEventListener('change',        renderCanvasPreview);
                 document.getElementById('text_font_size').addEventListener('change',    renderCanvasPreview);
+
+                // Scrollbar input handlers
+                window._onVscroll = function(val) {
+                    textY = parseInt(val);
+                    document.getElementById('text_y').value = textY;
+                    renderCanvasPreview(); saveConfig();
+                };
+                window._onHscroll = function(val) {
+                    textX = parseInt(val);
+                    document.getElementById('text_x').value = textX;
+                    renderCanvasPreview(); saveConfig();
+                };
+
+                // Keep vertical scrollbar height in sync with canvas rendered height
+                if (window.ResizeObserver) {
+                    new ResizeObserver(function(entries) {
+                        var h = Math.round(entries[0].contentRect.height);
+                        var v = document.getElementById('vscroll');
+                        if (v && h > 0) v.style.width = h + 'px';
+                    }).observe(canvas);
+                }
 
                 renderCanvasPreview();
             }
