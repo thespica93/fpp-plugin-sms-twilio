@@ -315,12 +315,18 @@ def render_to_shm(line_items, model_name, width, height, font_name, font_size, c
         return False
 
 
-def scroll_via_shm(display_message, model_name, width, height, scroll_dir, x, y,
+def scroll_via_shm(line_items, model_name, width, height, scroll_dir,
                    font_name, font_size, color_hex, scroll_speed, duration):
-    """Animate scrolling text in FPP shared memory at a pixel-accurate position.
+    """Animate per-line scrolling text in FPP shared memory.
+    All lines share the same scroll position so they move together.
     Runs in a background thread for `duration` seconds then stops.
-    scroll_dir: 'L2R'|'R2L' — y controls vertical position (x ignored)
-                'T2B'|'B2T' — x controls horizontal position (y ignored)
+
+    scroll_dir 'L2R'|'R2L': line_items = [(text, y_pos), ...]
+        Each line scrolls horizontally at its own fixed y_pos.
+        y_pos < 0 means auto-center that line vertically.
+    scroll_dir 'T2B'|'B2T': line_items = [(text, x_pos), ...]
+        Each line scrolls vertically at its own fixed x_pos.
+        x_pos < 0 means auto-center that line horizontally.
     Returns True if the thread started, False on error."""
     global _scroll_thread
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
@@ -330,57 +336,68 @@ def scroll_via_shm(display_message, model_name, width, height, scroll_dir, x, y,
         color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
         font = _find_font(font_name, font_size)
 
-        # Render text once to measure and reuse
+        # Pre-render each line to its own image strip
         probe = Image.new('RGB', (1, 1))
         pdraw = ImageDraw.Draw(probe)
-        if font:
-            bbox = pdraw.textbbox((0, 0), display_message, font=font)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        else:
-            text_w = len(display_message) * 6
-            text_h = font_size
-        text_w = max(1, text_w)
-        text_h = max(1, text_h)
+        strips = []
+        for (text, fixed_pos) in line_items:
+            if not text:
+                continue
+            if font:
+                bbox = pdraw.textbbox((0, 0), text, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            else:
+                tw, th = len(text) * 6, font_size
+            tw, th = max(1, tw), max(1, th)
+            strip = Image.new('RGB', (tw, th), (0, 0, 0))
+            ImageDraw.Draw(strip).text((0, 0), text, fill=color, font=font)
+            strips.append((strip, tw, th, fixed_pos))
 
-        text_img = Image.new('RGB', (text_w, text_h), (0, 0, 0))
-        ImageDraw.Draw(text_img).text((0, 0), display_message, fill=color, font=font)
+        if not strips:
+            return False
+
+        max_tw = max(s[1] for s in strips)
+        max_th = max(s[2] for s in strips)
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         fps = 30
         pixels_per_sec = max(10, scroll_speed * 20)
         step_px = max(1.0, pixels_per_sec / fps)
 
-        # Ensure write access (sudoers rule installed by fpp_install.sh)
         if os.path.exists(shm_path) and not os.access(shm_path, os.W_OK):
             import subprocess
             subprocess.run(['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
                            capture_output=True, timeout=5)
 
         logging.info(f"🎬 scroll_via_shm: {scroll_dir} model={model_name} "
-                     f"size={width}x{height} text={text_w}x{text_h} "
-                     f"x={x} y={y} speed={pixels_per_sec}px/s duration={duration}s")
+                     f"size={width}x{height} lines={len(strips)} "
+                     f"speed={pixels_per_sec}px/s duration={duration}s")
 
         def _animate():
             import time as _time
             start = _time.time()
 
             if scroll_dir in ('L2R', 'R2L'):
-                draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
-                pos = float(width) if scroll_dir == 'R2L' else float(-text_w)
+                # Resolve y positions (auto-center vertically when < 0)
+                resolved = []
+                for (strip, tw, th, yp) in strips:
+                    dy = max(0, (height - th) // 2) if yp < 0 else max(0, min(height - th, yp))
+                    resolved.append((strip, tw, th, dy))
+                pos = float(width) if scroll_dir == 'R2L' else float(-max_tw)
                 direction = -1.0 if scroll_dir == 'R2L' else 1.0
-                loop_start = float(width) if scroll_dir == 'R2L' else float(-text_w)
-                loop_end   = float(-text_w) if scroll_dir == 'R2L' else float(width)
+                loop_start = float(width) if scroll_dir == 'R2L' else float(-max_tw)
+                loop_end   = float(-max_tw) if scroll_dir == 'R2L' else float(width)
 
                 while _time.time() - start < duration:
                     frame = Image.new('RGB', (width, height), (0, 0, 0))
                     ix = int(pos)
-                    src_x = max(0, -ix);  dst_x = max(0, ix)
-                    vis_w = min(text_w - src_x, width - dst_x)
-                    if vis_w > 0:
-                        frame.paste(text_img.crop((src_x, 0, src_x + vis_w, text_h)), (dst_x, draw_y))
+                    for (strip, tw, th, dy) in resolved:
+                        src_x = max(0, -ix);  dst_x = max(0, ix)
+                        vis_w = min(tw - src_x, width - dst_x)
+                        if vis_w > 0:
+                            frame.paste(strip.crop((src_x, 0, src_x + vis_w, th)), (dst_x, dy))
                     try:
-                        with open(shm_path, 'r+b') as f:
-                            f.write(frame.tobytes())
+                        with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
                     except Exception:
                         pass
                     pos += direction * step_px
@@ -389,22 +406,26 @@ def scroll_via_shm(display_message, model_name, width, height, scroll_dir, x, y,
                     _time.sleep(1.0 / fps)
 
             elif scroll_dir in ('T2B', 'B2T'):
-                draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
-                pos = float(height) if scroll_dir == 'B2T' else float(-text_h)
+                # Resolve x positions (auto-center horizontally when < 0)
+                resolved = []
+                for (strip, tw, th, xp) in strips:
+                    dx = max(0, (width - tw) // 2) if xp < 0 else max(0, min(width - tw, xp))
+                    resolved.append((strip, tw, th, dx))
+                pos = float(height) if scroll_dir == 'B2T' else float(-max_th)
                 direction = -1.0 if scroll_dir == 'B2T' else 1.0
-                loop_start = float(height) if scroll_dir == 'B2T' else float(-text_h)
-                loop_end   = float(-text_h) if scroll_dir == 'B2T' else float(height)
+                loop_start = float(height) if scroll_dir == 'B2T' else float(-max_th)
+                loop_end   = float(-max_th) if scroll_dir == 'B2T' else float(height)
 
                 while _time.time() - start < duration:
                     frame = Image.new('RGB', (width, height), (0, 0, 0))
                     iy = int(pos)
-                    src_y = max(0, -iy);  dst_y = max(0, iy)
-                    vis_h = min(text_h - src_y, height - dst_y)
-                    if vis_h > 0:
-                        frame.paste(text_img.crop((0, src_y, text_w, src_y + vis_h)), (draw_x, dst_y))
+                    for (strip, tw, th, dx) in resolved:
+                        src_y = max(0, -iy);  dst_y = max(0, iy)
+                        vis_h = min(th - src_y, height - dst_y)
+                        if vis_h > 0:
+                            frame.paste(strip.crop((0, src_y, tw, src_y + vis_h)), (dx, dst_y))
                     try:
-                        with open(shm_path, 'r+b') as f:
-                            f.write(frame.tobytes())
+                        with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
                     except Exception:
                         pass
                     pos += direction * step_px
@@ -967,17 +988,38 @@ def send_to_fpp(name):
         # Build per-line rendered items from message_lines config
         message_lines = config.get('message_lines', ['Merry Christmas', '{name}!', '', ''])
         line_positions_cfg = config.get('line_positions', [])
-        line_items = []   # [(rendered_text, x, y), ...] for PIL static rendering
-        all_rendered = [] # rendered non-empty lines for scroll/FPP-API fallback
+        font_size_cfg  = config.get('text_font_size', 48)
+        line_h_px      = int(font_size_cfg * 1.2)  # approximate line height in model pixels
+
+        # Collect non-empty rendered lines + their saved positions
+        rendered_lines = []  # [(rendered_text, px, py), ...]
         for i, tmpl_line in enumerate(message_lines):
             if not tmpl_line.strip():
                 continue
             rendered = tmpl_line.replace('{name}', name)
             pos = line_positions_cfg[i] if i < len(line_positions_cfg) else {'x': -1, 'y': -1}
-            line_items.append((rendered, pos.get('x', -1), pos.get('y', -1)))
-            all_rendered.append(rendered)
-        # FPP API fallback / scroll modes: join lines with newline
-        display_message = '\n'.join(all_rendered) if all_rendered else name
+            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1)))
+
+        # Compute stacked Y defaults (group centered vertically, spaced by line_h_px)
+        mh_pre = config.get('overlay_model_height', 0)
+        non_empty_count = len(rendered_lines)
+        stack_start_y = max(0, (mh_pre - non_empty_count * line_h_px) // 2) if mh_pre > 0 else 0
+
+        # line_items for static PIL: replace y=-1 with stacked default
+        line_items = []
+        for idx, (rendered, px, py) in enumerate(rendered_lines):
+            resolved_y = stack_start_y + idx * line_h_px if py < 0 else py
+            line_items.append((rendered, px, resolved_y))
+
+        # scroll_line_items for L2R/R2L: [(text, y_pos), ...]
+        scroll_lr_items = [(rendered, stack_start_y + idx * line_h_px if py < 0 else py)
+                           for idx, (rendered, px, py) in enumerate(rendered_lines)]
+        # scroll_line_items for T2B/B2T: [(text, x_pos), ...] — x=-1 means auto-center
+        scroll_tb_items = [(rendered, px)
+                           for (rendered, px, py) in rendered_lines]
+
+        # FPP API fallback: join lines with newline
+        display_message = '\n'.join(r for r, _, _ in rendered_lines) if rendered_lines else name
 
         logging.info(f"🎄 ========== STARTING DISPLAY FOR: {name} ==========")
         logging.info(f"📺 FPP Host: {fpp_host}")
@@ -1070,9 +1112,10 @@ def send_to_fpp(name):
                         )
                     elif text_position in ('L2R', 'R2L', 'T2B', 'B2T'):
                         duration = config.get('display_duration', 30)
+                        items = scroll_lr_items if text_position in ('L2R', 'R2L') else scroll_tb_items
                         scroll_started = scroll_via_shm(
-                            display_message, overlay_model,
-                            mw, mh, text_position, -1, -1,
+                            items, overlay_model,
+                            mw, mh, text_position,
                             text_font, font_size, text_color,
                             scroll_speed, duration
                         )
@@ -1950,14 +1993,14 @@ def index():
                 var hint = document.getElementById('canvas_hint');
                 var help = document.getElementById('canvas_help');
                 if (pos === 'L2R' || pos === 'R2L') {
-                    if (hint) hint.textContent = 'scroll mode — lines render as one block';
-                    if (help) help.textContent = 'Text scrolls horizontally. All lines display as a single block.';
+                    if (hint) hint.textContent = 'drag each line up/down to set its vertical position';
+                    if (help) help.textContent = 'Each line scrolls horizontally at its own Y position. Click a line then drag up/down to reposition it.';
                 } else if (pos === 'T2B' || pos === 'B2T') {
-                    if (hint) hint.textContent = 'scroll mode — lines render as one block';
-                    if (help) help.textContent = 'Text scrolls vertically. All lines display as a single block.';
+                    if (hint) hint.textContent = 'drag each line left/right to set its horizontal position';
+                    if (help) help.textContent = 'Each line scrolls vertically at its own X position. Click a line then drag left/right to reposition it.';
                 } else {
                     if (hint) hint.textContent = 'click a line to select, drag to reposition';
-                    if (help) help.textContent = 'In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.';
+                    if (help) help.textContent = 'Click a line on the preview then drag it anywhere on the canvas.';
                 }
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
             }
@@ -2005,13 +2048,43 @@ def index():
                     return el ? el.value.replace('{name}', 'Santa') : '';
                 }
 
+                // Returns array of indices (0-3) for non-empty lines
+                function getNonEmptyIdx() {
+                    var r = [];
+                    for (var i = 0; i < 4; i++) { if (getLineText(i)) r.push(i); }
+                    return r;
+                }
+
                 function updateBadges() {
+                    var pos = document.getElementById('text_position').value;
                     for (var i = 0; i < 4; i++) {
                         var badge = document.getElementById('line_' + (i + 1) + '_pos');
                         if (!badge) continue;
                         var lp = window._linePositions[i];
-                        badge.textContent = (lp.x < 0 && lp.y < 0) ? 'auto' : ('X:' + lp.x + ' Y:' + lp.y);
+                        var txt;
+                        if (pos === 'L2R' || pos === 'R2L') {
+                            txt = lp.y < 0 ? 'auto' : ('Y:' + lp.y);
+                        } else if (pos === 'T2B' || pos === 'B2T') {
+                            txt = lp.x < 0 ? 'auto' : ('X:' + lp.x);
+                        } else {
+                            txt = (lp.x < 0 && lp.y < 0) ? 'auto' : ('X:' + lp.x + ' Y:' + lp.y);
+                        }
+                        badge.textContent = txt;
                         badge.style.color = (i === selectedLine) ? '#4CAF50' : '#888';
+                    }
+                }
+
+                function drawLineDecoration(drawX, drawY, lw2, lh2, i) {
+                    if (i === selectedLine) {
+                        ctx.save();
+                        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.setLineDash([]);
+                        ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                        ctx.restore();
+                    } else if (i === hoveredLine) {
+                        ctx.save();
+                        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+                        ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                        ctx.restore();
                     }
                 }
 
@@ -2019,7 +2092,6 @@ def index():
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
                     var pos = document.getElementById('text_position').value;
-                    var isStatic = (pos === 'Center');
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                     var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
@@ -2031,87 +2103,106 @@ def index():
 
                     lineRects = [null, null, null, null];
 
-                    if (!isStatic) {
-                        // Scroll mode: render all non-empty lines as one centered block
-                        var allLines = [];
-                        for (var i = 0; i < 4; i++) { var t = getLineText(i); if (t) allLines.push(t); }
-                        if (!allLines.length) allLines = [''];
-                        var tw = 0;
-                        allLines.forEach(function(l) { tw = Math.max(tw, ctx.measureText(l).width); });
-                        var th = allLines.length * lineH;
-                        var bx = (canvas.width - tw) / 2;
-                        var by = (canvas.height - th) / 2;
+                    var nonEmptyIdx = getNonEmptyIdx();
+                    var nLines = nonEmptyIdx.length || 1;
+                    // Stacked-group Y: center the group, space lines by lineH
+                    var stackStartY = (canvas.height - nLines * lineH) / 2;
 
-                        if (pos === 'L2R' || pos === 'R2L') {
-                            ctx.save();
-                            ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
-                            ctx.beginPath(); ctx.moveTo(0, by + th/2); ctx.lineTo(canvas.width, by + th/2); ctx.stroke();
-                            ctx.restore();
-                            ctx.save();
-                            ctx.fillStyle = 'rgba(255,255,255,0.3)';
-                            ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
-                            ctx.textBaseline = 'middle';
-                            var arrow = pos === 'L2R' ? '→ scrolls →' : '← scrolls ←';
-                            ctx.fillText(arrow, (canvas.width - ctx.measureText(arrow).width) / 2, by - th * 0.6);
-                            ctx.restore();
-                            ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
-                        } else if (pos === 'T2B' || pos === 'B2T') {
-                            ctx.save();
-                            ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
-                            ctx.beginPath(); ctx.moveTo(bx + tw/2, 0); ctx.lineTo(bx + tw/2, canvas.height); ctx.stroke();
-                            ctx.restore();
-                            ctx.save();
-                            ctx.fillStyle = 'rgba(255,255,255,0.3)';
-                            ctx.font = 'bold ' + Math.max(10, Math.round(scaledFont * 0.45)) + 'px sans-serif';
-                            ctx.textBaseline = 'top';
-                            var sarrow = pos === 'T2B' ? '↓' : '↑';
-                            ctx.fillText(sarrow, bx + tw/2 - ctx.measureText(sarrow).width/2,
-                                         pos === 'T2B' ? canvas.height - scaledFont : 4);
-                            ctx.restore();
-                            ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
-                        }
-                        ctx.fillStyle = color;
-                        allLines.forEach(function(l, i) {
-                            var lw = ctx.measureText(l).width;
-                            ctx.fillText(l, bx + (tw - lw) / 2, by + i * lineH);
-                        });
-                        var posEl = document.getElementById('pos_display');
-                        if (posEl) posEl.textContent = 'Scroll mode — lines render as one block';
-                        updateBadges();
-                        return;
-                    }
-
-                    // Static mode: render each line independently at its own position
                     var posLabel = 'Click a line to select, then drag';
-                    for (var i = 0; i < 4; i++) {
-                        var lineText = getLineText(i);
-                        if (!lineText) { lineRects[i] = null; continue; }
-                        var lp  = window._linePositions[i];
-                        var lw2 = ctx.measureText(lineText).width;
-                        var lh2 = scaledFont;
-                        var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
-                        var drawY = lp.y < 0 ? (canvas.height - lh2) / 2 : lp.y * canvas.height / mh;
-                        drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
-                        drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
-                        lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
 
-                        if (i === selectedLine) {
+                    if (pos === 'L2R' || pos === 'R2L') {
+                        // Per-line Y control; text scrolls full width at each line's Y
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                        ctx.font = 'bold ' + Math.max(8, Math.round(scaledFont * 0.5)) + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        var arrowTxt = pos === 'L2R' ? '→' : '←';
+                        var arrowX = pos === 'L2R' ? 4 : canvas.width - ctx.measureText(arrowTxt).width - 4;
+                        ctx.fillText(arrowTxt, arrowX, 4);
+                        ctx.restore();
+                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+
+                        var stackIdx = 0;
+                        for (var i = 0; i < 4; i++) {
+                            var lineText = getLineText(i);
+                            if (!lineText) { lineRects[i] = null; continue; }
+                            var lp  = window._linePositions[i];
+                            var lw2 = ctx.measureText(lineText).width;
+                            var lh2 = scaledFont;
+                            var drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
+                            var drawX = (canvas.width - lw2) / 2;
+                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                            // Dashed guide line at this Y
                             ctx.save();
-                            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1; ctx.setLineDash([]);
-                            ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(0, drawY + lh2/2); ctx.lineTo(canvas.width, drawY + lh2/2); ctx.stroke();
                             ctx.restore();
-                            posLabel = (lp.x < 0 && lp.y < 0)
-                                ? 'Line ' + (i + 1) + ': auto-centered'
-                                : 'Line ' + (i + 1) + ':  X:' + lp.x + '  Y:' + lp.y;
-                        } else if (i === hoveredLine) {
-                            ctx.save();
-                            ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
-                            ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
-                            ctx.restore();
+                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            if (i === selectedLine)
+                                posLabel = 'Line ' + (i+1) + ' Y: ' + (lp.y < 0 ? 'auto' : lp.y) + ' — drag up/down';
+                            stackIdx++;
                         }
-                        ctx.fillStyle = color;
-                        ctx.fillText(lineText, drawX, drawY);
+
+                    } else if (pos === 'T2B' || pos === 'B2T') {
+                        // Per-line X control; text scrolls full height at each line's X
+                        ctx.save();
+                        ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                        ctx.font = 'bold ' + Math.max(8, Math.round(scaledFont * 0.5)) + 'px sans-serif';
+                        ctx.textBaseline = 'top';
+                        var sarrow = pos === 'T2B' ? '↓' : '↑';
+                        ctx.fillText(sarrow, canvas.width / 2 - ctx.measureText(sarrow).width / 2, 4);
+                        ctx.restore();
+                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+
+                        var stackIdx = 0;
+                        for (var i = 0; i < 4; i++) {
+                            var lineText = getLineText(i);
+                            if (!lineText) { lineRects[i] = null; continue; }
+                            var lp  = window._linePositions[i];
+                            var lw2 = ctx.measureText(lineText).width;
+                            var lh2 = scaledFont;
+                            var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                            drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
+                            var drawY = (canvas.height - lh2) / 2;
+                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                            // Dashed guide at this X
+                            ctx.save();
+                            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(drawX + lw2/2, 0); ctx.lineTo(drawX + lw2/2, canvas.height); ctx.stroke();
+                            ctx.restore();
+                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            if (i === selectedLine)
+                                posLabel = 'Line ' + (i+1) + ' X: ' + (lp.x < 0 ? 'auto' : lp.x) + ' — drag left/right';
+                            stackIdx++;
+                        }
+
+                    } else {
+                        // Static mode: each line at its own X,Y with stacked Y default
+                        var stackIdx = 0;
+                        for (var i = 0; i < 4; i++) {
+                            var lineText = getLineText(i);
+                            if (!lineText) { lineRects[i] = null; continue; }
+                            var lp  = window._linePositions[i];
+                            var lw2 = ctx.measureText(lineText).width;
+                            var lh2 = scaledFont;
+                            var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                            var drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
+                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
+                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            if (i === selectedLine)
+                                posLabel = (lp.x < 0 && lp.y < 0)
+                                    ? 'Line ' + (i+1) + ': auto-stacked'
+                                    : 'Line ' + (i+1) + ':  X:' + lp.x + '  Y:' + lp.y;
+                            stackIdx++;
+                        }
                     }
+
                     var posEl = document.getElementById('pos_display');
                     if (posEl) posEl.textContent = posLabel;
                     updateBadges();
@@ -2134,8 +2225,17 @@ def index():
                     return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
                 }
 
+                function dragCursor(pos) {
+                    return (pos === 'L2R' || pos === 'R2L') ? 'ns-resize' :
+                           (pos === 'T2B' || pos === 'B2T') ? 'ew-resize' : 'grabbing';
+                }
+                function hoverCursor(pos) {
+                    return (pos === 'L2R' || pos === 'R2L') ? 'ns-resize' :
+                           (pos === 'T2B' || pos === 'B2T') ? 'ew-resize' : 'grab';
+                }
+
                 canvas.addEventListener('mousedown', function(e) {
-                    if (document.getElementById('text_position').value !== 'Center') return;
+                    var pos = document.getElementById('text_position').value;
                     var c = canvasXY(e);
                     var hit = hitTestLine(c.cx, c.cy);
                     selectedLine = hit;
@@ -2145,12 +2245,10 @@ def index():
                         var lp  = window._linePositions[hit];
                         var mw2 = window._canvasModelW || 640;
                         var mh2 = window._canvasModelH || 360;
-                        // Anchor offset from line's top-left corner
-                        var dx  = lp.x < 0 ? (canvas.width - r.w) / 2 : lp.x * canvas.width / mw2;
-                        var dy  = lp.y < 0 ? (canvas.height - r.h) / 2 : lp.y * canvas.height / mh2;
-                        dragOffX = c.cx - dx;
-                        dragOffY = c.cy - dy;
-                        canvas.style.cursor = 'grabbing';
+                        // For L2R/R2L: anchor Y offset; for T2B/B2T: anchor X; static: both
+                        dragOffX = c.cx - (lp.x < 0 ? r.x : lp.x * canvas.width  / mw2);
+                        dragOffY = c.cy - (lp.y < 0 ? r.y : lp.y * canvas.height / mh2);
+                        canvas.style.cursor = dragCursor(pos);
                     }
                     renderCanvasPreview();
                     e.preventDefault();
@@ -2159,26 +2257,36 @@ def index():
                 canvas.addEventListener('mousemove', function(e) {
                     var mw2 = window._canvasModelW || 640;
                     var mh2 = window._canvasModelH || 360;
+                    var pos = document.getElementById('text_position').value;
                     var c   = canvasXY(e);
                     if (dragging && selectedLine >= 0) {
-                        var r    = lineRects[selectedLine] || {w: 20, h: 20};
-                        var newX = Math.max(0, Math.min(canvas.width  - r.w, c.cx - dragOffX));
-                        var newY = Math.max(0, Math.min(canvas.height - r.h, c.cy - dragOffY));
-                        window._linePositions[selectedLine] = {
-                            x: Math.round(newX * mw2 / canvas.width),
-                            y: Math.round(newY * mh2 / canvas.height)
-                        };
+                        var r  = lineRects[selectedLine] || {w: 20, h: 20};
+                        var lp = window._linePositions[selectedLine];
+                        var newX = Math.round(Math.max(0, Math.min(canvas.width  - r.w, c.cx - dragOffX)) * mw2 / canvas.width);
+                        var newY = Math.round(Math.max(0, Math.min(canvas.height - r.h, c.cy - dragOffY)) * mh2 / canvas.height);
+                        if (pos === 'L2R' || pos === 'R2L') {
+                            window._linePositions[selectedLine] = {x: lp.x, y: newY};
+                        } else if (pos === 'T2B' || pos === 'B2T') {
+                            window._linePositions[selectedLine] = {x: newX, y: lp.y};
+                        } else {
+                            window._linePositions[selectedLine] = {x: newX, y: newY};
+                        }
                         renderCanvasPreview();
-                    } else if (!dragging && document.getElementById('text_position').value === 'Center') {
+                    } else if (!dragging) {
                         var prev = hoveredLine;
                         hoveredLine = hitTestLine(c.cx, c.cy);
-                        canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default';
+                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(pos) : 'default';
                         if (hoveredLine !== prev) renderCanvasPreview();
                     }
                 });
 
                 window.addEventListener('mouseup', function() {
-                    if (dragging) { dragging = false; canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default'; saveConfig(); }
+                    if (dragging) {
+                        dragging = false;
+                        var pos = document.getElementById('text_position').value;
+                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(pos) : 'default';
+                        saveConfig();
+                    }
                 });
                 canvas.addEventListener('mouseleave', function() {
                     if (!dragging) { hoveredLine = -1; canvas.style.cursor = 'default'; renderCanvasPreview(); }
