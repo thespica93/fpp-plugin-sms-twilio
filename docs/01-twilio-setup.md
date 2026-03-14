@@ -97,13 +97,51 @@ If you purchased a toll-free number, you must complete a one-time free verificat
 
 1. In the Twilio Console, go to **Messaging** → **Regulatory Compliance** → **Toll-Free Verification**
 2. Click **Submit Verification**
-3. Fill in the form:
-   - **Business name / contact info** — your name is fine for a personal display
-   - **Use case** — select "Charity/Non-profit" or "Other" and describe it as: *"Seasonal holiday light display — visitors text a name to be shown on a LED display"*
-   - **Sample messages** — e.g. *"Your name has been added to the display! Watch for it on the lights."*
+3. Complete the two-step form using the guidance below
+
+---
+
+#### Step 1/2 — Business and Contact Information
+
+| Field | What to enter |
+|-------|--------------|
+| **Business profile** | Select your existing starter profile if shown |
+| **Legal entity name** | Your full name (e.g. `John Smith`) — a formal business name is not required |
+| **Website URL** | See options below |
+| **Business type** | Select **Sole Proprietor** for a personal display |
+
+**Website URL options** — Twilio requires a URL but it does not need to be a business website. Use whichever you have:
+
+- A **Facebook profile or page** for your light show (e.g. `https://www.facebook.com/YourLightShow`)
+- A **Nextdoor post** or neighborhood group page about your display
+- A **YouTube video** of your display
+- A **personal website or blog** mentioning the display
+- The **plugin GitHub page**: `https://github.com/thespica93/fpp-plugin-sms-twilio` *(if you use this plugin as-is)*
+
+Any public URL that references your display or the plugin is acceptable.
+
+---
+
+#### Step 2/2 — Messaging Use Case
+
+| Field | What to enter |
+|-------|--------------|
+| **Opt-in type** | **Via Text** — visitors initiate the conversation by texting your number first, which constitutes consent |
+| **Proof of consent URL** | Same URL you used above |
+| **Use case description** | See suggested text below |
+| **Sample message** | See suggested text below |
+
+**Use case description** (copy and paste):
+> Visitors at a seasonal holiday light display text their first name to this number. The name is then shown on an LED pixel display as part of the show. No marketing messages are sent. Participants opt in by initiating the text themselves.
+
+**Sample message** (copy and paste):
+> 🎄 Merry Christmas! Your name has been added to the display — watch for it on the lights!
+
+---
+
 4. Submit — approval typically takes **1–3 business days**
 
-> Once approved, your toll-free number can send SMS to any US phone number.
+> Once approved, your toll-free number can send SMS to any US phone number. Until then, inbound messages will still be received but outbound replies will be blocked by carriers.
 
 ### Local Number (10DLC) — Not Recommended
 
