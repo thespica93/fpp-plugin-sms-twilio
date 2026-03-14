@@ -1737,7 +1737,7 @@ def index():
                                     <!-- Vertical scrollbar: rotate trick is cross-browser reliable -->
                                     <div id="vscroll_wrap" style="flex-shrink:0; width:22px; position:relative; overflow:hidden;">
                                         <input type="range" id="vscroll" min="0" max="360" step="1" value="180"
-                                               style="position:absolute; left:0; top:200px; width:200px; height:22px; transform:rotate(-90deg); transform-origin:0 0; margin:0; padding:0; cursor:ns-resize;"
+                                               style="position:absolute; left:22px; top:0; width:200px; height:22px; transform:rotate(90deg); transform-origin:0 0; margin:0; padding:0; cursor:ns-resize;"
                                                oninput="window._onVscroll && window._onVscroll(this.value)">
                                     </div>
                                 </div>
@@ -2022,12 +2022,16 @@ def index():
                     var color = document.getElementById('text_color').value || '#ff0000';
                     var tmpl = document.getElementById('message_template').value || '{name}';
                     var previewName = (document.getElementById('canvas_preview_name') || {}).value || 'Santa';
-                    var text = tmpl.replace('{name}', previewName).replace(/\\n/g, ' ').trim();
+                    var rawText = tmpl.replace('{name}', previewName).replace(/\\r/g, '').trim();
+                    var lines = rawText.split(/\\n/).filter(function(l) { return l.length > 0; });
+                    if (!lines.length) lines = [''];
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
+                    var lineH = Math.round(scaledFont * 1.2);
                     ctx.font = 'bold ' + scaledFont + 'px sans-serif';
                     ctx.textBaseline = 'top';
-                    var m = ctx.measureText(text);
-                    var tw = m.width, th = scaledFont;
+                    var tw = 0;
+                    lines.forEach(function(l) { tw = Math.max(tw, ctx.measureText(l).width); });
+                    var th = lines.length * lineH;
                     var drawX, drawY, posLabel;
 
                     if (pos === 'L2R' || pos === 'R2L') {
@@ -2091,8 +2095,11 @@ def index():
                         }
                     }
 
+                    // Clamp text block fully within canvas bounds
+                    drawX = Math.max(0, Math.min(canvas.width - tw, drawX));
+                    drawY = Math.max(0, Math.min(canvas.height - th, drawY));
                     ctx.fillStyle = color;
-                    ctx.fillText(text, drawX, drawY);
+                    lines.forEach(function(l, i) { ctx.fillText(l, drawX, drawY + i * lineH); });
                     var posEl = document.getElementById('pos_display');
                     if (posEl) posEl.textContent = posLabel;
                     // Sync scrollbars to current position
@@ -2191,7 +2198,7 @@ def index():
                     new ResizeObserver(function(entries) {
                         var h = Math.round(entries[0].contentRect.height);
                         var v = document.getElementById('vscroll');
-                        if (v && h > 0) { v.style.width = h + 'px'; v.style.top = h + 'px'; }
+                        if (v && h > 0) { v.style.width = h + 'px'; }
                     }).observe(vwrap);
                 }
 
