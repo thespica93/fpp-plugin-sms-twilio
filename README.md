@@ -87,13 +87,16 @@ Visitor texts name → Twilio → Plugin polls & receives → Filters applied �
 
 ## Twilio Pricing
 
-| Item | Cost |
-|------|------|
-| Phone number rental | ~$1.00/month |
-| Incoming SMS | ~$0.0075/message |
-| Outgoing SMS (responses) | ~$0.0079/message |
+> ⚠️ **US carriers require phone number registration before outbound SMS will be delivered.** We recommend a **Toll-Free number** — registration is free and takes 1–3 days. Local numbers require A2P 10DLC registration (~$10/month extra fee, 2–4 week approval). See the [Twilio Setup guide](docs/01-twilio-setup.md) for full details.
 
-**Example:** 200 incoming texts + auto-responses ≈ **$4.16/month**
+| Item | Toll-Free (Recommended) | Local |
+|------|------------------------|-------|
+| Phone number rental | ~$2.00/month | ~$1.00/month |
+| Registration | Free | ~$4 + ~$10/month |
+| Incoming SMS | ~$0.0075/message | ~$0.0075/message |
+| Outgoing SMS | ~$0.0079/message | ~$0.0079/message |
+
+**Example (toll-free, 200 texts/night):** ≈ **$4.66/month** all-in, no hidden registration fees.
 
 ---
 

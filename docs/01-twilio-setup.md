@@ -9,7 +9,8 @@
 - [Step 1 — Create a Twilio Account](#step-1--create-a-twilio-account)
 - [Step 2 — Get Your Credentials](#step-2--get-your-credentials)
 - [Step 3 — Purchase a Phone Number](#step-3--purchase-a-phone-number)
-- [Step 4 — No Webhook Needed](#step-4--no-webhook-needed)
+- [Step 4 — Register Your Number (Required for SMS delivery)](#step-4--register-your-number-required-for-sms-delivery)
+- [Step 5 — No Webhook Needed](#step-5--no-webhook-needed)
 - [Twilio Free Trial Notes](#twilio-free-trial-notes)
 - [Twilio Pricing](#twilio-pricing)
 
@@ -49,31 +50,74 @@ Copy both values — you will paste them into the plugin configuration.
 
 ## Step 3 — Purchase a Phone Number
 
+### ⚠️ Important: US Carrier Registration Requirements
+
+US carriers require all SMS sent from 10-digit local numbers to be registered under the **A2P 10DLC** program. Without registration, your outbound SMS replies will be blocked by carriers.
+
+**We recommend purchasing a Toll-Free number instead.** Here's why:
+
+| | Local Number | Toll-Free Number |
+|---|---|---|
+| Monthly cost | ~$1.00/month | ~$2.00/month |
+| Registration fee | $4 one-time (brand) + ~$10/month (campaign) | **Free** |
+| Approval time | 2–4 weeks | 1–3 business days |
+| Best for | High-volume business use | ✅ Seasonal/event displays |
+
+For a seasonal light show with low message volume, a toll-free number costs less overall and gets you up and running much faster.
+
+### Buying a Toll-Free Number
+
 1. In the Twilio Console, go to **Phone Numbers** → **Manage** → **Buy a Number**
 
    ![Twilio Buy a Number menu](images/twilio-buy-number-menu.png)
 
-2. Search for a number. For best results:
-   - Filter by **SMS** capability
-   - Choose your country (US recommended for local displays)
-   - Pick a local area code your visitors will recognize, or use a toll-free number
+2. Click **Advanced Search** and check **Toll-free** under Number type (uncheck Local)
 
    ![Twilio number search](images/twilio-number-search.png)
 
-3. Click **Buy** next to your chosen number
-4. Confirm the purchase (~$1.00/month)
+3. Click **Search**, then click **Buy** next to your chosen number (~$2.00/month)
 
-5. Once purchased, go to **Phone Numbers** → **Manage** → **Active Numbers** and click your number
+4. Once purchased, go to **Phone Numbers** → **Manage** → **Active Numbers** and click your number
 
    ![Twilio active number settings](images/twilio-active-number.png)
 
-6. Note the phone number in **E.164 format**: `+1XXXXXXXXXX`
+5. Note the phone number in **E.164 format**: `+1XXXXXXXXXX`
 
    You will enter this in the plugin settings as the **Twilio Phone Number**.
 
+> 💡 **Tip:** The phone number field in the plugin accepts any common format (`+18885551234`, `+1 888 555 1234`, `+1-888-555-1234`) — it will be normalized automatically.
+
 ---
 
-## Step 4 — No Webhook Needed
+## Step 4 — Register Your Number (Required for SMS delivery)
+
+### Toll-Free Verification (Recommended)
+
+If you purchased a toll-free number, you must complete a one-time free verification before outbound SMS will be delivered:
+
+1. In the Twilio Console, go to **Messaging** → **Regulatory Compliance** → **Toll-Free Verification**
+2. Click **Submit Verification**
+3. Fill in the form:
+   - **Business name / contact info** — your name is fine for a personal display
+   - **Use case** — select "Charity/Non-profit" or "Other" and describe it as: *"Seasonal holiday light display — visitors text a name to be shown on a LED display"*
+   - **Sample messages** — e.g. *"Your name has been added to the display! Watch for it on the lights."*
+4. Submit — approval typically takes **1–3 business days**
+
+> Once approved, your toll-free number can send SMS to any US phone number.
+
+### Local Number (10DLC) — Not Recommended
+
+If you purchased a local (10-digit) number, you must complete A2P 10DLC registration before outbound SMS will work:
+
+1. **Register a Brand** — Messaging → Senders → A2P 10DLC → Register a Brand (~$4 one-time)
+2. **Register a Campaign** — describe your use case (~$10/month ongoing fee)
+3. **Link your number** to the campaign
+
+Approval takes 2–4 weeks and costs more over time. We recommend switching to a toll-free number instead.
+
+---
+
+## Step 5 — No Webhook Needed
 
 Unlike many Twilio integrations, **this plugin does not use webhooks**. Instead, it polls the Twilio REST API at a regular interval to check for new messages.
 
@@ -103,17 +147,19 @@ For a public display, you will want to **upgrade to a paid account** so anyone c
 
 All prices are approximate and subject to change. See [twilio.com/en-us/sms/pricing](https://www.twilio.com/en-us/sms/pricing) for current rates.
 
-| Item | Approximate Cost |
-|------|-----------------|
-| US phone number rental | $1.00/month |
-| Incoming SMS (US) | $0.0075 per message |
-| Outgoing SMS (US) | $0.0079 per message |
+| Item | Toll-Free (Recommended) | Local (10DLC) |
+|------|------------------------|---------------|
+| Phone number rental | ~$2.00/month | ~$1.00/month |
+| Registration | Free (one-time) | ~$4 one-time + ~$10/month |
+| Incoming SMS (US) | $0.0075 per message | $0.0075 per message |
+| Outgoing SMS (US) | $0.0079 per message | $0.0079 per message |
 
-**Example seasonal display (6 weeks, 200 texts/night, 42 nights):**
+**Example seasonal display using toll-free (6 weeks, 200 texts/night, 42 nights):**
 - 8,400 incoming SMS = $63.00
 - 8,400 outgoing responses = $66.36 *(if auto-responses enabled)*
-- Phone number = $1.50 (1.5 months)
-- **Total: ~$65–$131 for the season**
+- Phone number = $3.00 (1.5 months at $2/month)
+- Registration = $0
+- **Total: ~$66–$132 for the season**
 
 To reduce costs, you can **disable SMS auto-responses** in the plugin settings — visitors won't get a reply, but the display still works.
 
