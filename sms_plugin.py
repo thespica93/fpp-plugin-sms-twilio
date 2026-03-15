@@ -140,6 +140,7 @@ DEFAULT_CONFIG = {
     "sms_response_success": False,
     "sms_response_profanity": False,
     "sms_response_rate_limited": False,
+    "allow_duplicate_names": False,
     "sms_response_duplicate": False,
     "sms_response_invalid_format": False,
     "sms_response_not_whitelisted": False,
@@ -1517,7 +1518,7 @@ def poll_twilio():
                             log_message(from_number, body, "", "rate_limited")
                             send_sms_response(from_number, "rate_limited")
 
-                        elif max_msgs > 0 and has_sent_name_today(from_number, name):
+                        elif not config.get('allow_duplicate_names', False) and has_sent_name_today(from_number, name):
                             logging.info(f"🔄 Duplicate name: {name}")
                             log_message(from_number, body, name, "duplicate_name_today")
                             send_sms_response(from_number, "duplicate")
@@ -1675,6 +1676,11 @@ def index():
                         <label>Max Messages Per Phone (0 = unlimited):</label>
                         <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
 
+                        <div style="margin-top:10px;">
+                            <input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();">
+                            <label class="checkbox-label">✓ Allow Duplicate Names — same name can be submitted multiple times per day</label>
+                        </div>
+
                         <div id="max_length_section">
                             <label>Max Message Length:</label>
                             <input type="number" id="max_length" value="{{ config.max_message_length }}" min="10" max="200">
@@ -1758,6 +1764,15 @@ def index():
                             document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
                             document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
                         }
+                        function checkDuplicateState() {
+                            var allowDupes = document.getElementById('allow_duplicate_names').checked;
+                            var row = document.getElementById('row_duplicate');
+                            row.style.opacity = allowDupes ? '0.4' : '1';
+                            row.style.pointerEvents = allowDupes ? 'none' : '';
+                            var warn = document.getElementById('duplicate_disabled_warning');
+                            if (warn) warn.style.display = allowDupes ? 'block' : 'none';
+                        }
+
                         function checkFiltersState() {
                             var whitelistOn = document.getElementById('use_whitelist').checked;
                             var profanityOn = document.getElementById('profanity_filter').checked;
@@ -1779,6 +1794,7 @@ def index():
                         }
                         updateFormatRules();
                         checkFiltersState();
+                        checkDuplicateState();
                         </script>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
@@ -1955,6 +1971,9 @@ def index():
                         <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
                     </div>
                     <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
+                </div>
+                <div id="duplicate_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:4px; font-size:13px;">
+                    ⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.
                 </div>
 
                 <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
@@ -2572,6 +2591,7 @@ var _saveTimer = null;
                     poll_interval: parseInt(document.getElementById('poll_interval').value),
                     display_duration: parseInt(document.getElementById('display_duration').value),
                     max_messages_per_phone: parseInt(document.getElementById('max_messages').value),
+                    allow_duplicate_names: document.getElementById('allow_duplicate_names').checked,
                     max_message_length: parseInt(document.getElementById('max_length').value),
                     one_word_only: document.getElementById('one_word_only')?.checked ?? false,
                     two_words_max: document.getElementById('two_words_max')?.checked ?? true,
@@ -2642,7 +2662,7 @@ var _saveTimer = null;
                 });
 
                 // Checkboxes, selects, color picker — save immediately on change
-                ['profanity_filter','use_whitelist','text_color',
+                ['profanity_filter','use_whitelist','allow_duplicate_names','text_color',
                  'default_playlist','name_display_playlist','overlay_model_name',
                  'text_font','text_position','scroll_speed',
                  'one_word_only','two_words_max',
