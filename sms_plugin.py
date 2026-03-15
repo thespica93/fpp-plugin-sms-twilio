@@ -1778,11 +1778,11 @@ def index():
                             var warn = document.getElementById('duplicate_disabled_warning');
                             if (allowDupes) {
                                 row.classList.add('locked');
+                                row.classList.remove('enabled');  // grey out textarea
                                 cb.checked = false;
-                                cb.setAttribute('disabled', '');
                             } else {
                                 row.classList.remove('locked');
-                                cb.removeAttribute('disabled');
+                                toggleResp('duplicate');  // restore enabled state based on checkbox
                             }
                             if (warn) warn.style.display = allowDupes ? '' : 'none';
                         }
@@ -1990,7 +1990,6 @@ def index():
                     <div class="resp-toggle">
                         <input type="checkbox" id="sms_response_duplicate"
                                {{ 'checked' if config.get('sms_response_duplicate', False) and not config.get('allow_duplicate_names', False) else '' }}
-                               {{ 'disabled' if config.get('allow_duplicate_names', False) else '' }}
                                onchange="toggleResp('duplicate')">
                         <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
                     </div>
