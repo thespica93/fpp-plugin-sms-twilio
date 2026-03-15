@@ -40,7 +40,8 @@ _scroll_thread = None   # background PIL scroll animation thread
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
 LOG_FILE = "/home/fpp/media/logs/sms_plugin.log"
-MESSAGE_LOG = "/home/fpp/media/logs/received_messages.json"
+QUEUE_FILE   = "/home/fpp/media/config/queue_pending.json"
+MESSAGES_DIR = "/home/fpp/media/logs/messages/"
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
 BLACKLIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "blacklist_removed.txt")
 BLACKLIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "blacklist_added.txt")
@@ -851,49 +852,96 @@ def contains_profanity(text):
     
     return False
 
+def _parse_log_date(log_entry):
+    """Safely parse the date from a log entry's timestamp field."""
+    try:
+        return datetime.fromisoformat(log_entry.get('timestamp', '')).date()
+    except (ValueError, TypeError):
+        return None
+
+def get_day_log_path(date=None):
+    """Return the path to the daily message log file for the given date (default: today)."""
+    if date is None:
+        date = datetime.now().date()
+    return os.path.join(MESSAGES_DIR, f"messages_{date.isoformat()}.json")
+
+def cleanup_old_logs():
+    """Delete daily message log files older than 7 days from MESSAGES_DIR."""
+    try:
+        cutoff = datetime.now().date() - timedelta(days=7)
+        for filename in os.listdir(MESSAGES_DIR):
+            if not filename.startswith("messages_") or not filename.endswith(".json"):
+                continue
+            date_str = filename[len("messages_"):-len(".json")]
+            try:
+                file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                if file_date < cutoff:
+                    os.remove(os.path.join(MESSAGES_DIR, filename))
+                    logging.error(f"Deleted old log: {filename}")
+            except ValueError:
+                pass
+    except Exception as e:
+        logging.error(f"Error during cleanup_old_logs: {e}")
+
+def save_queue():
+    """Persist the current in-memory queue to QUEUE_FILE. Must be called OUTSIDE queue_lock."""
+    try:
+        snapshot = list(message_queue)
+        with open(QUEUE_FILE, 'w') as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving queue: {e}")
+
+def load_queue_from_file():
+    """Restore queued items from QUEUE_FILE into the deque at startup. Returns count restored."""
+    try:
+        with open(QUEUE_FILE, 'r') as f:
+            items = json.load(f)
+        restored = 0
+        for item in items:
+            if item.get('status') == 'queued':
+                message_queue.append(item)
+                restored += 1
+        if restored:
+            logging.error(f"Queue restore: {restored} item(s) loaded from disk")
+        return restored
+    except FileNotFoundError:
+        return 0
+    except Exception as e:
+        logging.error(f"Error restoring queue: {e}")
+        return 0
+
 def get_message_count(phone):
     """Get number of messages from a phone number today"""
     try:
-        with open(MESSAGE_LOG, 'r') as f:
+        with open(get_day_log_path(), 'r') as f:
             logs = json.load(f)
-        
         today = datetime.now().date()
-        
-        count = 0
-        for log in logs:
-            if log.get('phone_full') == phone:
-                try:
-                    msg_time = datetime.fromisoformat(log.get('timestamp'))
-                    if msg_time.date() == today:
-                        count += 1
-                except:
-                    pass
-        
-        return count
-    except:
+        return sum(1 for log in logs
+                   if log.get('phone_full') == phone and _parse_log_date(log) == today)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
+    except Exception as e:
+        logging.error(f"Error in get_message_count: {e}")
         return 0
 
 def has_sent_name_today(phone, name):
     """Check if this phone has already sent this specific name today"""
     try:
-        with open(MESSAGE_LOG, 'r') as f:
+        with open(get_day_log_path(), 'r') as f:
             logs = json.load(f)
-        
         today = datetime.now().date()
-        
         for log in logs:
-            if log.get('phone_full') == phone and log.get('extracted_name', '').lower() == name.lower():
-                status = log.get('status', '')
-                if status in ['displayed', 'displaying', 'queued']:
-                    try:
-                        msg_time = datetime.fromisoformat(log.get('timestamp'))
-                        if msg_time.date() == today:
-                            return True
-                    except:
-                        pass
-        
+            if (log.get('phone_full') == phone
+                    and log.get('extracted_name', '').lower() == name.lower()
+                    and log.get('status', '') in ('displayed', 'displaying', 'queued')
+                    and _parse_log_date(log) == today):
+                return True
         return False
-    except:
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    except Exception as e:
+        logging.error(f"Error in has_sent_name_today: {e}")
         return False
 
 def save_last_sid(sid):
@@ -905,14 +953,14 @@ def save_last_sid(sid):
         logging.error(f"Error saving last SID: {e}")
 
 def log_message(phone, message, name, status):
-    """Log received message"""
+    """Log received message to today's daily log file."""
     try:
+        log_path = get_day_log_path()
         try:
-            with open(MESSAGE_LOG, 'r') as f:
+            with open(log_path, 'r') as f:
                 logs = json.load(f)
-        except:
+        except (FileNotFoundError, json.JSONDecodeError):
             logs = []
-        
         logs.append({
             "timestamp": datetime.now().isoformat(),
             "phone": phone,
@@ -921,32 +969,40 @@ def log_message(phone, message, name, status):
             "extracted_name": name,
             "status": status
         })
-        
-        logs = logs[-100:]
-        
-        with open(MESSAGE_LOG, 'w') as f:
+        with open(log_path, 'w') as f:
             json.dump(logs, f, indent=2)
-        
         logging.info(f"✅ Message logged: {phone[-4:]} | {name} | {status}")
     except Exception as e:
         logging.error(f"Error logging message: {e}")
 
 def update_message_status(phone, name, new_status):
-    """Update the status of a message in the log"""
-    try:
-        with open(MESSAGE_LOG, 'r') as f:
-            logs = json.load(f)
-        
+    """Update the status of a message — searches today's file, then yesterday's if not found."""
+    def _update_in_file(path):
+        try:
+            with open(path, 'r') as f:
+                logs = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return False
+        found = False
         for log in reversed(logs):
             if log.get('phone_full') == phone and log.get('extracted_name') == name:
                 log['status'] = new_status
                 log['status_updated'] = datetime.now().isoformat()
+                found = True
                 break
-        
-        with open(MESSAGE_LOG, 'w') as f:
-            json.dump(logs, f, indent=2)
-        
-        logging.info(f"Updated status: {phone[-4:]} | {name} | {new_status}")
+        if found:
+            try:
+                with open(path, 'w') as f:
+                    json.dump(logs, f, indent=2)
+                logging.info(f"Updated status: {phone[-4:]} | {name} | {new_status}")
+            except Exception as e:
+                logging.error(f"Error writing status update: {e}")
+        return found
+
+    try:
+        today = datetime.now().date()
+        if not _update_in_file(get_day_log_path(today)):
+            _update_in_file(get_day_log_path(today - timedelta(days=1)))
     except Exception as e:
         logging.error(f"Error updating message status: {e}")
 
@@ -969,7 +1025,9 @@ def add_to_queue(name, phone, message):
         with queue_lock:
             message_queue.append(queue_item)
             queue_position = len(message_queue)
-        
+
+        save_queue()  # persist OUTSIDE queue_lock
+
         logging.info(f"📋 Added to queue (position {queue_position}): {name}")
         return True
     except Exception as e:
@@ -1277,6 +1335,8 @@ def display_worker():
                 time.sleep(0.1)
                 continue
 
+            save_queue()  # item popped — remove from persistent queue before display starts
+
             currently_displaying = _next_item
             
             name = currently_displaying['name']
@@ -1369,14 +1429,13 @@ def poll_twilio():
 
     while not stop_polling:
         try:
-            # Midnight cleanup — clear message log when the date rolls over
+            # Midnight cleanup — delete daily log files older than 7 days
             today = datetime.now().date()
             if today != _current_day:
                 _current_day = today
                 try:
-                    with open(MESSAGE_LOG, 'w') as f:
-                        json.dump([], f)
-                    logging.info(f"🌙 Midnight: message log cleared for {today}")
+                    cleanup_old_logs()
+                    logging.error(f"🌙 Midnight: old daily logs cleaned up for {today}")
                 except Exception as e:
                     logging.error(f"Error during midnight cleanup: {e}")
 
@@ -1588,13 +1647,13 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
-                        <label>Default "Waiting" Playlist: <span style="color:#f44336;font-size:12px;">* required</span></label>
+                        <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
                         <select id="default_playlist">
                             <option value="">-- Select a playlist --</option>
                         </select>
                         <p class="help-text">📺 This playlist or sequence loops while waiting for text messages</p>
 
-                        <label>Name Display Playlist:</label>
+                        <label>Name Display Content:</label>
                         <select id="name_display_playlist">
                             <option value="">-- None (No Playlist Change) --</option>
                         </select>
@@ -2777,22 +2836,37 @@ def test_twilio():
 @app.route('/api/messages')
 def get_messages():
     try:
-        with open(MESSAGE_LOG, 'r') as f:
+        with open(get_day_log_path(), 'r') as f:
             messages = json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError):
         messages = []
     return jsonify(list(reversed(messages)))
 
 @app.route('/api/messages/clear', methods=['POST'])
 def clear_messages():
     try:
-        with open(MESSAGE_LOG, 'w') as f:
+        with open(get_day_log_path(), 'w') as f:
             json.dump([], f)
-        logging.info("Message history cleared")
+        logging.info("Message history cleared (today's file)")
         return jsonify({"success": True})
     except Exception as e:
         logging.error(f"Error clearing messages: {e}")
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/messages/<date_str>')
+def get_messages_by_date(date_str):
+    try:
+        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+    try:
+        with open(get_day_log_path(target_date), 'r') as f:
+            messages = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        messages = []
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify(list(reversed(messages)))
 
 @app.route('/api/queue/status')
 def queue_status():
@@ -3598,14 +3672,21 @@ def status_page():
 
 @app.route('/messages')
 def view_messages():
+    today = datetime.now().date()
+    tabs = []
+    for i in range(7):
+        d = today - timedelta(days=i)
+        if i == 0:
+            label = f"Today ({d.strftime('%b %-d')})"
+        else:
+            label = d.strftime("%a %b %-d")
+        tabs.append({"date": d.isoformat(), "label": label, "is_today": (i == 0)})
     try:
-        with open(MESSAGE_LOG, 'r') as f:
-            messages = json.load(f)
-    except:
-        messages = []
-    
-    queue_status = get_queue_status()
-    
+        with open(get_day_log_path(today), 'r') as f:
+            today_messages = list(reversed(json.load(f)))
+    except (FileNotFoundError, json.JSONDecodeError):
+        today_messages = []
+
     html = """
     <!DOCTYPE html>
     <html>
@@ -3628,55 +3709,64 @@ def view_messages():
             .queue-box { background: #f3e5f5; padding: 20px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
             .current-display { background: #4CAF50; padding: 15px; border-radius: 5px; margin: 10px 0; font-size: 18px; font-weight: bold; color: white; }
             .queue-item { background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 5px 0; border-left: 4px solid #FF9800; }
+            .tab-bar { display: flex; flex-wrap: wrap; gap: 4px; margin: 16px 0 0; border-bottom: 2px solid #4CAF50; }
+            .tab-btn { padding: 8px 14px; border: 1px solid #ddd; border-bottom: none; background: #f5f5f5; cursor: pointer; border-radius: 4px 4px 0 0; font-size: 13px; color: #555; }
+            .tab-btn:hover { background: #e8f5e9; }
+            .tab-btn.active { background: #4CAF50; color: white; border-color: #4CAF50; font-weight: bold; }
+            .tab-panel { display: none; padding-top: 16px; }
+            .tab-panel.active { display: block; }
+            .history-note { background: #fff9c4; padding: 8px 12px; border-radius: 4px; font-size: 13px; color: #5d4037; margin-bottom: 12px; border: 1px solid #f9a825; }
         </style>
     </head>
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
-        <h1>📋 Message History & Queue Status</h1>
+        <h1>Message History & Queue</h1>
+        <button onclick="location.href='/'">Back to Config</button>
+        <button class="clear-btn" onclick="clearHistory()">Clear Today's Messages</button>
 
-        <div class="queue-info">
-            • Messages are queued and displayed one at a time<br>
-            • Each message displays for the full display duration<br>
-            • View real-time queue status
+        <div class="tab-bar">
+            {% for tab in tabs %}
+            <button class="tab-btn {% if tab.is_today %}active{% endif %}"
+                    id="tab-btn-{{ tab.date }}"
+                    onclick="switchTab('{{ tab.date }}', {{ tab.is_today | tojson }})">{{ tab.label }}</button>
+            {% endfor %}
         </div>
 
-        <div class="info">
-            Auto-refreshes every 5 seconds | Total Messages: <span id="msg-count">—</span>
+        <!-- TODAY TAB -->
+        <div class="tab-panel active" id="panel-{{ tabs[0].date }}">
+            <div class="info">Auto-refreshes every 5 seconds | Messages today: <span id="msg-count">{{ today_messages | length }}</span></div>
+            <div class="queue-box">
+                <h2>Current Display Queue</h2>
+                <div id="queue-box-content"><p style="color:#aaa;">Loading...</p></div>
+            </div>
+            <h2>Today's Messages</h2>
+            <div id="today-messages-content"><p style="color:#aaa;">Loading...</p></div>
         </div>
-        <button onclick="location.href='/'">← Back to Config</button>
-        <button onclick="refreshData()">🔄 Refresh</button>
-        <button class="clear-btn" onclick="clearHistory()">🗑️ Clear All Messages</button>
 
-        <div class="queue-box">
-            <h2>🎬 Current Display Queue</h2>
-            <div id="queue-box-content"><p style="color:#aaa;">Loading...</p></div>
+        <!-- PAST DAY TAB PANELS -->
+        {% for tab in tabs[1:] %}
+        <div class="tab-panel" id="panel-{{ tab.date }}">
+            <div class="history-note">Past day snapshot — no live queue.</div>
+            <div id="history-content-{{ tab.date }}"><p style="color:#aaa;">Click tab to load.</p></div>
         </div>
+        {% endfor %}
 
-        <h2>📜 Complete Message History</h2>
-        <div id="messages-content"><p style="color:#aaa;">Loading...</p></div>
-
-        <!-- Block action modal -->
+        <!-- Block modal -->
         <div id="block-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
             <div style="background:#fff; border-radius:8px; padding:28px; max-width:420px; width:90%; box-shadow:0 4px 20px rgba(0,0,0,0.3);">
-                <h3 style="margin-top:0; color:#333;">🚫 Block Action</h3>
+                <h3 style="margin-top:0; color:#333;">Block Action</h3>
                 <p style="color:#555; margin-bottom:6px;">Phone: <strong id="modal-phone"></strong></p>
                 <p style="color:#555; margin-bottom:20px;">Name: <strong id="modal-name-text"></strong></p>
                 <p style="color:#333; font-weight:bold; margin-bottom:16px;">What would you like to block?</p>
                 <div style="display:flex; flex-direction:column; gap:10px;">
-                    <button style="background:#f44336; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer; font-size:14px;"
-                            onclick="blockPhone(document.getElementById('block-modal').dataset.phone)">
-                        📵 Block this number from texting again
-                    </button>
-                    <button id="modal-block-name-btn" style="background:#FF9800; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer; font-size:14px;"
-                            onclick="blockNameFromDisplay()">
-                        🚫 Block this name from being displayed
-                    </button>
+                    <button style="background:#f44336; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer;"
+                            onclick="blockPhone(document.getElementById('block-modal').dataset.phone)">Block this number from texting again</button>
+                    <button id="modal-block-name-btn" style="background:#FF9800; color:white; padding:12px; border:none; border-radius:5px; cursor:pointer;"
+                            onclick="blockNameFromDisplay()">Block this name from being displayed</button>
                     <p id="whitelist-warning" style="color:#f44336; font-size:12px; margin:0; padding:4px 0; display:none;">
-                        ⚠️ Whitelist is not enabled — this name will still show again
+                        Whitelist is not enabled — this name may appear again
                     </p>
-                    <button style="background:#aaa; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer; font-size:13px;"
-                            onclick="closeBlockModal()">
-                        Cancel
-                    </button>
+                    <button style="background:#aaa; color:white; padding:10px; border:none; border-radius:5px; cursor:pointer;"
+                            onclick="closeBlockModal()">Cancel</button>
                 </div>
             </div>
         </div>
@@ -3686,27 +3776,65 @@ def view_messages():
             var modalOpen = false;
             var refreshTimer = null;
             var prevQueueJson = null;
-            var prevMessagesJson = null;
-
-            function scheduleRefresh() {
-                clearTimeout(refreshTimer);
-                refreshTimer = setTimeout(function() {
-                    if (!modalOpen) refreshData();
-                    else scheduleRefresh();
-                }, 5000);
-            }
+            var prevTodayJson = null;
+            var loadedTabs = {};
 
             function esc(s) {
                 return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
             }
 
+            function fmtTime(ts) {
+                if (!ts) return '';
+                try {
+                    var d = new Date(ts);
+                    var mo = String(d.getMonth()+1).padStart(2,'0');
+                    var dy = String(d.getDate()).padStart(2,'0');
+                    var yr = d.getFullYear();
+                    var hr = d.getHours();
+                    var mn = String(d.getMinutes()).padStart(2,'0');
+                    var sc = String(d.getSeconds()).padStart(2,'0');
+                    var ampm = hr >= 12 ? 'PM' : 'AM';
+                    hr = hr % 12 || 12;
+                    return mo+'-'+dy+'-'+yr+' '+hr+':'+mn+':'+sc+' '+ampm;
+                } catch(e) { return ts; }
+            }
+
+            function switchTab(date, isToday) {
+                document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+                document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+                document.getElementById('tab-btn-' + date).classList.add('active');
+                document.getElementById('panel-' + date).classList.add('active');
+                if (isToday) {
+                    scheduleRefresh();
+                } else {
+                    clearTimeout(refreshTimer);
+                    if (!loadedTabs[date]) { loadedTabs[date] = true; loadHistoryTab(date); }
+                }
+            }
+
+            function loadHistoryTab(date) {
+                var container = document.getElementById('history-content-' + date);
+                container.innerHTML = '<p style="color:#aaa;">Loading...</p>';
+                fetch('/api/messages/' + date)
+                    .then(function(r) { return r.json(); })
+                    .then(function(msgs) { container.innerHTML = renderTable(msgs, false); })
+                    .catch(function(e) { container.innerHTML = '<p style="color:#f44336;">Failed to load.</p>'; });
+            }
+
+            function scheduleRefresh() {
+                clearTimeout(refreshTimer);
+                refreshTimer = setTimeout(function() {
+                    if (!modalOpen) refreshData(); else scheduleRefresh();
+                }, 5000);
+            }
+
             function refreshData() {
                 Promise.all([
-                    fetch('/api/queue/status').then(r => r.json()),
-                    fetch('/api/messages').then(r => r.json())
+                    fetch('/api/queue/status').then(function(r) { return r.json(); }),
+                    fetch('/api/messages').then(function(r) { return r.json(); })
                 ]).then(function(results) {
                     renderQueue(results[0]);
-                    renderMessages(results[1]);
+                    renderTodayMessages(results[1]);
                     scheduleRefresh();
                 }).catch(scheduleRefresh);
             }
@@ -3717,68 +3845,52 @@ def view_messages():
                 prevQueueJson = json;
                 var html = '';
                 if (status.currently_displaying) {
-                    html += '<div class="current-display">🎄 NOW DISPLAYING: ' + esc(status.currently_displaying.name) +
+                    html += '<div class="current-display">NOW DISPLAYING: ' + esc(status.currently_displaying.name) +
                             ' (from ***' + esc(status.currently_displaying.phone_last4) + ')</div>';
                 } else {
-                    html += '<div class="current-display" style="background:#bdbdbd;color:#333;">💤 Nothing currently displaying</div>';
+                    html += '<div class="current-display" style="background:#bdbdbd;color:#333;">Nothing currently displaying</div>';
                 }
                 if (status.queue_length > 0) {
-                    html += '<h3 style="color:#FF9800;margin-top:20px;">📋 Queue (' + status.queue_length + ' waiting):</h3>';
+                    html += '<h3 style="color:#FF9800;margin-top:20px;">Queue (' + status.queue_length + ' waiting):</h3>';
                     status.queue.forEach(function(item, i) {
                         html += '<div class="queue-item"><strong>Queue Position ' + (i+1) + ':</strong> ' +
                                 esc(item.name) + ' (from ***' + esc(item.phone_last4) + ')</div>';
                     });
                 } else {
-                    html += '<p style="color:#aaa;font-style:italic;margin-top:15px;">Queue is empty - waiting for messages</p>';
+                    html += '<p style="color:#aaa;font-style:italic;margin-top:15px;">Queue is empty</p>';
                 }
                 document.getElementById('queue-box-content').innerHTML = html;
             }
 
-            function fmtTime(ts) {
-                if (!ts) return '';
-                try {
-                    var d = new Date(ts);
-                    var mo = String(d.getMonth() + 1).padStart(2, '0');
-                    var dy = String(d.getDate()).padStart(2, '0');
-                    var yr = d.getFullYear();
-                    var hr = d.getHours();
-                    var mn = String(d.getMinutes()).padStart(2, '0');
-                    var sc = String(d.getSeconds()).padStart(2, '0');
-                    var ampm = hr >= 12 ? 'PM' : 'AM';
-                    hr = hr % 12 || 12;
-                    return mo + '-' + dy + '-' + yr + ' ' + hr + ':' + mn + ':' + sc + ' ' + ampm;
-                } catch(e) { return ts; }
+            function renderTodayMessages(messages) {
+                var json = JSON.stringify(messages);
+                if (json === prevTodayJson) return;
+                prevTodayJson = json;
+                document.getElementById('msg-count').textContent = messages.length;
+                document.getElementById('today-messages-content').innerHTML = renderTable(messages, true);
             }
 
-            function renderMessages(messages) {
-                var json = JSON.stringify(messages);
-                if (json === prevMessagesJson) return;
-                prevMessagesJson = json;
-                document.getElementById('msg-count').textContent = messages.length;
-                if (messages.length === 0) {
-                    document.getElementById('messages-content').innerHTML =
-                        '<div style="background:#333;padding:40px;text-align:center;border-radius:5px;"><h3>No messages yet</h3></div>';
-                    return;
+            function renderTable(messages, showBlock) {
+                if (!messages || messages.length === 0) {
+                    return '<div style="background:#f5f5f5;padding:40px;text-align:center;border-radius:5px;"><h3>No messages</h3></div>';
                 }
-                var statusLabel = {'displaying':'🎬 DISPLAYING NOW','queued':'📋 Queued','displayed':'✅ Displayed'};
+                var statusLabel = {'displaying':'DISPLAYING NOW','queued':'Queued','displayed':'Displayed'};
                 var rows = messages.map(function(msg) {
                     var label = statusLabel[msg.status] || esc(msg.status);
-                    var isTest = (msg.phone_full === 'Local Testing');
-                    var btn = isTest
-                        ? '<button class="block-btn" disabled style="opacity:0.35;cursor:not-allowed;" title="Cannot block the local test number">🚫 Block</button>'
-                        : '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
-                          '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">🚫 Block</button>';
+                    var btn = '';
+                    if (showBlock && msg.phone_full !== 'Local Testing') {
+                        btn = '<button class="block-btn" data-phone="' + esc(msg.phone_full) + '" data-name="' + esc(msg.extracted_name) +
+                              '" onclick="showBlockModal(this.dataset.phone,this.dataset.name)">Block</button>';
+                    }
                     return '<tr class="' + esc(msg.status) + '">' +
                         '<td>' + fmtTime(msg.timestamp) + '</td>' +
                         '<td>' + esc(msg.phone) + '</td>' +
                         '<td>' + esc(msg.message) + '</td>' +
                         '<td>' + esc(msg.extracted_name) + '</td>' +
                         '<td class="' + esc(msg.status) + '">' + label + '</td>' +
-                        '<td>' + btn + '</td>' +
-                        '</tr>';
+                        '<td>' + btn + '</td></tr>';
                 }).join('');
-                document.getElementById('messages-content').innerHTML =
-                    '<table><tr><th>Timestamp</th><th>Phone</th><th>Message</th><th>Name</th><th>Status</th><th>Action</th></tr>' + rows + '</table>';
+                return '<table><tr><th>Timestamp</th><th>Phone</th><th>Message</th><th>Name</th><th>Status</th><th>Action</th></tr>' + rows + '</table>';
             }
 
             function showBlockModal(phone, name) {
@@ -3801,42 +3913,28 @@ def view_messages():
 
             function blockPhone(phone) {
                 closeBlockModal();
-                fetch('/api/phone/block', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({phone: phone})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) alert('✅ Phone number blocked!');
-                    refreshData();
-                });
+                fetch('/api/phone/block', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({phone:phone}) })
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) { if (data.success) alert('Phone number blocked!'); refreshData(); });
             }
 
             function blockNameFromDisplay() {
-                const modal = document.getElementById('block-modal');
-                const name = modal.dataset.name;
+                var modal = document.getElementById('block-modal');
+                var name = modal.dataset.name;
                 closeBlockModal();
-                fetch('/api/whitelist/remove', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({name: name})
-                })
-                .then(r => r.json())
-                .then(data => {
-                    alert(data.success ? '✅ "' + name + '" blocked from display!' : '❌ ' + data.error);
-                    refreshData();
-                });
+                fetch('/api/whitelist/remove', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name}) })
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        alert(data.success ? '"' + name + '" blocked from display!' : 'Error: ' + data.error);
+                        refreshData();
+                    });
             }
 
             function clearHistory() {
-                if (confirm('Clear all message history?')) {
-                    fetch('/api/messages/clear', { method: 'POST' })
-                    .then(r => r.json())
-                    .then(data => {
-                        if (data.success) alert('✅ Message history cleared!');
-                        refreshData();
-                    });
+                if (confirm("Clear all of today's messages?")) {
+                    fetch('/api/messages/clear', { method:'POST' })
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) { if (data.success) alert("Today's messages cleared!"); refreshData(); });
                 }
             }
 
@@ -3845,7 +3943,7 @@ def view_messages():
     </body>
     </html>
     """
-    return render_template_string(html, config=config)
+    return render_template_string(html, config=config, tabs=tabs, today_messages=today_messages)
 
 
 @app.route('/api/activate', methods=['GET', 'POST'])
@@ -3912,6 +4010,15 @@ def api_deactivate():
 
 if __name__ == '__main__':
     load_config()
+
+    # Ensure the daily messages directory exists
+    os.makedirs(MESSAGES_DIR, exist_ok=True)
+
+    # Clean up log files older than 7 days
+    cleanup_old_logs()
+
+    # Restore any pending queue items saved before the last shutdown
+    load_queue_from_file()
 
     # Pre-warm caches in background so first test/message isn't slow
     def _warm_caches():
