@@ -1914,7 +1914,7 @@ def index():
 
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
-                        <input type="hidden" id="line_positions_json" value="{{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }}">
+                        <script>window._linePositionsInit = {{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }};</script>
                     </div>
                 </div>
 
@@ -2149,10 +2149,10 @@ def index():
                 canvas.width  = 640;
                 canvas.height = Math.round(640 * window._canvasModelH / window._canvasModelW);
 
-                // Load per-line positions from config
-                var initLP = [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
-                var lpEl = document.getElementById('line_positions_json');
-                if (lpEl && lpEl.value) { try { initLP = JSON.parse(lpEl.value); } catch(e) {} }
+                // Load per-line positions from config (injected as JS by server to avoid HTML attribute quote issues)
+                var initLP = (window._linePositionsInit && Array.isArray(window._linePositionsInit))
+                    ? window._linePositionsInit
+                    : [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
                 while (initLP.length < 4) initLP.push({x:-1,y:-1});
                 window._linePositions = initLP;
 
