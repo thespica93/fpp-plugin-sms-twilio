@@ -1984,10 +1984,10 @@ def index():
                         <input type="checkbox" id="sms_response_duplicate" {{ 'checked' if config.get('sms_response_duplicate', False) else '' }} onchange="toggleResp('duplicate')">
                         <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
                     </div>
+                    <div id="duplicate_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:4px; padding:7px 10px; margin-bottom:6px; font-size:13px;">
+                        ⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.
+                    </div>
                     <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
-                </div>
-                <div id="duplicate_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:4px; font-size:13px;">
-                    ⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.
                 </div>
 
                 <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
