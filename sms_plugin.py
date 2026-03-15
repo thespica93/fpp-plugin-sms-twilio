@@ -1920,7 +1920,14 @@ def index():
                 <h2>📱 SMS Auto-Response Settings</h2>
                 <p class="help-text">💡 Enable a response for each event type individually. Only one response is ever sent per incoming message.</p>
                 <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:10px 14px; margin:10px 0; font-size:13px;">
-                    ⚠️ <strong>Message &amp; data rates may apply.</strong> Each auto-response costs ~$0.0079 (Twilio US rate). Standard carrier rates also apply to recipients.
+                    ⚠️ <strong>Message &amp; data rates may apply.</strong>
+                </div>
+                <div style="background:#f8d7da; border:2px solid #f5c6cb; color:#721c24; border-radius:6px; padding:12px 16px; margin:10px 0; font-size:14px; font-weight:bold;">
+                    ⛔ SMS responses will NOT be delivered unless your Twilio number is registered:<br>
+                    <span style="font-weight:normal; font-size:13px; display:block; margin-top:6px;">
+                        • <strong>Local 10-digit number</strong> — requires a valid A2P 10DLC brand &amp; campaign approval<br>
+                        • <strong>Toll-free number</strong> — requires a completed toll-free verification (recommended)
+                    </span>
                 </div>
 
                 <style>
