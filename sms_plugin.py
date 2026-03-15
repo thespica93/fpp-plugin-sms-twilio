@@ -37,22 +37,29 @@ except ImportError:
 _scroll_thread = None   # background PIL scroll animation thread
 
 # Configuration
-PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = "/home/fpp/media/config/plugin.fpp-sms-twilio.json"
-LOG_FILE = "/home/fpp/media/logs/sms_plugin.log"
-QUEUE_FILE   = "/home/fpp/media/config/queue_pending.json"
-MESSAGES_DIR = "/home/fpp/media/logs/messages/"
+PLUGIN_DIR      = os.path.dirname(os.path.abspath(__file__))
+
+# All runtime data lives under one plugin folder
+PLUGIN_DATA_DIR = "/home/fpp/media/plugin.fpp-sms-twilio"
+CONFIG_FILE     = os.path.join(PLUGIN_DATA_DIR, "plugin.json")
+LOG_FILE        = os.path.join(PLUGIN_DATA_DIR, "logs", "sms_plugin.log")
+QUEUE_FILE      = os.path.join(PLUGIN_DATA_DIR, "queue_pending.json")
+MESSAGES_DIR    = os.path.join(PLUGIN_DATA_DIR, "logs", "messages")
+LAST_SID_FILE   = os.path.join(PLUGIN_DATA_DIR, "last_message_sid.txt")
+BLOCKLIST_FILE  = os.path.join(PLUGIN_DATA_DIR, "blocked_phones.json")
+
+# Whitelist/blacklist source files stay in the plugin git repo directory
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
 BLACKLIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "blacklist_removed.txt")
 BLACKLIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "blacklist_added.txt")
 WHITELIST_FILE = os.path.join(PLUGIN_DIR, "whitelist.txt")
 WHITELIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "whitelist_removed.txt")
 WHITELIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "whitelist_added.txt")
-LAST_SID_FILE = "/home/fpp/media/config/last_message_sid.txt"
-BLOCKLIST_FILE = "/home/fpp/media/config/blocked_phones.json"
+
+# Create directory structure before logging setup
+os.makedirs(os.path.join(PLUGIN_DATA_DIR, "logs", "messages"), exist_ok=True)
 
 # Setup logging — ensure the log directory exists, then write to file + stderr
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 _log_handlers = [logging.StreamHandler()]  # stderr always available via nohup
 try:
     _log_handlers.append(logging.FileHandler(LOG_FILE))
@@ -4029,10 +4036,23 @@ def api_deactivate():
 
 
 if __name__ == '__main__':
-    load_config()
+    # Migrate files from old scattered paths to the new plugin data directory
+    _migrations = [
+        ("/home/fpp/media/config/plugin.fpp-sms-twilio.json", CONFIG_FILE),
+        ("/home/fpp/media/config/blocked_phones.json",         BLOCKLIST_FILE),
+        ("/home/fpp/media/config/last_message_sid.txt",        LAST_SID_FILE),
+        ("/home/fpp/media/config/queue_pending.json",          QUEUE_FILE),
+    ]
+    for _old, _new in _migrations:
+        if not os.path.exists(_new) and os.path.exists(_old):
+            try:
+                import shutil
+                shutil.copy2(_old, _new)
+                logging.error(f"Migrated {_old} → {_new}")
+            except Exception as _e:
+                logging.error(f"Migration failed {_old}: {_e}")
 
-    # Ensure the daily messages directory exists
-    os.makedirs(MESSAGES_DIR, exist_ok=True)
+    load_config()
 
     # Clean up log files older than 7 days
     cleanup_old_logs()
