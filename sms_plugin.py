@@ -1774,10 +1774,17 @@ def index():
                         function checkDuplicateState() {
                             var allowDupes = document.getElementById('allow_duplicate_names').checked;
                             var row = document.getElementById('row_duplicate');
-                            row.style.opacity = allowDupes ? '0.4' : '1';
-                            row.style.pointerEvents = allowDupes ? 'none' : '';
+                            var cb = document.getElementById('sms_response_duplicate');
                             var warn = document.getElementById('duplicate_disabled_warning');
-                            if (warn) warn.style.display = allowDupes ? 'block' : 'none';
+                            if (allowDupes) {
+                                row.classList.add('locked');
+                                cb.checked = false;
+                                cb.disabled = true;
+                            } else {
+                                row.classList.remove('locked');
+                                cb.disabled = false;
+                            }
+                            if (warn) warn.style.display = allowDupes ? '' : 'none';
                         }
 
                         function checkFiltersState() {
@@ -1979,14 +1986,15 @@ def index():
                     <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
                 </div>
 
-                <div id="row_duplicate" class="resp-row">
+                <div id="row_duplicate" class="resp-row{% if config.get('allow_duplicate_names', False) %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_duplicate" {{ 'checked' if config.get('sms_response_duplicate', False) else '' }} onchange="toggleResp('duplicate')">
+                        <input type="checkbox" id="sms_response_duplicate"
+                               {{ 'checked' if config.get('sms_response_duplicate', False) and not config.get('allow_duplicate_names', False) else '' }}
+                               {{ 'disabled' if config.get('allow_duplicate_names', False) else '' }}
+                               onchange="toggleResp('duplicate')">
                         <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
                     </div>
-                    <div id="duplicate_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:4px; padding:7px 10px; margin-bottom:6px; font-size:13px;">
-                        ⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.
-                    </div>
+                    <p id="duplicate_disabled_warning" class="resp-locked-note" style="{{ '' if config.get('allow_duplicate_names', False) else 'display:none;' }}">⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.</p>
                     <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
                 </div>
 
