@@ -1779,10 +1779,10 @@ def index():
                             if (allowDupes) {
                                 row.classList.add('locked');
                                 cb.checked = false;
-                                cb.disabled = true;
+                                cb.setAttribute('disabled', '');
                             } else {
                                 row.classList.remove('locked');
-                                cb.disabled = false;
+                                cb.removeAttribute('disabled');
                             }
                             if (warn) warn.style.display = allowDupes ? '' : 'none';
                         }
