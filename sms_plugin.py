@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """
 FPP SMS Plugin v2.5 - Twilio Integration
-Features:
-- Message queueing
-- Display duration controls how long each message shows
-- Shows queue status: "Displaying Now", "Queue 1", "Queue 2"
-- Profanity filtering with whole-word matching
-- Optional whitelist for approved names
-- Name validation (1 or 2 words, hyphens OK)
-- FPP playlist switching and text overlay
-- UI dropdowns to select playlists, models, and fonts from FPP
-- Multi-line message templates with proper case conversion
-- OPTIMIZED: Cached list loading for blacklist, whitelist, and blocked phones
 """
 
 from flask import Flask, request, jsonify, render_template_string, Response
@@ -51,6 +40,8 @@ LAST_SID_FILE   = os.path.join(PLUGIN_DATA_DIR, "last_message_sid.txt")
 BLOCKLIST_FILE  = os.path.join(PLUGIN_DATA_DIR, "blocked_phones.json")
 
 FSEQ_SEQUENCE_PATH = '/home/fpp/media/sequences'
+FPP_VIDEOS_PATH    = '/home/fpp/media/videos'
+FPP_IMAGES_PATH    = '/home/fpp/media/images'
 
 # Whitelist/blacklist source files stay in the plugin git repo directory
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
@@ -325,6 +316,68 @@ def render_to_shm(line_items, model_name, width, height, font_name, font_size, c
         return True
     except Exception as e:
         logging.error(f"render_to_shm failed: {e}")
+        return False
+
+
+def render_image_to_shm(image_path, model_name, width, height,
+                        line_items=None, font_name=None, font_size=48, color_hex='#ffffff'):
+    """Load an image file, resize to model dimensions, optionally composite text on top,
+    then write to FPP shared memory.  Returns True on success.
+    line_items: optional list of (text, x, y) to draw over the image (same as render_to_shm).
+    State 2 (Opaque) should be used so the image fully covers the background."""
+    if not PIL_AVAILABLE or width <= 0 or height <= 0:
+        return False
+    try:
+        img = Image.open(image_path).convert('RGB')
+        img = img.resize((width, height), Image.LANCZOS)
+
+        if line_items:
+            draw = ImageDraw.Draw(img)
+            font = _find_font(font_name, font_size) if font_name else None
+            hex_str = color_hex.lstrip('#')
+            color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
+            for (text, x, y) in line_items:
+                if not text:
+                    continue
+                if font is not None:
+                    bbox = draw.textbbox((0, 0), text, font=font)
+                    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                else:
+                    text_w = len(text) * 6
+                    text_h = font_size
+                draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
+                draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
+                draw.text((draw_x, draw_y), text, fill=color, font=font)
+
+        shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
+        raw = img.tobytes()
+        expected = width * height * 3
+        if len(raw) != expected:
+            logging.error(f"render_image_to_shm: size mismatch ({len(raw)} != {expected})")
+            return False
+
+        def _write():
+            with open(shm_path, 'r+b') as f:
+                f.write(raw)
+
+        try:
+            _write()
+        except PermissionError:
+            import subprocess
+            result = subprocess.run(
+                ['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
+                capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                _write()
+            else:
+                logging.error(f"render_image_to_shm: sudo chmod failed")
+                return False
+
+        logging.info(f"render_image_to_shm: wrote {image_path} → {shm_path}")
+        return True
+    except Exception as e:
+        logging.error(f"render_image_to_shm failed: {e}")
         return False
 
 
@@ -629,6 +682,34 @@ def get_fpp_sequences():
     except Exception as e:
         logging.error(f"Error fetching FPP sequences: {e}")
         return []
+
+def get_fpp_videos():
+    """Get list of video files from FPP media/videos directory."""
+    video_exts = {'.mp4', '.mkv', '.avi', '.mpg', '.mpeg', '.mov'}
+    try:
+        if os.path.isdir(FPP_VIDEOS_PATH):
+            return sorted(
+                f for f in os.listdir(FPP_VIDEOS_PATH)
+                if os.path.splitext(f.lower())[1] in video_exts
+            )
+    except Exception as e:
+        logging.error(f"Error listing FPP videos: {e}")
+    return []
+
+
+def get_fpp_images():
+    """Get list of image files from FPP media/images directory."""
+    image_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
+    try:
+        if os.path.isdir(FPP_IMAGES_PATH):
+            return sorted(
+                f for f in os.listdir(FPP_IMAGES_PATH)
+                if os.path.splitext(f.lower())[1] in image_exts
+            )
+    except Exception as e:
+        logging.error(f"Error listing FPP images: {e}")
+    return []
+
 
 def get_fpp_models():
     """Get list of overlay models from FPP, including pixel dimensions when available.
@@ -1233,7 +1314,7 @@ def send_to_fpp(name):
         logging.info(f"📝 Message Lines: {message_lines}")
         logging.info(f"📝 Display Message: {display_message}")
         
-        # Step 1: Start the name display playlist/sequence (background)
+        # Step 1: Start the name display playlist/sequence/video/image (background)
         if name_playlist:
             try:
                 logging.info(f"⏸️  STEP 1: Stopping any running playlist...")
@@ -1242,7 +1323,7 @@ def send_to_fpp(name):
                 # (foreground) will automatically suppress it and it auto-resumes after.
                 time.sleep(0.1)
 
-                logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
+                logging.info(f"▶️  STEP 2: Starting name display content: {name_playlist}")
 
                 import urllib.parse
                 if name_playlist.startswith('seq:'):
@@ -1252,6 +1333,20 @@ def send_to_fpp(name):
                     effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
                     start_response = requests.get(effect_url, timeout=3)
                     logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
+
+                elif name_playlist.startswith('vid:'):
+                    # Video file — loop during name display, our timer stops it
+                    vid_name = name_playlist[4:]
+                    cmd_url = (f"{fpp_host}/api/command/"
+                               f"{urllib.parse.quote('Media Start')}/"
+                               f"{urllib.parse.quote(vid_name)}/true")
+                    start_response = requests.get(cmd_url, timeout=5)
+                    logging.info(f"   Media Start (names video, loop): {start_response.status_code} - {start_response.text}")
+
+                elif name_playlist.startswith('img:'):
+                    # Image background — will be composited with text in Step 2 below
+                    logging.info(f"   Image background: will render in overlay step")
+
                 else:
                     command = "Start Playlist"
                     encoded_playlist = urllib.parse.quote(name_playlist)
@@ -1260,7 +1355,7 @@ def send_to_fpp(name):
                     logging.info(f"   Start playlist response: {start_response.status_code}")
 
                 time.sleep(0.3)
-                
+
             except Exception as e:
                 logging.error(f"💥 ERROR starting name playlist: {e}")
         
@@ -1309,12 +1404,27 @@ def send_to_fpp(name):
                 shm_rendered = False
                 scroll_started = False
 
+                # For img: names content, composite text onto the image (State 2 = Opaque)
+                img_bg_path = None
+                if name_playlist.startswith('img:'):
+                    img_bg_path = os.path.join(FPP_IMAGES_PATH, name_playlist[4:])
+                    if not os.path.exists(img_bg_path):
+                        logging.warning(f"⚠️ Image not found: {img_bg_path}")
+                        img_bg_path = None
+
                 if PIL_AVAILABLE and mw > 0 and mh > 0:
                     if text_position == 'Center':
-                        shm_rendered = render_to_shm(
-                            line_items, overlay_model,
-                            mw, mh, text_font, font_size, text_color
-                        )
+                        if img_bg_path:
+                            shm_rendered = render_image_to_shm(
+                                img_bg_path, overlay_model, mw, mh,
+                                line_items=line_items, font_name=text_font,
+                                font_size=font_size, color_hex=text_color
+                            )
+                        else:
+                            shm_rendered = render_to_shm(
+                                line_items, overlay_model,
+                                mw, mh, text_font, font_size, text_color
+                            )
                     elif text_position in ('L2R', 'R2L', 'T2B', 'B2T'):
                         duration = config.get('display_duration', 30)
                         items = scroll_lr_items if text_position in ('L2R', 'R2L') else scroll_tb_items
@@ -1349,8 +1459,11 @@ def send_to_fpp(name):
                 else:
                     logging.info(f"✅ PIL {'scroll' if scroll_started else 'static'} render active")
 
-                state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
-                logging.info(f"   Overlay state=3: {state_resp.status_code}")
+                # State 2 (Opaque) for image background so it covers the display fully.
+                # State 3 (Transparent RGB) for normal/FSEQ background (black = transparent).
+                overlay_state = 2 if (img_bg_path and shm_rendered) else 3
+                state_resp = requests.put(state_url, json={"State": overlay_state}, timeout=3)
+                logging.info(f"   Overlay state={overlay_state}: {state_resp.status_code}")
 
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
@@ -1397,6 +1510,41 @@ def start_default_playlist():
 
             logging.error(f"❌ FSEQ Effect Start failed: {response.status_code} - {response.text}")
             return False
+
+        elif default_playlist.startswith('vid:'):
+            # Video file — use FPP Media Start command with loop=true
+            vid_name = default_playlist[4:]
+            cmd_url = (f"{fpp_host}/api/command/"
+                       f"{urllib.parse.quote('Media Start')}/"
+                       f"{urllib.parse.quote(vid_name)}/true")
+            logging.info(f"▶️  Starting video (loop): {vid_name}")
+            response = requests.get(cmd_url, timeout=5)
+            logging.info(f"   Response: {response.status_code} - {response.text}")
+            if response.status_code == 200:
+                logging.info(f"✅ Video started (looping)")
+                return True
+            logging.error(f"❌ Media Start failed: {response.status_code} - {response.text}")
+            return False
+
+        elif default_playlist.startswith('img:'):
+            # Static image — render to overlay model shared memory
+            img_name = default_playlist[4:]
+            img_path = os.path.join(FPP_IMAGES_PATH, img_name)
+            overlay_model = config.get('overlay_model_name', '')
+            mw = config.get('overlay_model_width', 0)
+            mh = config.get('overlay_model_height', 0)
+            if PIL_AVAILABLE and overlay_model and mw > 0 and mh > 0 and os.path.exists(img_path):
+                ok = render_image_to_shm(img_path, overlay_model, mw, mh)
+                if ok:
+                    encoded = urllib.parse.quote(overlay_model)
+                    state_url = f"{fpp_host}/api/overlays/model/{encoded}/state"
+                    requests.put(state_url, json={"State": 2}, timeout=3)  # Opaque
+                    logging.info(f"✅ Image background set: {img_name}")
+                    return True
+            logging.warning(f"⚠️  Image background failed: PIL={PIL_AVAILABLE} model={overlay_model} "
+                            f"dims={mw}x{mh} exists={os.path.exists(img_path) if img_path else False}")
+            return False
+
         else:
             command = "Start Playlist"
             command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/true"
@@ -1448,16 +1596,36 @@ def return_to_default_playlist():
             return
 
         import urllib.parse
-        name_playlist = config.get('name_display_playlist', '')
+        name_playlist  = config.get('name_display_playlist', '')
+        default_content = config.get('default_playlist', '')
 
         if name_playlist.startswith('seq:'):
             # Stop the names FSEQ Effect — waiting FSEQ keeps running underneath
             seq_name = name_playlist[4:].removesuffix('.fseq')
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=3)
             logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
+
+        elif name_playlist.startswith('vid:'):
+            # Stop the names video
+            vid_name = name_playlist[4:]
+            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Media Stop')}/{urllib.parse.quote(vid_name)}", timeout=3)
+            logging.info(f"⏹️  Media Stop (names video): {r.status_code} - {r.text}")
+            # Restart default content if it's also vid: or img: (won't auto-resume)
+            if default_content.startswith('vid:') or default_content.startswith('img:'):
+                start_default_playlist()
+
+        elif name_playlist.startswith('img:'):
+            # Image mode: overlay was used, nothing extra to stop.
+            # Re-apply default content (img:/vid: won't auto-resume)
+            if default_content.startswith('vid:') or default_content.startswith('img:'):
+                start_default_playlist()
+
         else:
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
             logging.info(f"⏹️  Stop Now ({r.status_code})")
+            # If default is vid:/img:, restart it (it was interrupted)
+            if default_content.startswith('vid:') or default_content.startswith('img:'):
+                start_default_playlist()
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
@@ -1796,15 +1964,15 @@ def index():
 
                         <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
                         <select id="default_playlist">
-                            <option value="">-- Select a playlist --</option>
+                            <option value="">-- Select content --</option>
                         </select>
-                        <p class="help-text">📺 This playlist or sequence loops while waiting for text messages</p>
+                        <p class="help-text">📺 This content loops while waiting for text messages</p>
 
                         <label>Name Display Content:</label>
                         <select id="name_display_playlist">
-                            <option value="">-- None (No Playlist Change) --</option>
+                            <option value="">-- None (Same as "Waiting" Content) --</option>
                         </select>
-                        <p class="help-text">🎬 This playlist or sequence plays when displaying a name</p>
+                        <p class="help-text">🎬 This content plays when displaying a name</p>
 
                         <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
                         <select id="overlay_model_name">
@@ -2005,12 +2173,12 @@ def index():
                             </div>
                             <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
 
-                            <!-- FSEQ background preview scrubber -->
+                            <!-- Canvas background preview (FSEQ / video / image) -->
                             <div style="margin-top:10px; padding:10px; background:#1a1a1a; border:1px solid #444; border-radius:4px;">
                                 <label style="margin:0; font-size:13px; cursor:pointer;">
                                     <input type="checkbox" id="fseq_preview_enabled" onchange="toggleFseqPreview()" style="margin-right:6px;">
-                                    FSEQ Background Preview
-                                    <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders the background sequence behind text on canvas</span>
+                                    Background Preview
+                                    <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders Names Display content (FSEQ / video frame / image) behind text on canvas</span>
                                 </label>
                                 <div id="fseq_preview_controls" style="display:none; margin-top:8px;">
                                     <div style="margin-bottom:6px;">
@@ -2642,11 +2810,13 @@ def index():
             }
 
             // ---------------------------------------------------------------------------
-            // FSEQ background preview
+            // Canvas background preview — supports FSEQ (.fseq), video (vid:), image (img:)
             // ---------------------------------------------------------------------------
             (function() {
-                var _fseqMeta = null;
-                var _fseqSeq  = null;   // clean name: no seq: prefix, no .fseq suffix
+                var _fseqMeta   = null;
+                var _fseqSeq    = null;   // clean FSEQ name: no seq: prefix, no .fseq suffix
+                var _contentType = null;  // 'seq', 'vid', or 'img'
+                var _contentFile = null;  // filename (vid:/img:) or clean seq name (seq:)
                 window._fseqBgImage = null;
 
                 function fmtTime(ms) {
@@ -2656,94 +2826,137 @@ def index():
                     return m + ':' + (s < 10 ? '0' : '') + s;
                 }
 
-                function getConfiguredSeq() {
+                // Returns {type, file} for the configured Names Display content, or null.
+                function getConfiguredContent() {
                     var dp = document.getElementById('name_display_playlist');
                     if (!dp || !dp.value) return null;
                     var val = dp.value;
-                    if (!val.startsWith('seq:')) return null;
-                    return val.replace(/^seq:/, '').replace(/\.fseq$/, '');
+                    if (val.startsWith('seq:')) {
+                        return { type: 'seq', file: val.replace(/^seq:/, '').replace(/\.fseq$/, '') };
+                    }
+                    if (val.startsWith('vid:')) {
+                        return { type: 'vid', file: val.replace(/^vid:/, '') };
+                    }
+                    if (val.startsWith('img:')) {
+                        return { type: 'img', file: val.replace(/^img:/, '') };
+                    }
+                    return null;  // plain playlist — no canvas preview
                 }
 
                 window.toggleFseqPreview = function() {
                     var en = document.getElementById('fseq_preview_enabled').checked;
                     document.getElementById('fseq_preview_controls').style.display = en ? '' : 'none';
                     if (en) {
-                        var seq = getConfiguredSeq();
+                        var ct = getConfiguredContent();
                         var label = document.getElementById('fseq_seq_label');
-                        if (seq) {
-                            label.textContent = 'Sequence: ' + seq + '.fseq';
-                            label.style.color = '#ccc';
-                            loadFseqPreview();
-                        } else {
-                            label.textContent = '\u26a0 Names Display Playlist is not set to a .fseq sequence \u2014 configure it above first.';
+                        if (!ct) {
+                            label.textContent = '\u26a0 Names Display Playlist must be a .fseq, video, or image file for background preview.';
                             label.style.color = '#ff9800';
+                            return;
                         }
+                        var icon = ct.type === 'seq' ? '\uD83C\uDFAC ' : ct.type === 'vid' ? '\uD83C\uDFA5 ' : '\uD83D\uDDBC\uFE0F ';
+                        label.textContent = icon + ct.file;
+                        label.style.color = '#ccc';
+                        loadBgPreview();
                     } else {
-                        window._fseqBgImage = null;
-                        _fseqMeta = null;
-                        _fseqSeq  = null;
-                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                        _clearState();
                     }
                 };
 
-                window.loadFseqPreview = function() {
-                    var seq = getConfiguredSeq();
-                    if (!seq) {
-                        alert('Names Display Playlist is not set to a .fseq sequence. Configure it in the Playlists section above.');
-                        return;
-                    }
-                    _fseqSeq = seq;
-                    var model  = document.getElementById('overlay_model_name').value || '';
+                function _clearState() {
+                    window._fseqBgImage = null;
+                    _fseqMeta = null;
+                    _fseqSeq  = null;
+                    _contentType = null;
+                    _contentFile = null;
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                }
+
+                function loadBgPreview() {
+                    var ct = getConfiguredContent();
+                    if (!ct) return;
+                    _contentType = ct.type;
+                    _contentFile = ct.file;
+                    _fseqSeq     = (ct.type === 'seq') ? ct.file : null;
+
                     var loadEl = document.getElementById('fseq_load_status');
                     loadEl.textContent = 'Loading\u2026';
                     loadEl.style.color = '#aaa';
 
-                    fetch('/api/fseq/info?sequence=' + encodeURIComponent(seq)
-                                        + '&model='    + encodeURIComponent(model))
-                        .then(function(r) { return r.json(); })
-                        .then(function(data) {
-                            if (data.error) {
-                                loadEl.textContent = '\u2717 ' + data.error;
-                                loadEl.style.color = '#f44336';
-                                return;
-                            }
-                            _fseqMeta = data;
-                            var ctype = data.compression_type === 0 ? 'uncompressed'
-                                      : data.compression_type === 1 ? 'zlib' : 'zstd';
-                            var info = data.frame_count + ' frames \u00b7 '
-                                + Math.round(data.fps) + ' fps \u00b7 '
-                                + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype;
-
-                            if (data.detected_start_channel) {
-                                info += ' \u00b7 start ch: ' + data.detected_start_channel;
-                                if (data.detected_channel_count) {
-                                    var bpp = Math.round(data.detected_channel_count /
-                                              (parseInt(document.getElementById('overlay_model_width').value) *
-                                               parseInt(document.getElementById('overlay_model_height').value)));
-                                    info += ' \u00b7 ' + (bpp === 4 ? 'RGBW' : 'RGB');
+                    if (ct.type === 'seq') {
+                        // ---- FSEQ: fetch info then show scrubber ----
+                        var model = document.getElementById('overlay_model_name').value || '';
+                        fetch('/api/fseq/info?sequence=' + encodeURIComponent(ct.file)
+                                              + '&model=' + encodeURIComponent(model))
+                            .then(function(r) { return r.json(); })
+                            .then(function(data) {
+                                if (data.error) {
+                                    loadEl.textContent = '\u2717 ' + data.error;
+                                    loadEl.style.color = '#f44336';
+                                    return;
                                 }
-                                loadEl.style.color = '#4CAF50';
-                            } else {
-                                info += ' \u00b7 \u26a0 start ch not found \u2014 verify overlay model name matches FPP channel output model';
-                                loadEl.style.color = '#ff9800';
-                            }
-                            loadEl.textContent = info;
+                                _fseqMeta = data;
+                                var ctype = data.compression_type === 0 ? 'uncompressed'
+                                          : data.compression_type === 1 ? 'zlib' : 'zstd';
+                                var mw2 = parseInt(document.getElementById('overlay_model_width').value)  || 0;
+                                var mh2 = parseInt(document.getElementById('overlay_model_height').value) || 0;
+                                var modelCh = data.detected_channel_count || (mw2 * mh2 * 3);
+                                var info = data.frame_count + ' frames \u00b7 '
+                                    + Math.round(data.fps) + ' fps \u00b7 '
+                                    + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype
+                                    + ' \u00b7 FSEQ ch: ' + data.channel_count
+                                    + ' \u00b7 model ch: ' + modelCh
+                                    + ' \u00b7 model: ' + mw2 + '\u00d7' + mh2;
+                                if (data.detected_start_channel) {
+                                    info += ' \u00b7 start ch: ' + data.detected_start_channel;
+                                    if (data.detected_channel_count) {
+                                        var bpp = Math.round(data.detected_channel_count / (mw2 * mh2));
+                                        info += ' \u00b7 ' + (bpp === 4 ? 'RGBW' : 'RGB');
+                                    }
+                                    loadEl.style.color = '#4CAF50';
+                                } else {
+                                    info += ' \u00b7 \u26a0 start ch not found \u2014 verify overlay model name';
+                                    loadEl.style.color = '#ff9800';
+                                }
+                                loadEl.textContent = info;
+                                var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
+                                var scrubber = document.getElementById('fseq_scrubber');
+                                scrubber.max = totalSec;
+                                scrubber.value = 0;
+                                document.getElementById('fseq_scrubber_row').style.display = '';
+                                document.getElementById('fseq_time_display').textContent =
+                                    '0:00 / ' + fmtTime(data.duration_ms);
+                                document.getElementById('fseq_status').textContent = '';
+                                doFseqFetch(0);
+                            })
+                            .catch(function(e) {
+                                loadEl.textContent = '\u2717 ' + e;
+                                loadEl.style.color = '#f44336';
+                            });
 
-                            var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
-                            var scrubber = document.getElementById('fseq_scrubber');
-                            scrubber.max = totalSec;
-                            scrubber.value = 0;
-                            document.getElementById('fseq_scrubber_row').style.display = '';
-                            document.getElementById('fseq_time_display').textContent =
-                                '0:00 / ' + fmtTime(data.duration_ms);
-                            document.getElementById('fseq_status').textContent = '';
-                            doFseqFetch(0);
-                        })
-                        .catch(function(e) {
-                            loadEl.textContent = '\u2717 ' + e;
-                            loadEl.style.color = '#f44336';
-                        });
-                };
+                    } else if (ct.type === 'vid') {
+                        // ---- Video: show scrubber (time in seconds), fetch frames ----
+                        loadEl.textContent = 'Video preview \u2014 scrub to choose frame';
+                        loadEl.style.color = '#4CAF50';
+                        var scrubber = document.getElementById('fseq_scrubber');
+                        scrubber.max = 300;  // assume up to 5 min; user can scrub
+                        scrubber.value = 0;
+                        document.getElementById('fseq_scrubber_row').style.display = '';
+                        document.getElementById('fseq_time_display').textContent = '0:00';
+                        document.getElementById('fseq_status').textContent = '';
+                        doMediaFetch(0);
+
+                    } else {
+                        // ---- Image: load once, no scrubber ----
+                        loadEl.textContent = 'Loading image\u2026';
+                        loadEl.style.color = '#aaa';
+                        document.getElementById('fseq_scrubber_row').style.display = 'none';
+                        doMediaFetch(0);
+                    }
+                }
+
+                // Alias so old callers still work
+                window.loadFseqPreview = loadBgPreview;
 
                 var _scrubTimer = null;
                 var _pendingImg  = null;
@@ -2771,14 +2984,29 @@ def index():
                     if (_fseqMeta.detected_channel_count) {
                         url += '&channel_count=' + _fseqMeta.detected_channel_count;
                     }
+                    _loadImageUrl(url);
+                }
 
+                function doMediaFetch(seconds) {
+                    if (!_contentType || !_contentFile || _contentType === 'seq') return;
+                    var mw = document.getElementById('overlay_model_width').value  || 0;
+                    var mh = document.getElementById('overlay_model_height').value || 0;
+                    var url = '/api/media/preview'
+                        + '?type='   + _contentType
+                        + '&file='   + encodeURIComponent(_contentFile)
+                        + '&time='   + Math.floor(seconds)
+                        + '&width='  + mw
+                        + '&height=' + mh;
+                    _loadImageUrl(url);
+                }
+
+                function _loadImageUrl(url) {
                     var statusEl = document.getElementById('fseq_status');
-                    // Cancel previous in-flight image to avoid race conditions
                     if (_pendingImg) { _pendingImg.onload = null; _pendingImg.onerror = null; _pendingImg.src = ''; }
                     var img = new Image();
                     _pendingImg = img;
                     img.onload = function() {
-                        if (img !== _pendingImg) return;  // superseded
+                        if (img !== _pendingImg) return;
                         window._fseqBgImage = img;
                         statusEl.textContent = '';
                         if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
@@ -2789,7 +3017,7 @@ def index():
                             statusEl.textContent = '\u2717 ' + (d.error || 'Failed to load frame');
                             statusEl.style.color = '#f44336';
                         }).catch(function() {
-                            statusEl.textContent = '\u2717 Failed to load frame';
+                            statusEl.textContent = '\u2717 Failed to load preview';
                             statusEl.style.color = '#f44336';
                         });
                     };
@@ -2797,22 +3025,26 @@ def index():
                 }
 
                 window.fseqScrub = function(seconds) {
-                    if (!_fseqMeta) return;
-                    document.getElementById('fseq_time_display').textContent =
-                        fmtTime(parseInt(seconds) * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
-                    // Debounce: wait 150ms after slider stops before fetching
-                    clearTimeout(_scrubTimer);
-                    _scrubTimer = setTimeout(function() { doFseqFetch(seconds); }, 150);
+                    var loadEl = document.getElementById('fseq_load_status');
+                    if (_contentType === 'seq') {
+                        if (!_fseqMeta) return;
+                        document.getElementById('fseq_time_display').textContent =
+                            fmtTime(parseInt(seconds) * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
+                        clearTimeout(_scrubTimer);
+                        _scrubTimer = setTimeout(function() { doFseqFetch(seconds); }, 150);
+                    } else if (_contentType === 'vid') {
+                        document.getElementById('fseq_time_display').textContent = fmtTime(parseInt(seconds) * 1000);
+                        clearTimeout(_scrubTimer);
+                        _scrubTimer = setTimeout(function() { doMediaFetch(seconds); }, 150);
+                    }
+                    // img: no scrubbing
                 };
 
                 window.clearFseqPreview = function() {
-                    window._fseqBgImage = null;
-                    _fseqMeta = null;
-                    _fseqSeq  = null;
+                    _clearState();
                     document.getElementById('fseq_scrubber_row').style.display = 'none';
                     document.getElementById('fseq_status').textContent = '';
                     document.getElementById('fseq_load_status').textContent = '';
-                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 };
             })();
 
@@ -2887,6 +3119,35 @@ def index():
                         defaultSelect.add(sg1);
                         nameSelect.add(sg2);
                     }
+
+                    if (data.videos && data.videos.length > 0) {
+                        const vg1 = document.createElement('optgroup');
+                        vg1.label = '🎥 Videos';
+                        const vg2 = document.createElement('optgroup');
+                        vg2.label = '🎥 Videos';
+                        data.videos.forEach(vid => {
+                            const val = 'vid:' + vid;
+                            vg1.appendChild(new Option(vid, val, false, val === currentDefault));
+                            vg2.appendChild(new Option(vid, val, false, val === currentName));
+                        });
+                        defaultSelect.add(vg1);
+                        nameSelect.add(vg2);
+                    }
+
+                    if (data.images && data.images.length > 0) {
+                        const ig1 = document.createElement('optgroup');
+                        ig1.label = '🖼️ Images';
+                        const ig2 = document.createElement('optgroup');
+                        ig2.label = '🖼️ Images';
+                        data.images.forEach(img => {
+                            const val = 'img:' + img;
+                            ig1.appendChild(new Option(img, val, false, val === currentDefault));
+                            ig2.appendChild(new Option(img, val, false, val === currentName));
+                        });
+                        defaultSelect.add(ig1);
+                        nameSelect.add(ig2);
+                    }
+
                     window._fppSeqList = data.sequences || [];
 
                     const modelSelect = document.getElementById('overlay_model_name');
@@ -3173,15 +3434,17 @@ def get_fpp_data():
         if _fpp_data_cache and (time.time() - _fpp_data_cache_time) < _FPP_DATA_CACHE_TTL:
             return jsonify(_fpp_data_cache)
 
-        # Fetch all 4 in parallel instead of sequentially
+        # Fetch all in parallel instead of sequentially
         results = {}
         tasks = {
             'playlists': get_fpp_playlists,
             'sequences': get_fpp_sequences,
             'models':    get_fpp_models,
             'fonts':     get_fpp_fonts,
+            'videos':    get_fpp_videos,
+            'images':    get_fpp_images,
         }
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {executor.submit(fn): key for key, fn in tasks.items()}
             for future in as_completed(futures):
                 results[futures[future]] = future.result()
@@ -3312,6 +3575,73 @@ def fseq_frame():
     except Exception as e:
         logging.error(f"FSEQ frame error: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/media/preview')
+def media_preview():
+    """Return a canvas-preview PNG for an image or video file.
+    ?type=img&file=filename.jpg  — resize image to model dims and return as PNG.
+    ?type=vid&file=filename.mp4&time=0 — extract a frame at `time` seconds via ffmpeg,
+        resize to model dims, return as PNG.  Falls back to a black frame if ffmpeg
+        is unavailable or extraction fails."""
+    if not PIL_AVAILABLE:
+        return jsonify({'error': 'Pillow not installed — run fpp_install.sh'}), 503
+
+    media_type = request.args.get('type', '').strip()   # 'img' or 'vid'
+    filename   = request.args.get('file', '').strip()
+    time_sec   = max(0.0, float(request.args.get('time', 0)))
+    width  = int(request.args.get('width',  config.get('overlay_model_width',  0)))
+    height = int(request.args.get('height', config.get('overlay_model_height', 0)))
+
+    if not filename or media_type not in ('img', 'vid'):
+        return jsonify({'error': 'Requires ?type=img|vid&file=filename'}), 400
+    if width <= 0 or height <= 0:
+        return jsonify({'error': 'Overlay model dimensions unknown — select a model first'}), 400
+
+    # Security: no path traversal — strip all directory components
+    filename = os.path.basename(filename)
+
+    try:
+        if media_type == 'img':
+            img_path = os.path.join(FPP_IMAGES_PATH, filename)
+            if not os.path.exists(img_path):
+                return jsonify({'error': f'Image not found: {filename}'}), 404
+            img = Image.open(img_path).convert('RGB')
+            img = img.resize((width, height), Image.LANCZOS)
+
+        else:  # vid
+            vid_path = os.path.join(FPP_VIDEOS_PATH, filename)
+            if not os.path.exists(vid_path):
+                return jsonify({'error': f'Video not found: {filename}'}), 404
+            # Try ffmpeg to extract a single frame at the requested timestamp
+            import subprocess as _sp
+            try:
+                result = _sp.run(
+                    [
+                        'ffmpeg', '-ss', str(time_sec), '-i', vid_path,
+                        '-vframes', '1', '-f', 'image2pipe',
+                        '-vcodec', 'png', '-'
+                    ],
+                    capture_output=True, timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    img = Image.open(io.BytesIO(result.stdout)).convert('RGB')
+                    img = img.resize((width, height), Image.LANCZOS)
+                else:
+                    # ffmpeg failed — return a dark grey placeholder
+                    img = Image.new('RGB', (width, height), (32, 32, 32))
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                # ffmpeg not installed on this system — return placeholder
+                img = Image.new('RGB', (width, height), (32, 32, 32))
+
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return Response(buf.read(), mimetype='image/png',
+                        headers={'Cache-Control': 'no-store'})
+    except Exception as e:
+        logging.error(f"media_preview error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/test')
 def test_twilio():
