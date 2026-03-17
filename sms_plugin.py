@@ -2110,10 +2110,7 @@ def index():
                         </div>
 
                     </div>
-                </div>
 
-                <!-- RIGHT COLUMN: Filters + Text Display -->
-                <div class="column">
                     <div class="section">
                         <h2>Filters</h2>
 
@@ -2229,8 +2226,13 @@ def index():
                         <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
                         <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top: 4px;">🚫 View Blocklist</button>
 
-                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-                        <h2 style="margin-top: 0;">Text Display Options</h2>
+                    </div>
+                </div>
+
+                <!-- RIGHT COLUMN: Text Display -->
+                <div class="column">
+                    <div class="section">
+                        <h2>Text Display Options</h2>
 
                         <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
                         <style>
