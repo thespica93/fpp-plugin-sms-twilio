@@ -2854,7 +2854,7 @@ def index():
                             label.style.color = '#ff9800';
                             return;
                         }
-                        var icon = ct.type === 'seq' ? '\uD83C\uDFAC ' : ct.type === 'vid' ? '\uD83C\uDFA5 ' : '\uD83D\uDDBC\uFE0F ';
+                        var icon = ct.type === 'seq' ? '🎬 ' : ct.type === 'vid' ? '🎥 ' : '🖼️ ';
                         label.textContent = icon + ct.file;
                         label.style.color = '#ccc';
                         loadBgPreview();
