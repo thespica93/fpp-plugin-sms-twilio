@@ -3570,7 +3570,25 @@ def fseq_debug():
     try:
         hdr = parse_fseq_header(filepath)
         comp_names = {0: 'uncompressed', 1: 'zlib', 2: 'zstd'}
+
+        # Read raw header bytes for format analysis (everything after fixed 32-byte header)
+        with open(filepath, 'rb') as _f:
+            _raw_full = _f.read(min(hdr['chan_data_offset'], 600))
+        _minor_ver = _raw_full[6] if len(_raw_full) > 6 else None
+        _raw_after32 = _raw_full[32:]   # bytes 32 onwards (up to ~568 bytes)
+
+        # Alt parse: try sparse ranges at offset 32 (in case comp block table is absent)
+        _alt_ranges = []
+        _n = hdr['num_sparse_ranges']
+        if _n > 0 and len(_raw_after32) >= _n * 6:
+            for _i in range(_n):
+                _b = _i * 6
+                _s = _raw_after32[_b] | (_raw_after32[_b+1] << 8) | (_raw_after32[_b+2] << 16)
+                _c = _raw_after32[_b+3] | (_raw_after32[_b+4] << 8) | (_raw_after32[_b+5] << 16)
+                _alt_ranges.append({'start': _s, 'count': _c})
+
         result['fseq'] = {
+            'minor_version':     _minor_ver,
             'channel_count':     hdr['channel_count'],
             'frame_count':       hdr['frame_count'],
             'fps':               round(hdr['fps'], 2),
@@ -3582,6 +3600,11 @@ def fseq_debug():
             'chan_data_offset':  hdr['chan_data_offset'],
             'sparse_ranges':     hdr['sparse_ranges'],   # list of {start, count}
             'sparse_sum':        sum(sr['count'] for sr in hdr['sparse_ranges']),
+            # Alt parse: treat sparse table as starting immediately at offset 32
+            'alt_sparse_from_32':     _alt_ranges,
+            'alt_sparse_sum_from_32': sum(r['count'] for r in _alt_ranges),
+            # Raw bytes after fixed header (hex) for manual inspection
+            'raw_after32_hex':   _raw_after32.hex(),
         }
     except Exception as e:
         result['fseq_error'] = str(e)
