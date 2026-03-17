@@ -2280,7 +2280,7 @@ def index():
                             <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
 
                             <!-- Canvas background preview (FSEQ / video / image) -->
-                            <div style="margin-top:10px; padding:10px; background:#1a1a1a; border:1px solid #444; border-radius:4px;">
+                            <div style="margin-top:10px; padding:10px; background:#2d2d2d; border:1px solid #444; border-radius:4px;">
                                 <label style="margin:0; font-size:13px; cursor:pointer;">
                                     <input type="checkbox" id="fseq_preview_enabled" onchange="toggleFseqPreview()" style="margin-right:6px;">
                                     Background Preview
@@ -3019,7 +3019,7 @@ def index():
                                         var bpp = Math.round(data.detected_channel_count / (mw2 * mh2));
                                         info += ' \u00b7 ' + (bpp === 4 ? 'RGBW' : 'RGB');
                                     }
-                                    loadEl.style.color = '#4CAF50';
+                                    loadEl.style.color = '#aaa';
                                 } else {
                                     info += ' \u00b7 \u26a0 start ch not found \u2014 verify overlay model name';
                                     loadEl.style.color = '#ff9800';
@@ -3032,7 +3032,8 @@ def index():
                                 document.getElementById('fseq_scrubber_row').style.display = '';
                                 document.getElementById('fseq_time_display').textContent =
                                     '0:00 / ' + fmtTime(data.duration_ms);
-                                document.getElementById('fseq_status').textContent = '';
+                                document.getElementById('fseq_status').textContent =
+                                    'Scrub to preview different parts of the sequence';
                                 doFseqFetch(0);
                             })
                             .catch(function(e) {
@@ -3042,14 +3043,15 @@ def index():
 
                     } else if (ct.type === 'vid') {
                         // ---- Video: show scrubber (time in seconds), fetch frames ----
-                        loadEl.textContent = 'Video preview \u2014 scrub to choose frame';
-                        loadEl.style.color = '#4CAF50';
+                        loadEl.textContent = 'Video preview loaded';
+                        loadEl.style.color = '#aaa';
                         var scrubber = document.getElementById('fseq_scrubber');
                         scrubber.max = 300;  // assume up to 5 min; user can scrub
                         scrubber.value = 0;
                         document.getElementById('fseq_scrubber_row').style.display = '';
                         document.getElementById('fseq_time_display').textContent = '0:00';
-                        document.getElementById('fseq_status').textContent = '';
+                        document.getElementById('fseq_status').textContent =
+                            'Scrub to preview different parts of the video';
                         doMediaFetch(0);
 
                     } else {
