@@ -4800,6 +4800,10 @@ def view_messages():
                     clearTimeout(refreshTimer);
                     if (!loadedTabs[date]) { loadedTabs[date] = true; loadHistoryTab(date); }
                 }
+                // Class change doesn't trigger MutationObserver — report height explicitly
+                requestAnimationFrame(function() {
+                    window.parent.postMessage({ type: 'iframeHeight', height: document.body.scrollHeight }, '*');
+                });
             }
 
             function loadHistoryTab(date) {
