@@ -557,28 +557,55 @@ def parse_fseq_header(filepath):
     channel_count     = struct.unpack_from('<I', raw, 10)[0]
     frame_count       = struct.unpack_from('<I', raw, 14)[0]
     step_time_ms      = raw[18]
-    compression_type  = raw[19] & 0x0F   # 0=none, 1=zlib, 2=zstd
+    compression_type  = raw[19] & 0x0F   # 0=none, 1=zlib, 2=zstd (per xLights: 1=zstd)
     # Offset 20 and 21 are separate uint8 fields — NOT a single uint16
     num_comp_blocks   = raw[20]           # uint8
     num_sparse_ranges = raw[21]           # uint8
 
-    # Compression block table (only used/meaningful for compressed FSEQs)
-    comp_blocks = []
-    if compression_type in (1, 2) and num_comp_blocks > 0:
-        with open(filepath, 'rb') as f:
-            f.seek(32)
-            block_raw = f.read(num_comp_blocks * 8)
-        for i in range(num_comp_blocks):
-            first_frame = struct.unpack_from('<I', block_raw, i * 8)[0]
-            data_size   = struct.unpack_from('<I', block_raw, i * 8 + 4)[0]
-            comp_blocks.append({'first_frame': first_frame, 'data_size': data_size})
+    # ── Auto-detect zstd compression ─────────────────────────────────────────
+    # FSEQ v2.2 (minor_version >= 2) sometimes writes compression_type=0 in
+    # byte 19 even though the data is zstd-compressed.  Probe the actual data
+    # at chan_data_offset for the zstd frame magic (0xFD2FB528 little-endian).
+    _ZSTD_MAGIC = b'\x28\xB5\x2F\xFD'
+    with open(filepath, 'rb') as _f:
+        _f.seek(chan_data_offset)
+        _probe = _f.read(4)
+    effective_ctype = compression_type
+    if _probe == _ZSTD_MAGIC and compression_type == 0:
+        effective_ctype = 2   # override: treat as zstd
+        logging.info(
+            "FSEQ: header says uncompressed (byte 19 = 0) but zstd magic detected "
+            "at chan_data_offset — treating as zstd (FSEQ v2.2 quirk)"
+        )
 
-    # Sparse range table — always starts right after the comp block table.
-    # Each entry is 6 bytes: uint24-LE start_channel + uint24-LE channel_count.
-    # When present these define which logical channels are stored per frame (packed
-    # together); channel_count in the header = sum of all range lengths.
+    # ── Compression block table ───────────────────────────────────────────────
+    # When compression is active (or auto-detected), scan from offset 32 for
+    # valid (firstFrame uint32, dataLen uint32) block entries.  FSEQ v2.2 may
+    # report num_comp_blocks incorrectly in byte 20; derive actual count by
+    # scanning until firstFrame >= frameCount or dataLen == 0.
+    comp_blocks = []
+    if effective_ctype in (1, 2):
+        with open(filepath, 'rb') as _f:
+            _f.seek(32)
+            _blk_raw = _f.read(chan_data_offset - 32)
+        _off = 0
+        while _off + 7 < len(_blk_raw):
+            ff = struct.unpack_from('<I', _blk_raw, _off)[0]
+            ds = struct.unpack_from('<I', _blk_raw, _off + 4)[0]
+            if ff >= frame_count or ds == 0:
+                break
+            comp_blocks.append({'first_frame': ff, 'data_size': ds})
+            _off += 8
+
+    # ── Sparse range table ────────────────────────────────────────────────────
+    # For standard v2.0 files: sparse ranges follow the comp block table at
+    # offset 32 + num_comp_blocks*8, each entry 6 bytes (uint24 + uint24).
+    # For auto-detected zstd (v2.2): the block table fills the entire header
+    # space; sparse ranges are absent or in a variable-length metadata section
+    # we don't parse here — discard to ensure direct channel offset mapping.
     sparse_ranges = []
-    if num_sparse_ranges > 0:
+    if effective_ctype == compression_type and num_sparse_ranges > 0:
+        # Standard v2.0: sparse ranges at fixed position after comp block table
         sr_table_offset = 32 + num_comp_blocks * 8
         with open(filepath, 'rb') as f:
             f.seek(sr_table_offset)
@@ -590,18 +617,19 @@ def parse_fseq_header(filepath):
 
     fps = 1000.0 / step_time_ms if step_time_ms > 0 else 25.0
     return {
-        'filepath':          filepath,
-        'chan_data_offset':   chan_data_offset,
-        'channel_count':     channel_count,
-        'frame_count':       frame_count,
-        'step_time_ms':      step_time_ms,
-        'fps':               fps,
-        'duration_ms':       frame_count * step_time_ms,
-        'compression_type':  compression_type,
-        'num_comp_blocks':   num_comp_blocks,
-        'num_sparse_ranges': num_sparse_ranges,
-        'comp_blocks':       comp_blocks,
-        'sparse_ranges':     sparse_ranges,
+        'filepath':              filepath,
+        'chan_data_offset':      chan_data_offset,
+        'channel_count':         channel_count,
+        'frame_count':           frame_count,
+        'step_time_ms':          step_time_ms,
+        'fps':                   fps,
+        'duration_ms':           frame_count * step_time_ms,
+        'compression_type':      effective_ctype,
+        'raw_compression_type':  compression_type,
+        'num_comp_blocks':       num_comp_blocks,
+        'num_sparse_ranges':     num_sparse_ranges,
+        'comp_blocks':           comp_blocks,
+        'sparse_ranges':         sparse_ranges,
     }
 
 
@@ -701,7 +729,11 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
             try:
                 decompressed = dctx.decompress(compressed)
             except Exception:
-                decompressed = dctx.decompress(compressed, max_output_size=total_ch * 2000)
+                # Fallback with an explicit size cap — allow up to 64 frames per
+                # block, which is far more than any real FSEQ uses (typically 1-4).
+                decompressed = dctx.decompress(
+                    compressed, max_output_size=total_ch * 64
+                )
 
         local_frame  = frame_idx - block['first_frame']
         frame_offset = local_frame * total_ch + frame_byte
@@ -3588,23 +3620,22 @@ def fseq_debug():
                 _alt_ranges.append({'start': _s, 'count': _c})
 
         result['fseq'] = {
-            'minor_version':     _minor_ver,
-            'channel_count':     hdr['channel_count'],
-            'frame_count':       hdr['frame_count'],
-            'fps':               round(hdr['fps'], 2),
-            'step_time_ms':      hdr['step_time_ms'],
-            'compression_type':  hdr['compression_type'],
-            'compression_name':  comp_names.get(hdr['compression_type'], 'unknown'),
-            'num_comp_blocks':   hdr['num_comp_blocks'],
-            'num_sparse_ranges': hdr['num_sparse_ranges'],
-            'chan_data_offset':  hdr['chan_data_offset'],
-            'sparse_ranges':     hdr['sparse_ranges'],   # list of {start, count}
-            'sparse_sum':        sum(sr['count'] for sr in hdr['sparse_ranges']),
-            # Alt parse: treat sparse table as starting immediately at offset 32
-            'alt_sparse_from_32':     _alt_ranges,
-            'alt_sparse_sum_from_32': sum(r['count'] for r in _alt_ranges),
-            # Raw bytes after fixed header (hex) for manual inspection
-            'raw_after32_hex':   _raw_after32.hex(),
+            'minor_version':          _minor_ver,
+            'channel_count':          hdr['channel_count'],
+            'frame_count':            hdr['frame_count'],
+            'fps':                    round(hdr['fps'], 2),
+            'step_time_ms':           hdr['step_time_ms'],
+            'raw_compression_type':   hdr.get('raw_compression_type', hdr['compression_type']),
+            'effective_compression_type': hdr['compression_type'],
+            'compression_name':       comp_names.get(hdr['compression_type'], 'unknown'),
+            'num_comp_blocks_header': hdr['num_comp_blocks'],
+            'num_comp_blocks_actual': len(hdr['comp_blocks']),
+            'num_sparse_ranges':      hdr['num_sparse_ranges'],
+            'chan_data_offset':        hdr['chan_data_offset'],
+            'sparse_ranges':          hdr['sparse_ranges'],
+            'sparse_sum':             sum(sr['count'] for sr in hdr['sparse_ranges']),
+            # Show first 5 blocks so we can verify the block table is parsed correctly
+            'first_5_comp_blocks':    hdr['comp_blocks'][:5],
         }
     except Exception as e:
         result['fseq_error'] = str(e)
