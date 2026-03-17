@@ -50,9 +50,13 @@ log_and_show "[3/4] Installing Requests... please wait"
 pip3 install --break-system-packages --no-cache-dir requests==2.31.0 >> "$LOG" 2>&1
 log_and_show "[3/4] Requests complete"
 
-log_and_show "[4/4] Installing Pillow (image rendering)... please wait"
+log_and_show "[4/5] Installing Pillow (image rendering)... please wait"
 pip3 install --break-system-packages --no-cache-dir pillow >> "$LOG" 2>&1
-log_and_show "[4/4] Pillow complete"
+log_and_show "[4/5] Pillow complete"
+
+log_and_show "[5/5] Installing zstandard (FSEQ zstd decompression)... please wait"
+pip3 install --break-system-packages --no-cache-dir zstandard >> "$LOG" 2>&1
+log_and_show "[5/5] zstandard complete"
 
 # Create config files if they don't exist
 [ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json

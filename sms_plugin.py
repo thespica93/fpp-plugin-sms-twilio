@@ -25,6 +25,14 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+# zstandard for FSEQ zstd decompression (optional — install via fpp_install.sh)
+try:
+    import zstandard as _zstd_mod
+    ZSTD_AVAILABLE = True
+except ImportError:
+    _zstd_mod = None
+    ZSTD_AVAILABLE = False
+
 _scroll_thread = None   # background PIL scroll animation thread
 
 # Configuration
@@ -602,11 +610,17 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
             f.seek(offset)
             return f.read(ch_count)
 
-    elif ctype == 1:
-        # zlib block compression
+    elif ctype in (1, 2):
+        # zlib (1) or zstd (2) block compression — same block layout, different decompressor
+        if ctype == 2 and not ZSTD_AVAILABLE:
+            raise ValueError(
+                "FSEQ uses zstd compression — run fpp_install.sh to install the "
+                "'zstandard' library, then restart the plugin."
+            )
+
         blocks = header['comp_blocks']
         if not blocks:
-            raise ValueError("zlib FSEQ has no compression block table")
+            raise ValueError(f"{'zlib' if ctype==1 else 'zstd'} FSEQ has no compression block table")
 
         # Find the block that contains frame_idx
         block_idx = len(blocks) - 1
@@ -626,15 +640,23 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
             f.seek(data_offset)
             compressed = f.read(block['data_size'])
 
-        decompressed = _zlib.decompress(compressed)
+        if ctype == 1:
+            decompressed = _zlib.decompress(compressed)
+        else:
+            # zstd: xLights stores content size in frame header so decompress() works directly
+            dctx = _zstd_mod.ZstdDecompressor()
+            try:
+                decompressed = dctx.decompress(compressed)
+            except Exception:
+                # Fallback for frames that don't store content size
+                decompressed = dctx.decompress(compressed, max_output_size=total_ch * 2000)
+
         local_frame  = frame_idx - block['first_frame']
         frame_offset = local_frame * total_ch + start_ch
         return decompressed[frame_offset: frame_offset + ch_count]
 
     else:
-        raise ValueError(
-            f"FSEQ compression type {ctype} (zstd) is not supported for preview"
-        )
+        raise ValueError(f"FSEQ compression type {ctype} is not supported")
 
 
 def get_model_channel_info(model_name):
@@ -2385,7 +2407,7 @@ def index():
                     </p>
 
                     <label>Test Name:</label>
-                    <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+                    <input type="text" id="test_name" placeholder="Enter a name to test">
 
                     <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
 
@@ -2399,7 +2421,7 @@ def index():
                     ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials. </p>
 
                 <label>Phone Number:</label>
-                <input type="text" id="test_sms_phone" placeholder="+18005551234">
+                <input type="text" id="test_sms_phone" placeholder="Number to Text">
 
                 <label>Message Type:</label>
                 <select id="test_sms_type">
@@ -3469,6 +3491,90 @@ def test_fpp_api():
         return jsonify({"success": success, "status": status})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/fseq/debug')
+def fseq_debug():
+    """Diagnostic endpoint — returns JSON describing exactly how the FSEQ frame would be read.
+    ?sequence=name&model=ModelName   (same params as /api/fseq/frame)
+    Helps diagnose channel-offset and bpp issues without needing SSH."""
+    seq        = request.args.get('sequence', '').strip()
+    model_name = request.args.get('model', config.get('overlay_model_name', '')).strip()
+
+    if not seq:
+        return jsonify({'error': 'No sequence specified'}), 400
+
+    name     = seq.removeprefix('seq:').removesuffix('.fseq')
+    filepath = os.path.join(FSEQ_SEQUENCE_PATH, name + '.fseq')
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
+
+    result = {
+        'sequence':      name,
+        'model':         model_name,
+        'zstd_available': ZSTD_AVAILABLE,
+        'pil_available':  PIL_AVAILABLE,
+    }
+
+    try:
+        hdr = parse_fseq_header(filepath)
+        comp_names = {0: 'uncompressed', 1: 'zlib', 2: 'zstd'}
+        result['fseq'] = {
+            'channel_count':     hdr['channel_count'],
+            'frame_count':       hdr['frame_count'],
+            'fps':               round(hdr['fps'], 2),
+            'step_time_ms':      hdr['step_time_ms'],
+            'compression_type':  hdr['compression_type'],
+            'compression_name':  comp_names.get(hdr['compression_type'], 'unknown'),
+            'num_comp_blocks':   hdr['num_comp_blocks'],
+            'chan_data_offset':  hdr['chan_data_offset'],
+        }
+    except Exception as e:
+        result['fseq_error'] = str(e)
+        return jsonify(result)
+
+    sc, cc = get_model_channel_info(model_name) if model_name else (None, None)
+    mw = int(request.args.get('width',  config.get('overlay_model_width',  0)))
+    mh = int(request.args.get('height', config.get('overlay_model_height', 0)))
+    num_pixels = mw * mh if mw > 0 and mh > 0 else 0
+    ch_count   = cc if cc else (num_pixels * 3 if num_pixels else None)
+    bpp        = (ch_count // num_pixels) if (num_pixels and ch_count) else None
+    start_ch   = (sc - 1) if sc else 0   # 0-indexed
+
+    result['model_info'] = {
+        'start_channel_1idx': sc,
+        'channel_count':      cc,
+        'width':              mw,
+        'height':             mh,
+        'num_pixels':         num_pixels,
+        'effective_ch_count': ch_count,
+        'effective_bpp':      bpp,
+        'start_ch_0idx':      start_ch,
+        'ch_reset_would_fire': (ch_count is not None and start_ch + ch_count > hdr['channel_count']),
+    }
+
+    # Try reading frame 0 and show first 5 pixel values
+    if ch_count and num_pixels:
+        try:
+            raw = read_fseq_frame(hdr, 0, start_ch, ch_count)
+            sample_pixels = []
+            actual_bpp = bpp or 3
+            for i in range(min(5, num_pixels)):
+                b = i * actual_bpp
+                if b + 2 < len(raw):
+                    sample_pixels.append([raw[b], raw[b+1], raw[b+2]])
+                else:
+                    sample_pixels.append(None)
+            result['frame0_sample'] = {
+                'bytes_read':    len(raw),
+                'bytes_expected': ch_count,
+                'first_5_pixels_rgb': sample_pixels,
+                'all_zero':      all(v == 0 for v in raw),
+                'all_same':      len(set(raw)) == 1,
+            }
+        except Exception as e:
+            result['frame0_error'] = str(e)
+
+    return jsonify(result)
 
 @app.route('/api/fseq/info')
 def fseq_info():
