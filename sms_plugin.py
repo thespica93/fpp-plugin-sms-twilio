@@ -533,10 +533,14 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
     ctype     = header['compression_type']
 
     if start_ch + ch_count > total_ch:
-        raise ValueError(
-            f"Channel range {start_ch}–{start_ch + ch_count} exceeds "
-            f"file channel count {total_ch}"
-        )
+        # FSEQ is model-specific — it only contains this model's channels
+        # starting at offset 0, so ignore the show-level start channel.
+        if ch_count <= total_ch:
+            start_ch = 0
+        else:
+            raise ValueError(
+                f"Model channel count {ch_count} exceeds FSEQ channel count {total_ch}"
+            )
 
     if ctype == 0:
         # Uncompressed: direct seek to exact position
@@ -2373,7 +2377,9 @@ def index():
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                     if (window._fseqBgImage) {
+                        ctx.imageSmoothingEnabled = false;
                         ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
+                        ctx.imageSmoothingEnabled = true;
                     }
                     var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
                     var color      = document.getElementById('text_color').value || '#ff0000';
