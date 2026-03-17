@@ -558,8 +558,11 @@ def parse_fseq_header(filepath):
     frame_count       = struct.unpack_from('<I', raw, 14)[0]
     step_time_ms      = raw[18]
     compression_type  = raw[19] & 0x0F   # 0=none, 1=zlib, 2=zstd
-    num_comp_blocks   = struct.unpack_from('<H', raw, 20)[0]
+    # Offset 20 and 21 are separate uint8 fields — NOT a single uint16
+    num_comp_blocks   = raw[20]           # uint8
+    num_sparse_ranges = raw[21]           # uint8
 
+    # Compression block table (only used/meaningful for compressed FSEQs)
     comp_blocks = []
     if compression_type in (1, 2) and num_comp_blocks > 0:
         with open(filepath, 'rb') as f:
@@ -570,48 +573,99 @@ def parse_fseq_header(filepath):
             data_size   = struct.unpack_from('<I', block_raw, i * 8 + 4)[0]
             comp_blocks.append({'first_frame': first_frame, 'data_size': data_size})
 
+    # Sparse range table — always starts right after the comp block table.
+    # Each entry is 6 bytes: uint24-LE start_channel + uint24-LE channel_count.
+    # When present these define which logical channels are stored per frame (packed
+    # together); channel_count in the header = sum of all range lengths.
+    sparse_ranges = []
+    if num_sparse_ranges > 0:
+        sr_table_offset = 32 + num_comp_blocks * 8
+        with open(filepath, 'rb') as f:
+            f.seek(sr_table_offset)
+            sr_raw = f.read(num_sparse_ranges * 6)
+        for i in range(num_sparse_ranges):
+            start = sr_raw[i*6] | (sr_raw[i*6+1] << 8) | (sr_raw[i*6+2] << 16)
+            count = sr_raw[i*6+3] | (sr_raw[i*6+4] << 8) | (sr_raw[i*6+5] << 16)
+            sparse_ranges.append({'start': start, 'count': count})
+
     fps = 1000.0 / step_time_ms if step_time_ms > 0 else 25.0
     return {
-        'filepath':         filepath,
-        'chan_data_offset':  chan_data_offset,
-        'channel_count':    channel_count,
-        'frame_count':      frame_count,
-        'step_time_ms':     step_time_ms,
-        'fps':              fps,
-        'duration_ms':      frame_count * step_time_ms,
-        'compression_type': compression_type,
-        'num_comp_blocks':  num_comp_blocks,
-        'comp_blocks':      comp_blocks,
+        'filepath':          filepath,
+        'chan_data_offset':   chan_data_offset,
+        'channel_count':     channel_count,
+        'frame_count':       frame_count,
+        'step_time_ms':      step_time_ms,
+        'fps':               fps,
+        'duration_ms':       frame_count * step_time_ms,
+        'compression_type':  compression_type,
+        'num_comp_blocks':   num_comp_blocks,
+        'num_sparse_ranges': num_sparse_ranges,
+        'comp_blocks':       comp_blocks,
+        'sparse_ranges':     sparse_ranges,
     }
 
 
-def read_fseq_frame(header, frame_idx, start_ch, ch_count):
-    """Return raw RGB bytes for one frame's channel slice.
-    Supports uncompressed (type 0) and zlib-compressed (type 1) FSEQ files."""
-    import zlib as _zlib
-    filepath  = header['filepath']
-    total_ch  = header['channel_count']
-    ctype     = header['compression_type']
+def _sparse_ch_to_frame_byte(sparse_ranges, logical_ch):
+    """Map a 0-indexed logical channel number to its byte offset within a packed frame.
 
-    if start_ch + ch_count > total_ch:
-        # FSEQ is model-specific — it only contains this model's channels
-        # starting at offset 0, so ignore the show-level start channel.
+    For dense FSEQs (no sparse ranges) the offset equals the logical channel number.
+    For sparse FSEQs the frame data only contains channels listed in the sparse range
+    table, packed together in range order.  Returns None if the channel falls in a gap.
+    """
+    if not sparse_ranges:
+        return logical_ch   # Dense FSEQ — direct 1:1 mapping
+
+    byte_offset = 0
+    for sr in sparse_ranges:
+        if logical_ch < sr['start']:
+            return None     # Channel is in a gap between ranges
+        if logical_ch < sr['start'] + sr['count']:
+            return byte_offset + (logical_ch - sr['start'])
+        byte_offset += sr['count']
+    return None             # Channel is after all ranges
+
+
+def read_fseq_frame(header, frame_idx, start_ch, ch_count):
+    """Return raw channel bytes for one frame's model slice.
+
+    Handles uncompressed (type 0), zlib (type 1), and zstd (type 2) FSEQs.
+    Correctly resolves sparse-range FSEQs by mapping the logical start channel
+    to its actual byte offset within each packed frame.
+    """
+    import zlib as _zlib
+    filepath      = header['filepath']
+    total_ch      = header['channel_count']
+    ctype         = header['compression_type']
+    sparse_ranges = header.get('sparse_ranges', [])
+
+    # --- Resolve logical channel → byte offset within a frame ---
+    frame_byte = _sparse_ch_to_frame_byte(sparse_ranges, start_ch)
+    if frame_byte is None:
+        # Channel not found in any sparse range.  Possible reasons:
+        #   • The FSEQ is model-specific (channels start at 0 in the file).
+        #   • The FPP start_channel is the show-level number but the FSEQ only
+        #     contains this model's channels.
+        # Try offset 0 as a fallback.
         if ch_count <= total_ch:
-            start_ch = 0
+            frame_byte = 0
+            logging.warning(
+                f"FSEQ preview: start_ch {start_ch} not in sparse ranges — "
+                f"falling back to frame byte 0 (model-specific FSEQ?)"
+            )
         else:
             raise ValueError(
                 f"Model channel count {ch_count} exceeds FSEQ channel count {total_ch}"
             )
 
     if ctype == 0:
-        # Uncompressed: direct seek to exact position
-        offset = header['chan_data_offset'] + frame_idx * total_ch + start_ch
+        # Uncompressed: seek directly to frame + channel byte offset
+        offset = header['chan_data_offset'] + frame_idx * total_ch + frame_byte
         with open(filepath, 'rb') as f:
             f.seek(offset)
             return f.read(ch_count)
 
     elif ctype in (1, 2):
-        # zlib (1) or zstd (2) block compression — same block layout, different decompressor
+        # zlib (1) or zstd (2) block compression — same block table layout
         if ctype == 2 and not ZSTD_AVAILABLE:
             raise ValueError(
                 "FSEQ uses zstd compression — run fpp_install.sh to install the "
@@ -622,7 +676,7 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
         if not blocks:
             raise ValueError(f"{'zlib' if ctype==1 else 'zstd'} FSEQ has no compression block table")
 
-        # Find the block that contains frame_idx
+        # Find the block containing frame_idx
         block_idx = len(blocks) - 1
         for i in range(len(blocks) - 1):
             if blocks[i + 1]['first_frame'] > frame_idx:
@@ -631,7 +685,7 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
 
         block = blocks[block_idx]
 
-        # Offset of this block's compressed data in the file
+        # Byte offset of this block's compressed data in the file
         data_offset = header['chan_data_offset']
         for i in range(block_idx):
             data_offset += blocks[i]['data_size']
@@ -643,16 +697,14 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
         if ctype == 1:
             decompressed = _zlib.decompress(compressed)
         else:
-            # zstd: xLights stores content size in frame header so decompress() works directly
             dctx = _zstd_mod.ZstdDecompressor()
             try:
                 decompressed = dctx.decompress(compressed)
             except Exception:
-                # Fallback for frames that don't store content size
                 decompressed = dctx.decompress(compressed, max_output_size=total_ch * 2000)
 
         local_frame  = frame_idx - block['first_frame']
-        frame_offset = local_frame * total_ch + start_ch
+        frame_offset = local_frame * total_ch + frame_byte
         return decompressed[frame_offset: frame_offset + ch_count]
 
     else:
@@ -3526,7 +3578,10 @@ def fseq_debug():
             'compression_type':  hdr['compression_type'],
             'compression_name':  comp_names.get(hdr['compression_type'], 'unknown'),
             'num_comp_blocks':   hdr['num_comp_blocks'],
+            'num_sparse_ranges': hdr['num_sparse_ranges'],
             'chan_data_offset':  hdr['chan_data_offset'],
+            'sparse_ranges':     hdr['sparse_ranges'],   # list of {start, count}
+            'sparse_sum':        sum(sr['count'] for sr in hdr['sparse_ranges']),
         }
     except Exception as e:
         result['fseq_error'] = str(e)
@@ -3540,16 +3595,17 @@ def fseq_debug():
     bpp        = (ch_count // num_pixels) if (num_pixels and ch_count) else None
     start_ch   = (sc - 1) if sc else 0   # 0-indexed
 
+    resolved_frame_byte = _sparse_ch_to_frame_byte(hdr['sparse_ranges'], start_ch)
     result['model_info'] = {
-        'start_channel_1idx': sc,
-        'channel_count':      cc,
-        'width':              mw,
-        'height':             mh,
-        'num_pixels':         num_pixels,
-        'effective_ch_count': ch_count,
-        'effective_bpp':      bpp,
-        'start_ch_0idx':      start_ch,
-        'ch_reset_would_fire': (ch_count is not None and start_ch + ch_count > hdr['channel_count']),
+        'start_channel_1idx':   sc,
+        'channel_count':        cc,
+        'width':                mw,
+        'height':               mh,
+        'num_pixels':           num_pixels,
+        'effective_ch_count':   ch_count,
+        'effective_bpp':        bpp,
+        'start_ch_0idx':        start_ch,
+        'resolved_frame_byte':  resolved_frame_byte,  # None = not in sparse ranges
     }
 
     # Try reading frame 0 and show first 5 pixel values
