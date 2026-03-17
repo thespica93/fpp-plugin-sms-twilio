@@ -1997,16 +1997,14 @@ def index():
                                 <label style="margin:0; font-size:13px; cursor:pointer;">
                                     <input type="checkbox" id="fseq_preview_enabled" onchange="toggleFseqPreview()" style="margin-right:6px;">
                                     FSEQ Background Preview
-                                    <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders FSEQ pixels behind text on canvas</span>
+                                    <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders the background sequence behind text on canvas</span>
                                 </label>
                                 <div id="fseq_preview_controls" style="display:none; margin-top:8px;">
-                                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px;">
-                                        <select id="fseq_preview_seq" style="flex:1; font-size:12px;">
-                                            <option value="">-- Select sequence --</option>
-                                        </select>
+                                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap;">
+                                        <span id="fseq_seq_label" style="font-size:12px; color:#ccc; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Sequence: —</span>
                                         <input type="number" id="fseq_start_channel" placeholder="Start ch (auto)" min="1"
                                                style="width:150px; font-size:12px;"
-                                               title="1-indexed start channel of the overlay model in the FSEQ. Leave blank to auto-detect from FPP /api/models.">
+                                               title="1-indexed start channel of the overlay model in the FSEQ. Leave blank to auto-detect from FPP.">
                                         <button type="button" onclick="loadFseqPreview()" style="padding:5px 12px; font-size:12px; background:#2196F3; color:#fff; border:none; border-radius:3px; cursor:pointer;">Load</button>
                                     </div>
                                     <div id="fseq_scrubber_row" style="display:none;">
@@ -2637,6 +2635,7 @@ def index():
             // ---------------------------------------------------------------------------
             (function() {
                 var _fseqMeta = null;
+                var _fseqSeq  = null;   // clean name: no seq: prefix, no .fseq suffix
                 window._fseqBgImage = null;
 
                 function fmtTime(ms) {
@@ -2646,41 +2645,49 @@ def index():
                     return m + ':' + (s < 10 ? '0' : '') + s;
                 }
 
-                function populateFseqSeqList() {
-                    var sel = document.getElementById('fseq_preview_seq');
-                    sel.innerHTML = '<option value="">-- Select sequence --</option>';
-                    var seqs = window._fppSeqList || [];
-                    var currentDefault = document.getElementById('default_playlist')
-                        ? document.getElementById('default_playlist').value : '';
-                    seqs.forEach(function(s) {
-                        var opt = document.createElement('option');
-                        opt.value = s;
-                        opt.textContent = s;
-                        if (('seq:' + s) === currentDefault) opt.selected = true;
-                        sel.appendChild(opt);
-                    });
+                function getConfiguredSeq() {
+                    var dp = document.getElementById('name_display_playlist');
+                    if (!dp || !dp.value) return null;
+                    var val = dp.value;
+                    if (!val.startsWith('seq:')) return null;
+                    return val.replace(/^seq:/, '').replace(/\.fseq$/, '');
                 }
 
                 window.toggleFseqPreview = function() {
                     var en = document.getElementById('fseq_preview_enabled').checked;
                     document.getElementById('fseq_preview_controls').style.display = en ? '' : 'none';
                     if (en) {
-                        populateFseqSeqList();
+                        var seq = getConfiguredSeq();
+                        var label = document.getElementById('fseq_seq_label');
+                        if (seq) {
+                            label.textContent = 'Sequence: ' + seq + '.fseq';
+                            label.style.color = '#ccc';
+                        } else {
+                            label.textContent = '\u26a0 Names Display Playlist is not set to a .fseq sequence \u2014 configure it above first.';
+                            label.style.color = '#ff9800';
+                        }
                     } else {
                         window._fseqBgImage = null;
                         _fseqMeta = null;
+                        _fseqSeq  = null;
                         if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     }
                 };
 
                 window.loadFseqPreview = function() {
-                    var seq = document.getElementById('fseq_preview_seq').value;
-                    if (!seq) { alert('Please select a sequence first.'); return; }
+                    var seq = getConfiguredSeq();
+                    if (!seq) {
+                        alert('Names Display Playlist is not set to a .fseq sequence. Configure it in the Playlists section above.');
+                        return;
+                    }
+                    _fseqSeq = seq;
+                    var model  = document.getElementById('overlay_model_name').value || '';
                     var loadEl = document.getElementById('fseq_load_status');
-                    loadEl.textContent = 'Loading sequence info\u2026';
+                    loadEl.textContent = 'Loading\u2026';
                     loadEl.style.color = '#aaa';
 
-                    fetch('/api/fseq/info?sequence=' + encodeURIComponent(seq))
+                    fetch('/api/fseq/info?sequence=' + encodeURIComponent(seq)
+                                        + '&model='    + encodeURIComponent(model))
                         .then(function(r) { return r.json(); })
                         .then(function(data) {
                             if (data.error) {
@@ -2691,10 +2698,22 @@ def index():
                             _fseqMeta = data;
                             var ctype = data.compression_type === 0 ? 'uncompressed'
                                       : data.compression_type === 1 ? 'zlib' : 'zstd';
-                            loadEl.textContent = data.frame_count + ' frames \u00b7 '
+                            var info = data.frame_count + ' frames \u00b7 '
                                 + Math.round(data.fps) + ' fps \u00b7 '
                                 + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype;
-                            loadEl.style.color = '#4CAF50';
+
+                            var startChInput = document.getElementById('fseq_start_channel');
+                            if (data.detected_start_channel) {
+                                info += ' \u00b7 start ch: ' + data.detected_start_channel;
+                                if (!startChInput.value) {
+                                    startChInput.placeholder = 'Auto: ' + data.detected_start_channel;
+                                }
+                                loadEl.style.color = '#4CAF50';
+                            } else {
+                                info += ' \u00b7 \u26a0 start ch not found \u2014 enter manually';
+                                loadEl.style.color = '#ff9800';
+                            }
+                            loadEl.textContent = info;
 
                             var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
                             var scrubber = document.getElementById('fseq_scrubber');
@@ -2713,23 +2732,22 @@ def index():
                 };
 
                 window.fseqScrub = function(seconds) {
-                    if (!_fseqMeta) return;
+                    if (!_fseqMeta || !_fseqSeq) return;
                     var sec      = parseInt(seconds);
                     var frameIdx = Math.min(
                         Math.round(sec * _fseqMeta.fps),
                         _fseqMeta.frame_count - 1
                     );
-                    var seq    = document.getElementById('fseq_preview_seq').value;
-                    var mw     = document.getElementById('overlay_model_width').value  || 0;
-                    var mh     = document.getElementById('overlay_model_height').value || 0;
-                    var model  = document.getElementById('overlay_model_name').value   || '';
+                    var mw      = document.getElementById('overlay_model_width').value  || 0;
+                    var mh      = document.getElementById('overlay_model_height').value || 0;
+                    var model   = document.getElementById('overlay_model_name').value   || '';
                     var startCh = document.getElementById('fseq_start_channel').value;
 
                     document.getElementById('fseq_time_display').textContent =
                         fmtTime(sec * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
 
                     var url = '/api/fseq/frame'
-                        + '?sequence=' + encodeURIComponent(seq)
+                        + '?sequence=' + encodeURIComponent(_fseqSeq)
                         + '&frame='    + frameIdx
                         + '&model='    + encodeURIComponent(model)
                         + '&width='    + mw
@@ -2744,7 +2762,6 @@ def index():
                         if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     };
                     img.onerror = function() {
-                        // Fetch the error JSON for a readable message
                         fetch(url).then(function(r) { return r.json(); }).then(function(d) {
                             statusEl.textContent = '\u2717 ' + (d.error || 'Failed to load frame');
                             statusEl.style.color = '#f44336';
@@ -2759,10 +2776,12 @@ def index():
                 window.clearFseqPreview = function() {
                     window._fseqBgImage = null;
                     _fseqMeta = null;
+                    _fseqSeq  = null;
                     document.getElementById('fseq_scrubber_row').style.display = 'none';
                     document.getElementById('fseq_status').textContent = '';
                     document.getElementById('fseq_load_status').textContent = '';
-                    document.getElementById('fseq_preview_seq').value = '';
+                    document.getElementById('fseq_start_channel').value = '';
+                    document.getElementById('fseq_start_channel').placeholder = 'Start ch (auto)';
                     if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 };
             })();
@@ -3160,8 +3179,10 @@ def test_fpp_api():
 
 @app.route('/api/fseq/info')
 def fseq_info():
-    """Return FSEQ file metadata for the canvas scrubber (frame count, fps, duration)."""
-    seq = request.args.get('sequence', '').strip()
+    """Return FSEQ file metadata for the canvas scrubber (frame count, fps, duration).
+    Also attempts to auto-detect the overlay model's start channel from FPP."""
+    seq        = request.args.get('sequence', '').strip()
+    model_name = request.args.get('model', config.get('overlay_model_name', '')).strip()
     if not seq:
         return jsonify({'error': 'No sequence specified'}), 400
     name = seq.removeprefix('seq:').removesuffix('.fseq')
@@ -3170,13 +3191,15 @@ def fseq_info():
         return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
     try:
         hdr = parse_fseq_header(filepath)
+        detected_start_ch = get_model_start_channel(model_name) if model_name else None
         return jsonify({
-            'frame_count':      hdr['frame_count'],
-            'fps':              round(hdr['fps'], 3),
-            'duration_ms':      hdr['duration_ms'],
-            'channel_count':    hdr['channel_count'],
-            'compression_type': hdr['compression_type'],
-            'step_time_ms':     hdr['step_time_ms'],
+            'frame_count':            hdr['frame_count'],
+            'fps':                    round(hdr['fps'], 3),
+            'duration_ms':            hdr['duration_ms'],
+            'channel_count':          hdr['channel_count'],
+            'compression_type':       hdr['compression_type'],
+            'step_time_ms':           hdr['step_time_ms'],
+            'detected_start_channel': detected_start_ch,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
