@@ -580,12 +580,13 @@ def read_fseq_frame(header, frame_idx, start_ch, ch_count):
         )
 
 
-def get_model_start_channel(model_name):
-    """Return the 1-indexed start channel for a named model from FPP's /api/models."""
+def get_model_channel_info(model_name):
+    """Return (start_channel_1indexed, channel_count) for a named model from FPP's /api/models.
+    channel_count is 3*w*h for RGB, 4*w*h for RGBW, etc. Returns (None, None) on failure."""
     try:
         resp = requests.get(f"{FPP_HOST}/api/models", timeout=3)
         if resp.status_code != 200:
-            return None
+            return None, None
         data = resp.json()
         models = data if isinstance(data, list) else data.get('models', [])
         for m in models:
@@ -593,11 +594,19 @@ def get_model_start_channel(model_name):
             if name.lower() == model_name.lower():
                 sc = (m.get('StartChannel') or m.get('startChannel')
                       or m.get('start_channel'))
-                return int(sc) if sc is not None else None
-        return None
+                cc = (m.get('ChannelCount') or m.get('channelCount')
+                      or m.get('channel_count'))
+                return (int(sc) if sc is not None else None,
+                        int(cc) if cc is not None else None)
+        return None, None
     except Exception as e:
-        logging.warning(f"Could not get start channel for '{model_name}': {e}")
-        return None
+        logging.warning(f"Could not get channel info for '{model_name}': {e}")
+        return None, None
+
+# Keep old name as alias so nothing else breaks
+def get_model_start_channel(model_name):
+    sc, _ = get_model_channel_info(model_name)
+    return sc
 
 
 def get_fpp_sequences():
@@ -2000,12 +2009,8 @@ def index():
                                     <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders the background sequence behind text on canvas</span>
                                 </label>
                                 <div id="fseq_preview_controls" style="display:none; margin-top:8px;">
-                                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap;">
-                                        <span id="fseq_seq_label" style="font-size:12px; color:#ccc; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Sequence: —</span>
-                                        <input type="number" id="fseq_start_channel" placeholder="Start ch (auto)" min="1"
-                                               style="width:150px; font-size:12px;"
-                                               title="1-indexed start channel of the overlay model in the FSEQ. Leave blank to auto-detect from FPP.">
-                                        <button type="button" onclick="loadFseqPreview()" style="padding:5px 12px; font-size:12px; background:#2196F3; color:#fff; border:none; border-radius:3px; cursor:pointer;">Load</button>
+                                    <div style="margin-bottom:6px;">
+                                        <span id="fseq_seq_label" style="font-size:12px; color:#ccc;">Sequence: —</span>
                                     </div>
                                     <div id="fseq_scrubber_row" style="display:none;">
                                         <div style="display:flex; align-items:center; gap:8px;">
@@ -2662,6 +2667,7 @@ def index():
                         if (seq) {
                             label.textContent = 'Sequence: ' + seq + '.fseq';
                             label.style.color = '#ccc';
+                            loadFseqPreview();
                         } else {
                             label.textContent = '\u26a0 Names Display Playlist is not set to a .fseq sequence \u2014 configure it above first.';
                             label.style.color = '#ff9800';
@@ -2702,15 +2708,17 @@ def index():
                                 + Math.round(data.fps) + ' fps \u00b7 '
                                 + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype;
 
-                            var startChInput = document.getElementById('fseq_start_channel');
                             if (data.detected_start_channel) {
                                 info += ' \u00b7 start ch: ' + data.detected_start_channel;
-                                if (!startChInput.value) {
-                                    startChInput.placeholder = 'Auto: ' + data.detected_start_channel;
+                                if (data.detected_channel_count) {
+                                    var bpp = Math.round(data.detected_channel_count /
+                                              (parseInt(document.getElementById('overlay_model_width').value) *
+                                               parseInt(document.getElementById('overlay_model_height').value)));
+                                    info += ' \u00b7 ' + (bpp === 4 ? 'RGBW' : 'RGB');
                                 }
                                 loadEl.style.color = '#4CAF50';
                             } else {
-                                info += ' \u00b7 \u26a0 start ch not found \u2014 enter manually';
+                                info += ' \u00b7 \u26a0 start ch not found \u2014 verify overlay model name matches FPP channel output model';
                                 loadEl.style.color = '#ff9800';
                             }
                             loadEl.textContent = info;
@@ -2723,7 +2731,7 @@ def index():
                             document.getElementById('fseq_time_display').textContent =
                                 '0:00 / ' + fmtTime(data.duration_ms);
                             document.getElementById('fseq_status').textContent = '';
-                            fseqScrub(0);
+                            doFseqFetch(0);
                         })
                         .catch(function(e) {
                             loadEl.textContent = '\u2717 ' + e;
@@ -2731,20 +2739,19 @@ def index():
                         });
                 };
 
-                window.fseqScrub = function(seconds) {
+                var _scrubTimer = null;
+                var _pendingImg  = null;
+
+                function doFseqFetch(seconds) {
                     if (!_fseqMeta || !_fseqSeq) return;
                     var sec      = parseInt(seconds);
                     var frameIdx = Math.min(
                         Math.round(sec * _fseqMeta.fps),
                         _fseqMeta.frame_count - 1
                     );
-                    var mw      = document.getElementById('overlay_model_width').value  || 0;
-                    var mh      = document.getElementById('overlay_model_height').value || 0;
-                    var model   = document.getElementById('overlay_model_name').value   || '';
-                    var startCh = document.getElementById('fseq_start_channel').value;
-
-                    document.getElementById('fseq_time_display').textContent =
-                        fmtTime(sec * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
+                    var mw    = document.getElementById('overlay_model_width').value  || 0;
+                    var mh    = document.getElementById('overlay_model_height').value || 0;
+                    var model = document.getElementById('overlay_model_name').value   || '';
 
                     var url = '/api/fseq/frame'
                         + '?sequence=' + encodeURIComponent(_fseqSeq)
@@ -2752,16 +2759,26 @@ def index():
                         + '&model='    + encodeURIComponent(model)
                         + '&width='    + mw
                         + '&height='   + mh;
-                    if (startCh) url += '&start_channel=' + parseInt(startCh);
+                    if (_fseqMeta.detected_start_channel) {
+                        url += '&start_channel=' + _fseqMeta.detected_start_channel;
+                    }
+                    if (_fseqMeta.detected_channel_count) {
+                        url += '&channel_count=' + _fseqMeta.detected_channel_count;
+                    }
 
                     var statusEl = document.getElementById('fseq_status');
+                    // Cancel previous in-flight image to avoid race conditions
+                    if (_pendingImg) { _pendingImg.onload = null; _pendingImg.onerror = null; _pendingImg.src = ''; }
                     var img = new Image();
+                    _pendingImg = img;
                     img.onload = function() {
+                        if (img !== _pendingImg) return;  // superseded
                         window._fseqBgImage = img;
                         statusEl.textContent = '';
                         if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     };
                     img.onerror = function() {
+                        if (img !== _pendingImg) return;
                         fetch(url).then(function(r) { return r.json(); }).then(function(d) {
                             statusEl.textContent = '\u2717 ' + (d.error || 'Failed to load frame');
                             statusEl.style.color = '#f44336';
@@ -2771,6 +2788,15 @@ def index():
                         });
                     };
                     img.src = url;
+                }
+
+                window.fseqScrub = function(seconds) {
+                    if (!_fseqMeta) return;
+                    document.getElementById('fseq_time_display').textContent =
+                        fmtTime(parseInt(seconds) * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
+                    // Debounce: wait 150ms after slider stops before fetching
+                    clearTimeout(_scrubTimer);
+                    _scrubTimer = setTimeout(function() { doFseqFetch(seconds); }, 150);
                 };
 
                 window.clearFseqPreview = function() {
@@ -2780,8 +2806,6 @@ def index():
                     document.getElementById('fseq_scrubber_row').style.display = 'none';
                     document.getElementById('fseq_status').textContent = '';
                     document.getElementById('fseq_load_status').textContent = '';
-                    document.getElementById('fseq_start_channel').value = '';
-                    document.getElementById('fseq_start_channel').placeholder = 'Start ch (auto)';
                     if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 };
             })();
@@ -3191,15 +3215,17 @@ def fseq_info():
         return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
     try:
         hdr = parse_fseq_header(filepath)
-        detected_start_ch = get_model_start_channel(model_name) if model_name else None
+        detected_sc, detected_cc = (get_model_channel_info(model_name)
+                                    if model_name else (None, None))
         return jsonify({
-            'frame_count':            hdr['frame_count'],
-            'fps':                    round(hdr['fps'], 3),
-            'duration_ms':            hdr['duration_ms'],
-            'channel_count':          hdr['channel_count'],
-            'compression_type':       hdr['compression_type'],
-            'step_time_ms':           hdr['step_time_ms'],
-            'detected_start_channel': detected_start_ch,
+            'frame_count':             hdr['frame_count'],
+            'fps':                     round(hdr['fps'], 3),
+            'duration_ms':             hdr['duration_ms'],
+            'channel_count':           hdr['channel_count'],
+            'compression_type':        hdr['compression_type'],
+            'step_time_ms':            hdr['step_time_ms'],
+            'detected_start_channel':  detected_sc,
+            'detected_channel_count':  detected_cc,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -3215,7 +3241,8 @@ def fseq_frame():
     model_name = request.args.get('model', config.get('overlay_model_name', ''))
     width      = int(request.args.get('width',  config.get('overlay_model_width',  0)))
     height     = int(request.args.get('height', config.get('overlay_model_height', 0)))
-    start_ch_override = request.args.get('start_channel', '').strip()
+    start_ch_override  = request.args.get('start_channel', '').strip()
+    ch_count_override  = request.args.get('channel_count', '').strip()
 
     if not seq:
         return jsonify({'error': 'No sequence specified'}), 400
@@ -3227,33 +3254,44 @@ def fseq_frame():
     if not os.path.exists(filepath):
         return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
 
-    # Determine start channel (1-indexed)
+    # Determine start channel and channel count from FPP model info
     if start_ch_override:
         start_ch_1 = int(start_ch_override)
+        ch_count   = int(ch_count_override) if ch_count_override else width * height * 3
     else:
-        start_ch_1 = get_model_start_channel(model_name) if model_name else None
+        start_ch_1, ch_count_fpp = (get_model_channel_info(model_name)
+                                    if model_name else (None, None))
+        ch_count = ch_count_fpp if ch_count_fpp else width * height * 3
 
     if not start_ch_1:
         return jsonify({
             'error': (
                 f'Could not find start channel for model "{model_name}". '
-                'Verify the overlay model name matches an FPP channel output model, '
-                'or enter the start channel manually in the preview panel.'
+                'Verify the overlay model name matches an FPP channel output model.'
             )
         }), 400
 
     try:
-        hdr       = parse_fseq_header(filepath)
-        frame_idx = min(frame_idx, hdr['frame_count'] - 1)
-        ch_count  = width * height * 3
-        start_ch  = start_ch_1 - 1   # convert to 0-indexed
+        hdr          = parse_fseq_header(filepath)
+        frame_idx    = min(frame_idx, hdr['frame_count'] - 1)
+        start_ch     = start_ch_1 - 1   # convert to 0-indexed
+        num_pixels   = width * height
+        # bytes_per_pixel: 3 for RGB, 4 for RGBW — derived from actual channel count
+        bpp          = max(3, ch_count // num_pixels) if num_pixels > 0 else 3
 
         raw = read_fseq_frame(hdr, frame_idx, start_ch, ch_count)
 
+        logging.info(
+            f"FSEQ preview: model={model_name} start_ch={start_ch_1} "
+            f"ch_count={ch_count} bpp={bpp} frame={frame_idx} "
+            f"first_px=({raw[0] if raw else '?'},{raw[1] if len(raw)>1 else '?'},"
+            f"{raw[2] if len(raw)>2 else '?'})"
+        )
+
         img = Image.new('RGB', (width, height))
         pixels = []
-        for i in range(width * height):
-            b = i * 3
+        for i in range(num_pixels):
+            b = i * bpp
             if b + 2 < len(raw):
                 pixels.append((raw[b], raw[b + 1], raw[b + 2]))
             else:
