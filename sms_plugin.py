@@ -14,7 +14,7 @@ Features:
 - OPTIMIZED: Cached list loading for blacklist, whitelist, and blocked phones
 """
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response
 import logging
 import json
 import requests
@@ -26,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from twilio.rest import Client
 from collections import deque
 import os
+import struct
+import io
 
 # PIL/Pillow for pixel-accurate text rendering (optional — falls back to FPP text API if unavailable)
 try:
@@ -47,6 +49,8 @@ QUEUE_FILE      = os.path.join(PLUGIN_DATA_DIR, "queue_pending.json")
 MESSAGES_DIR    = os.path.join(PLUGIN_DATA_DIR, "logs", "messages")
 LAST_SID_FILE   = os.path.join(PLUGIN_DATA_DIR, "last_message_sid.txt")
 BLOCKLIST_FILE  = os.path.join(PLUGIN_DATA_DIR, "blocked_phones.json")
+
+FSEQ_SEQUENCE_PATH = '/home/fpp/media/sequences'
 
 # Whitelist/blacklist source files stay in the plugin git repo directory
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
@@ -473,6 +477,128 @@ def get_fpp_playlists():
     except Exception as e:
         logging.error(f"Error fetching FPP playlists: {e}")
         return []
+
+# ---------------------------------------------------------------------------
+# FSEQ preview helpers
+# ---------------------------------------------------------------------------
+
+def parse_fseq_header(filepath):
+    """Parse an FSEQ v2 file header. Returns a metadata dict or raises ValueError."""
+    with open(filepath, 'rb') as f:
+        raw = f.read(32)
+    if len(raw) < 32 or raw[0:4] != b'PSEQ':
+        raise ValueError("Not a valid FSEQ file (missing PSEQ magic)")
+    major_ver = raw[7]
+    if major_ver != 2:
+        raise ValueError(f"Unsupported FSEQ version {raw[7]}.{raw[6]}")
+
+    chan_data_offset  = struct.unpack_from('<H', raw, 4)[0]
+    channel_count     = struct.unpack_from('<I', raw, 10)[0]
+    frame_count       = struct.unpack_from('<I', raw, 14)[0]
+    step_time_ms      = raw[18]
+    compression_type  = raw[19] & 0x0F   # 0=none, 1=zlib, 2=zstd
+    num_comp_blocks   = struct.unpack_from('<H', raw, 20)[0]
+
+    comp_blocks = []
+    if compression_type in (1, 2) and num_comp_blocks > 0:
+        with open(filepath, 'rb') as f:
+            f.seek(32)
+            block_raw = f.read(num_comp_blocks * 8)
+        for i in range(num_comp_blocks):
+            first_frame = struct.unpack_from('<I', block_raw, i * 8)[0]
+            data_size   = struct.unpack_from('<I', block_raw, i * 8 + 4)[0]
+            comp_blocks.append({'first_frame': first_frame, 'data_size': data_size})
+
+    fps = 1000.0 / step_time_ms if step_time_ms > 0 else 25.0
+    return {
+        'filepath':         filepath,
+        'chan_data_offset':  chan_data_offset,
+        'channel_count':    channel_count,
+        'frame_count':      frame_count,
+        'step_time_ms':     step_time_ms,
+        'fps':              fps,
+        'duration_ms':      frame_count * step_time_ms,
+        'compression_type': compression_type,
+        'num_comp_blocks':  num_comp_blocks,
+        'comp_blocks':      comp_blocks,
+    }
+
+
+def read_fseq_frame(header, frame_idx, start_ch, ch_count):
+    """Return raw RGB bytes for one frame's channel slice.
+    Supports uncompressed (type 0) and zlib-compressed (type 1) FSEQ files."""
+    import zlib as _zlib
+    filepath  = header['filepath']
+    total_ch  = header['channel_count']
+    ctype     = header['compression_type']
+
+    if start_ch + ch_count > total_ch:
+        raise ValueError(
+            f"Channel range {start_ch}–{start_ch + ch_count} exceeds "
+            f"file channel count {total_ch}"
+        )
+
+    if ctype == 0:
+        # Uncompressed: direct seek to exact position
+        offset = header['chan_data_offset'] + frame_idx * total_ch + start_ch
+        with open(filepath, 'rb') as f:
+            f.seek(offset)
+            return f.read(ch_count)
+
+    elif ctype == 1:
+        # zlib block compression
+        blocks = header['comp_blocks']
+        if not blocks:
+            raise ValueError("zlib FSEQ has no compression block table")
+
+        # Find the block that contains frame_idx
+        block_idx = len(blocks) - 1
+        for i in range(len(blocks) - 1):
+            if blocks[i + 1]['first_frame'] > frame_idx:
+                block_idx = i
+                break
+
+        block = blocks[block_idx]
+
+        # Offset of this block's compressed data in the file
+        data_offset = header['chan_data_offset']
+        for i in range(block_idx):
+            data_offset += blocks[i]['data_size']
+
+        with open(filepath, 'rb') as f:
+            f.seek(data_offset)
+            compressed = f.read(block['data_size'])
+
+        decompressed = _zlib.decompress(compressed)
+        local_frame  = frame_idx - block['first_frame']
+        frame_offset = local_frame * total_ch + start_ch
+        return decompressed[frame_offset: frame_offset + ch_count]
+
+    else:
+        raise ValueError(
+            f"FSEQ compression type {ctype} (zstd) is not supported for preview"
+        )
+
+
+def get_model_start_channel(model_name):
+    """Return the 1-indexed start channel for a named model from FPP's /api/models."""
+    try:
+        resp = requests.get(f"{FPP_HOST}/api/models", timeout=3)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        models = data if isinstance(data, list) else data.get('models', [])
+        for m in models:
+            name = m.get('Name') or m.get('name') or ''
+            if name.lower() == model_name.lower():
+                sc = (m.get('StartChannel') or m.get('startChannel')
+                      or m.get('start_channel'))
+                return int(sc) if sc is not None else None
+        return None
+    except Exception as e:
+        logging.warning(f"Could not get start channel for '{model_name}': {e}")
+        return None
+
 
 def get_fpp_sequences():
     """Get list of sequences from FPP"""
@@ -1865,6 +1991,36 @@ def index():
                                 <span id="pos_display" style="font-size:12px; color:#888;"></span>
                             </div>
                             <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
+
+                            <!-- FSEQ background preview scrubber -->
+                            <div style="margin-top:10px; padding:10px; background:#1a1a1a; border:1px solid #444; border-radius:4px;">
+                                <label style="margin:0; font-size:13px; cursor:pointer;">
+                                    <input type="checkbox" id="fseq_preview_enabled" onchange="toggleFseqPreview()" style="margin-right:6px;">
+                                    FSEQ Background Preview
+                                    <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders FSEQ pixels behind text on canvas</span>
+                                </label>
+                                <div id="fseq_preview_controls" style="display:none; margin-top:8px;">
+                                    <div style="display:flex; gap:6px; align-items:center; margin-bottom:6px;">
+                                        <select id="fseq_preview_seq" style="flex:1; font-size:12px;">
+                                            <option value="">-- Select sequence --</option>
+                                        </select>
+                                        <input type="number" id="fseq_start_channel" placeholder="Start ch (auto)" min="1"
+                                               style="width:150px; font-size:12px;"
+                                               title="1-indexed start channel of the overlay model in the FSEQ. Leave blank to auto-detect from FPP /api/models.">
+                                        <button type="button" onclick="loadFseqPreview()" style="padding:5px 12px; font-size:12px; background:#2196F3; color:#fff; border:none; border-radius:3px; cursor:pointer;">Load</button>
+                                    </div>
+                                    <div id="fseq_scrubber_row" style="display:none;">
+                                        <div style="display:flex; align-items:center; gap:8px;">
+                                            <span id="fseq_time_display" style="font-size:12px; color:#aaa; min-width:85px; white-space:nowrap;">0:00 / 0:00</span>
+                                            <input type="range" id="fseq_scrubber" min="0" max="100" value="0" step="1"
+                                                   style="flex:1;" oninput="fseqScrub(this.value)">
+                                            <button type="button" onclick="clearFseqPreview()" style="padding:4px 8px; font-size:11px; background:#555; color:#fff; border:none; border-radius:3px; cursor:pointer;">Clear</button>
+                                        </div>
+                                        <div id="fseq_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
+                                    </div>
+                                    <div id="fseq_load_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
+                                </div>
+                            </div>
                         </div>
 
                         <label>Text Movement:</label>
@@ -2213,6 +2369,9 @@ def index():
                     var pos = document.getElementById('text_position').value;
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    if (window._fseqBgImage) {
+                        ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
+                    }
                     var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
                     var color      = document.getElementById('text_color').value || '#ff0000';
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
@@ -2473,6 +2632,141 @@ def index():
                 renderCanvasPreview();
             }
 
+            // ---------------------------------------------------------------------------
+            // FSEQ background preview
+            // ---------------------------------------------------------------------------
+            (function() {
+                var _fseqMeta = null;
+                window._fseqBgImage = null;
+
+                function fmtTime(ms) {
+                    var s = Math.floor(ms / 1000);
+                    var m = Math.floor(s / 60);
+                    s = s % 60;
+                    return m + ':' + (s < 10 ? '0' : '') + s;
+                }
+
+                function populateFseqSeqList() {
+                    var sel = document.getElementById('fseq_preview_seq');
+                    sel.innerHTML = '<option value="">-- Select sequence --</option>';
+                    var seqs = window._fppSeqList || [];
+                    var currentDefault = document.getElementById('default_playlist')
+                        ? document.getElementById('default_playlist').value : '';
+                    seqs.forEach(function(s) {
+                        var opt = document.createElement('option');
+                        opt.value = s;
+                        opt.textContent = s;
+                        if (('seq:' + s) === currentDefault) opt.selected = true;
+                        sel.appendChild(opt);
+                    });
+                }
+
+                window.toggleFseqPreview = function() {
+                    var en = document.getElementById('fseq_preview_enabled').checked;
+                    document.getElementById('fseq_preview_controls').style.display = en ? '' : 'none';
+                    if (en) {
+                        populateFseqSeqList();
+                    } else {
+                        window._fseqBgImage = null;
+                        _fseqMeta = null;
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                    }
+                };
+
+                window.loadFseqPreview = function() {
+                    var seq = document.getElementById('fseq_preview_seq').value;
+                    if (!seq) { alert('Please select a sequence first.'); return; }
+                    var loadEl = document.getElementById('fseq_load_status');
+                    loadEl.textContent = 'Loading sequence info\u2026';
+                    loadEl.style.color = '#aaa';
+
+                    fetch('/api/fseq/info?sequence=' + encodeURIComponent(seq))
+                        .then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (data.error) {
+                                loadEl.textContent = '\u2717 ' + data.error;
+                                loadEl.style.color = '#f44336';
+                                return;
+                            }
+                            _fseqMeta = data;
+                            var ctype = data.compression_type === 0 ? 'uncompressed'
+                                      : data.compression_type === 1 ? 'zlib' : 'zstd';
+                            loadEl.textContent = data.frame_count + ' frames \u00b7 '
+                                + Math.round(data.fps) + ' fps \u00b7 '
+                                + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype;
+                            loadEl.style.color = '#4CAF50';
+
+                            var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
+                            var scrubber = document.getElementById('fseq_scrubber');
+                            scrubber.max = totalSec;
+                            scrubber.value = 0;
+                            document.getElementById('fseq_scrubber_row').style.display = '';
+                            document.getElementById('fseq_time_display').textContent =
+                                '0:00 / ' + fmtTime(data.duration_ms);
+                            document.getElementById('fseq_status').textContent = '';
+                            fseqScrub(0);
+                        })
+                        .catch(function(e) {
+                            loadEl.textContent = '\u2717 ' + e;
+                            loadEl.style.color = '#f44336';
+                        });
+                };
+
+                window.fseqScrub = function(seconds) {
+                    if (!_fseqMeta) return;
+                    var sec      = parseInt(seconds);
+                    var frameIdx = Math.min(
+                        Math.round(sec * _fseqMeta.fps),
+                        _fseqMeta.frame_count - 1
+                    );
+                    var seq    = document.getElementById('fseq_preview_seq').value;
+                    var mw     = document.getElementById('overlay_model_width').value  || 0;
+                    var mh     = document.getElementById('overlay_model_height').value || 0;
+                    var model  = document.getElementById('overlay_model_name').value   || '';
+                    var startCh = document.getElementById('fseq_start_channel').value;
+
+                    document.getElementById('fseq_time_display').textContent =
+                        fmtTime(sec * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
+
+                    var url = '/api/fseq/frame'
+                        + '?sequence=' + encodeURIComponent(seq)
+                        + '&frame='    + frameIdx
+                        + '&model='    + encodeURIComponent(model)
+                        + '&width='    + mw
+                        + '&height='   + mh;
+                    if (startCh) url += '&start_channel=' + parseInt(startCh);
+
+                    var statusEl = document.getElementById('fseq_status');
+                    var img = new Image();
+                    img.onload = function() {
+                        window._fseqBgImage = img;
+                        statusEl.textContent = '';
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                    };
+                    img.onerror = function() {
+                        // Fetch the error JSON for a readable message
+                        fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+                            statusEl.textContent = '\u2717 ' + (d.error || 'Failed to load frame');
+                            statusEl.style.color = '#f44336';
+                        }).catch(function() {
+                            statusEl.textContent = '\u2717 Failed to load frame';
+                            statusEl.style.color = '#f44336';
+                        });
+                    };
+                    img.src = url;
+                };
+
+                window.clearFseqPreview = function() {
+                    window._fseqBgImage = null;
+                    _fseqMeta = null;
+                    document.getElementById('fseq_scrubber_row').style.display = 'none';
+                    document.getElementById('fseq_status').textContent = '';
+                    document.getElementById('fseq_load_status').textContent = '';
+                    document.getElementById('fseq_preview_seq').value = '';
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                };
+            })();
+
             // All DOM elements are above this script block — call init functions directly.
             try { initCanvasPreview(); } catch(e) { console.error('Canvas init error:', e); }
             loadFPPData();
@@ -2544,6 +2838,7 @@ def index():
                         defaultSelect.add(sg1);
                         nameSelect.add(sg2);
                     }
+                    window._fppSeqList = data.sequences || [];
 
                     const modelSelect = document.getElementById('overlay_model_name');
                     const currentModel = "{{ config.get('overlay_model_name', 'Texting Matrix') }}";
@@ -2862,6 +3157,94 @@ def test_fpp_api():
         return jsonify({"success": success, "status": status})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/fseq/info')
+def fseq_info():
+    """Return FSEQ file metadata for the canvas scrubber (frame count, fps, duration)."""
+    seq = request.args.get('sequence', '').strip()
+    if not seq:
+        return jsonify({'error': 'No sequence specified'}), 400
+    name = seq.removeprefix('seq:').removesuffix('.fseq')
+    filepath = os.path.join(FSEQ_SEQUENCE_PATH, name + '.fseq')
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
+    try:
+        hdr = parse_fseq_header(filepath)
+        return jsonify({
+            'frame_count':      hdr['frame_count'],
+            'fps':              round(hdr['fps'], 3),
+            'duration_ms':      hdr['duration_ms'],
+            'channel_count':    hdr['channel_count'],
+            'compression_type': hdr['compression_type'],
+            'step_time_ms':     hdr['step_time_ms'],
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/fseq/frame')
+def fseq_frame():
+    """Return a single FSEQ frame as a PNG image for the canvas background preview."""
+    if not PIL_AVAILABLE:
+        return jsonify({'error': 'Pillow not installed — run fpp_install.sh'}), 503
+
+    seq        = request.args.get('sequence', '').strip()
+    frame_idx  = max(0, int(request.args.get('frame', 0)))
+    model_name = request.args.get('model', config.get('overlay_model_name', ''))
+    width      = int(request.args.get('width',  config.get('overlay_model_width',  0)))
+    height     = int(request.args.get('height', config.get('overlay_model_height', 0)))
+    start_ch_override = request.args.get('start_channel', '').strip()
+
+    if not seq:
+        return jsonify({'error': 'No sequence specified'}), 400
+    if width <= 0 or height <= 0:
+        return jsonify({'error': 'Overlay model dimensions unknown — select a model first'}), 400
+
+    name = seq.removeprefix('seq:').removesuffix('.fseq')
+    filepath = os.path.join(FSEQ_SEQUENCE_PATH, name + '.fseq')
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
+
+    # Determine start channel (1-indexed)
+    if start_ch_override:
+        start_ch_1 = int(start_ch_override)
+    else:
+        start_ch_1 = get_model_start_channel(model_name) if model_name else None
+
+    if not start_ch_1:
+        return jsonify({
+            'error': (
+                f'Could not find start channel for model "{model_name}". '
+                'Verify the overlay model name matches an FPP channel output model, '
+                'or enter the start channel manually in the preview panel.'
+            )
+        }), 400
+
+    try:
+        hdr       = parse_fseq_header(filepath)
+        frame_idx = min(frame_idx, hdr['frame_count'] - 1)
+        ch_count  = width * height * 3
+        start_ch  = start_ch_1 - 1   # convert to 0-indexed
+
+        raw = read_fseq_frame(hdr, frame_idx, start_ch, ch_count)
+
+        img = Image.new('RGB', (width, height))
+        pixels = []
+        for i in range(width * height):
+            b = i * 3
+            if b + 2 < len(raw):
+                pixels.append((raw[b], raw[b + 1], raw[b + 2]))
+            else:
+                pixels.append((0, 0, 0))
+        img.putdata(pixels)
+
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return Response(buf.read(), mimetype='image/png',
+                        headers={'Cache-Control': 'no-store'})
+    except Exception as e:
+        logging.error(f"FSEQ frame error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/test')
 def test_twilio():
