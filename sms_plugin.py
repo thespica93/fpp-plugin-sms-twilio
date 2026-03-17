@@ -3405,6 +3405,15 @@ var _saveTimer = null;
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', saveConfig);
                 });
+                // Reload background preview when Names Display content or model changes
+                ['name_display_playlist', 'overlay_model_name'].forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (el) el.addEventListener('change', function() {
+                        var en = document.getElementById('fseq_preview_enabled');
+                        if (en && en.checked && window.toggleFseqPreview) window.toggleFseqPreview();
+                    });
+                });
+
                 // Text, number inputs — save when user clicks away
                 ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
