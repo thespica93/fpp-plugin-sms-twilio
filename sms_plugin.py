@@ -2055,6 +2055,12 @@ def index():
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
         </div>
 
+        <!-- Plugin Live Banner -->
+        <div id="plugin_live_banner" style="display:none; background:#1b5e20; color:#fff; padding:10px 16px; border-radius:5px; margin-top:10px; font-size:14px; font-weight:bold; align-items:center; gap:10px;">
+            <span style="display:inline-block; width:12px; height:12px; background:#69f0ae; border-radius:50%; box-shadow:0 0 6px #69f0ae;"></span>
+            Plugin is Live — TwilioStart is running
+        </div>
+
         <!-- Settings Tab -->
         <div id="tab-settings" class="tab-content active">
             <div class="columns">
@@ -2085,25 +2091,30 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
-                        <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
-                        <select id="default_playlist">
-                            <option value="">-- Select content --</option>
-                        </select>
-                        <p class="help-text">📺 This content loops while waiting for text messages</p>
+                        <div id="fpp_content_live_warning" style="display:none; background:#b71c1c; color:#fff; border-radius:5px; padding:8px 12px; margin-bottom:10px; font-size:13px;">
+                            🔴 <strong>Plugin is Live</strong> — run TwilioStop to edit these settings
+                        </div>
+                        <div id="fpp_content_inputs">
+                            <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
+                            <select id="default_playlist">
+                                <option value="">-- Select content --</option>
+                            </select>
+                            <p class="help-text">📺 This content loops while waiting for text messages</p>
 
-                        <label>Name Display Content:</label>
-                        <select id="name_display_playlist">
-                            <option value="">-- None (Same as "Waiting" Content) --</option>
-                            {% set _np = config.get('name_display_playlist', '') %}
-                            {% if _np %}<option value="{{ _np }}" selected>{{ _np }}</option>{% endif %}
-                        </select>
-                        <p class="help-text">🎬 This content plays when displaying a name</p>
+                            <label>Name Display Content:</label>
+                            <select id="name_display_playlist">
+                                <option value="">-- None (Same as "Waiting" Content) --</option>
+                                {% set _np = config.get('name_display_playlist', '') %}
+                                {% if _np %}<option value="{{ _np }}" selected>{{ _np }}</option>{% endif %}
+                            </select>
+                            <p class="help-text">🎬 This content plays when displaying a name</p>
 
-                        <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
-                        <select id="overlay_model_name">
-                            <option value="">-- None --</option>
-                        </select>
-                        <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
+                            <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
+                            <select id="overlay_model_name">
+                                <option value="">-- None --</option>
+                            </select>
+                            <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
+                        </div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">Message Settings</h2>
@@ -2548,12 +2559,27 @@ def index():
             function updateLiveStatus() {
                 fetch('/api/queue/status').then(r => r.json()).then(data => {
                     const live = data.show_live === true;
-                    const banner = document.getElementById('show_not_live_banner');
+
+                    // Testing tab banner (show is NOT live warning)
+                    const notLiveBanner = document.getElementById('show_not_live_banner');
                     const form = document.getElementById('test_form_inner');
-                    if (banner) banner.style.display = live ? 'none' : 'block';
+                    if (notLiveBanner) notLiveBanner.style.display = live ? 'none' : 'block';
                     if (form) {
                         form.style.opacity = live ? '1' : '0.4';
                         form.style.pointerEvents = live ? '' : 'none';
+                    }
+
+                    // Settings tab: "Plugin is Live" banner at top
+                    const liveBanner = document.getElementById('plugin_live_banner');
+                    if (liveBanner) liveBanner.style.display = live ? 'flex' : 'none';
+
+                    // Lock content dropdowns when live
+                    const liveWarning = document.getElementById('fpp_content_live_warning');
+                    const contentInputs = document.getElementById('fpp_content_inputs');
+                    if (liveWarning) liveWarning.style.display = live ? 'block' : 'none';
+                    if (contentInputs) {
+                        contentInputs.style.opacity = live ? '0.4' : '';
+                        contentInputs.style.pointerEvents = live ? 'none' : '';
                     }
                 }).catch(() => {});
             }
