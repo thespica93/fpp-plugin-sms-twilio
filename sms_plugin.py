@@ -239,9 +239,26 @@ def _find_font(font_name, font_size):
     """Locate a PIL ImageFont matching font_name. Returns ImageFont or None."""
     if not PIL_AVAILABLE:
         return None
+
+    # Use fontconfig (fc-match) — same resolution FPP uses for its font names
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['fc-match', '--format=%{file}', font_name],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            font_path = result.stdout.strip()
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, font_size)
+    except Exception:
+        pass
+
+    # Fallback: manual search in common FPP font directories
     search_dirs = [
         '/usr/share/fonts/truetype/freefont',
         '/usr/share/fonts/truetype',
+        '/usr/share/fonts/opentype',
         '/usr/share/fonts',
         '/usr/share/fpp/fonts',
         '/home/fpp/media/fonts',
@@ -2909,6 +2926,7 @@ def index():
                 }
                 document.getElementById('text_color').addEventListener('change',     renderCanvasPreview);
                 document.getElementById('text_font_size').addEventListener('change', renderCanvasPreview);
+                document.getElementById('text_font').addEventListener('change',      renderCanvasPreview);
 
                 updateBadges();
                 renderCanvasPreview();
