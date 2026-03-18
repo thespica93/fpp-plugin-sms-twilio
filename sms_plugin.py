@@ -3283,13 +3283,13 @@ def index():
                     }
 
                     // Load background preview now that dropdowns are populated
-                    if (window.toggleFseqPreview) window.toggleFseqPreview();
+                    try { if (window.toggleFseqPreview) window.toggleFseqPreview(); } catch(e) { console.error('Preview error:', e); }
                 })
                 .catch(function(e) {
                     console.error('FPP data load failed:', e);
                     var fs = document.getElementById('text_font');
                     if (fs) fs.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
-                    if (window.toggleFseqPreview) window.toggleFseqPreview();
+                    try { if (window.toggleFseqPreview) window.toggleFseqPreview(); } catch(e2) {}
                 });
             }
 
