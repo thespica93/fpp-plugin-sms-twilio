@@ -3134,6 +3134,7 @@ def index():
             try { initCanvasPreview(); } catch(e) { console.error('Canvas init error:', e); }
             // Load preview immediately using server-rendered dropdown value, then again after FPP data populates
             if (window.toggleFseqPreview) window.toggleFseqPreview();
+            loadFonts();
             loadFPPData();
             initRespRows();
             setupAutoSave();
@@ -3163,6 +3164,27 @@ def index():
                 fetch('/api/fpp/refresh', {method:'POST'})
                     .then(() => loadFPPData())
                     .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh Lists'; } });
+            }
+
+            function loadFonts() {
+                const fontSelect = document.getElementById('text_font');
+                const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
+                fetch('/api/fpp/fonts')
+                .then(r => r.json())
+                .then(function(fonts) {
+                    if (fonts && fonts.length > 0) {
+                        fontSelect.innerHTML = '<option value="">-- Select Font --</option>';
+                        fonts.forEach(function(font) {
+                            const opt = new Option(font, font, false, font === currentFont);
+                            fontSelect.add(opt);
+                        });
+                    } else {
+                        fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                    }
+                })
+                .catch(function() {
+                    fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                });
             }
 
             function loadFPPData() {
@@ -3267,27 +3289,11 @@ def index():
                         saveConfig();
                     });
 
-                    const fontSelect = document.getElementById('text_font');
-                    const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
-                    fontSelect.innerHTML = '<option value="">-- Select Font --</option>';
-
-                    if (data.fonts && data.fonts.length > 0) {
-                        data.fonts.forEach(font => {
-                            const opt = new Option(font, font, false, font === currentFont);
-                            opt.style.fontFamily = font + ', sans-serif';
-                            fontSelect.add(opt);
-                        });
-                    } else {
-                        fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
-                    }
-
                     // Load background preview now that dropdowns are populated
                     try { if (window.toggleFseqPreview) window.toggleFseqPreview(); } catch(e) { console.error('Preview error:', e); }
                 })
                 .catch(function(e) {
                     console.error('FPP data load failed:', e);
-                    var fs = document.getElementById('text_font');
-                    if (fs) fs.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
                     try { if (window.toggleFseqPreview) window.toggleFseqPreview(); } catch(e2) {}
                 });
             }
@@ -3526,6 +3532,13 @@ def update_config():
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/fpp/fonts')
+def fpp_fonts_endpoint():
+    try:
+        return jsonify(get_fpp_fonts())
+    except Exception:
+        return jsonify([])
 
 @app.route('/api/fpp/data')
 def get_fpp_data():
