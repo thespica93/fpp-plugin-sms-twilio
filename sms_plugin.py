@@ -1597,30 +1597,13 @@ def send_to_fpp(name):
         import traceback
         logging.error(traceback.format_exc())
         return False
-_SMS_VID_PLAYLIST = '_sms_twilio_vid'
-
 def _start_video_looping(fpp_host, vid_name):
-    """Create a looping FPP playlist for a video file and start it.
-    FPP has no direct 'Media Start' command — video playback requires a playlist."""
+    """Start a video via FPP 'Play Media' command. Loop count 0 = infinite."""
     import urllib.parse
-    playlist_data = {
-        "name": _SMS_VID_PLAYLIST,
-        "repeat": 1,
-        "loopCount": 0,
-        "startTime": "",
-        "stopTime": "",
-        "entries": [{"type": "media", "enabled": 1, "mediaName": vid_name, "duration": 0}]
-    }
-    save_url = f"{fpp_host}/api/playlist/{urllib.parse.quote(_SMS_VID_PLAYLIST)}"
-    try:
-        requests.put(save_url, json=playlist_data, timeout=5)
-    except Exception as e:
-        logging.error(f"Could not save video playlist: {e}")
-        return False
-    cmd_url = (f"{fpp_host}/api/command/{urllib.parse.quote('Start Playlist')}/"
-               f"{urllib.parse.quote(_SMS_VID_PLAYLIST)}/true/true")
-    r = requests.get(cmd_url, timeout=3)
-    logging.info(f"▶️  Start video playlist ({vid_name}): {r.status_code} - {r.text}")
+    cmd_url = (f"{fpp_host}/api/command/{urllib.parse.quote('Play Media')}/"
+               f"{urllib.parse.quote(vid_name)}/0/0")
+    r = requests.get(cmd_url, timeout=5)
+    logging.info(f"▶️  Play Media ({vid_name}): {r.status_code} - {r.text}")
     return r.status_code == 200
 
 
