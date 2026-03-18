@@ -2050,6 +2050,10 @@ def index():
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
             <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
+            <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+                <button id="btn_twilio_start" onclick="twilioStart()" style="background:#2e7d32; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">▶ TwilioStart</button>
+                <button id="btn_twilio_stop" onclick="twilioStop()" style="background:#c62828; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">■ TwilioStop</button>
+            </div>
         </div>
 
         <!-- Plugin Live Banner -->
@@ -2554,6 +2558,29 @@ def index():
         </div>
 
         <script>
+            function twilioStart() {
+                var btn = document.getElementById('btn_twilio_start');
+                btn.disabled = true; btn.textContent = '...';
+                fetch('/api/activate', {method:'POST'})
+                .then(r => r.json())
+                .then(function(d) {
+                    if (d.success === false) { alert('TwilioStart failed: ' + (d.error || 'Unknown error')); }
+                    updateLiveStatus();
+                })
+                .catch(function() { alert('TwilioStart request failed.'); })
+                .finally(function() { btn.disabled = false; btn.textContent = '▶ TwilioStart'; });
+            }
+
+            function twilioStop() {
+                var btn = document.getElementById('btn_twilio_stop');
+                btn.disabled = true; btn.textContent = '...';
+                fetch('/api/deactivate', {method:'POST'})
+                .then(r => r.json())
+                .then(function() { updateLiveStatus(); })
+                .catch(function() { alert('TwilioStop request failed.'); })
+                .finally(function() { btn.disabled = false; btn.textContent = '■ TwilioStop'; });
+            }
+
             function updateLiveStatus() {
                 fetch('/api/queue/status').then(r => r.json()).then(data => {
                     const live = data.show_live === true;
