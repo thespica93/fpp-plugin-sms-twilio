@@ -1458,13 +1458,9 @@ def send_to_fpp(name):
                     logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
 
                 elif name_playlist.startswith('vid:'):
-                    # Video file — loop during name display, our timer stops it
                     vid_name = name_playlist[4:]
-                    cmd_url = (f"{fpp_host}/api/command/"
-                               f"{urllib.parse.quote('Media Start')}/"
-                               f"{urllib.parse.quote(vid_name)}/true")
-                    start_response = requests.get(cmd_url, timeout=5)
-                    logging.info(f"   Media Start (names video, loop): {start_response.status_code} - {start_response.text}")
+                    _start_video_looping(fpp_host, vid_name)
+                    logging.info(f"   Names video started via playlist: {vid_name}")
 
                 elif name_playlist.startswith('img:'):
                     # Image background — will be composited with text in Step 2 below
@@ -1601,6 +1597,33 @@ def send_to_fpp(name):
         import traceback
         logging.error(traceback.format_exc())
         return False
+_SMS_VID_PLAYLIST = '_sms_twilio_vid'
+
+def _start_video_looping(fpp_host, vid_name):
+    """Create a looping FPP playlist for a video file and start it.
+    FPP has no direct 'Media Start' command — video playback requires a playlist."""
+    import urllib.parse
+    playlist_data = {
+        "name": _SMS_VID_PLAYLIST,
+        "repeat": 1,
+        "loopCount": 0,
+        "startTime": "",
+        "stopTime": "",
+        "entries": [{"type": "media", "enabled": 1, "mediaName": vid_name, "duration": 0}]
+    }
+    save_url = f"{fpp_host}/api/playlist/{urllib.parse.quote(_SMS_VID_PLAYLIST)}"
+    try:
+        requests.put(save_url, json=playlist_data, timeout=5)
+    except Exception as e:
+        logging.error(f"Could not save video playlist: {e}")
+        return False
+    cmd_url = (f"{fpp_host}/api/command/{urllib.parse.quote('Start Playlist')}/"
+               f"{urllib.parse.quote(_SMS_VID_PLAYLIST)}/true/true")
+    r = requests.get(cmd_url, timeout=3)
+    logging.info(f"▶️  Start video playlist ({vid_name}): {r.status_code} - {r.text}")
+    return r.status_code == 200
+
+
 def start_default_playlist():
     """Start the configured default waiting playlist/sequence.
     For sequences (seq:), uses FSEQ Effect (loop=true, background=true) so it loops
@@ -1635,19 +1658,9 @@ def start_default_playlist():
             return False
 
         elif default_playlist.startswith('vid:'):
-            # Video file — use FPP Media Start command with loop=true
             vid_name = default_playlist[4:]
-            cmd_url = (f"{fpp_host}/api/command/"
-                       f"{urllib.parse.quote('Media Start')}/"
-                       f"{urllib.parse.quote(vid_name)}/true")
-            logging.info(f"▶️  Starting video (loop): {vid_name}")
-            response = requests.get(cmd_url, timeout=5)
-            logging.info(f"   Response: {response.status_code} - {response.text}")
-            if response.status_code == 200:
-                logging.info(f"✅ Video started (looping)")
-                return True
-            logging.error(f"❌ Media Start failed: {response.status_code} - {response.text}")
-            return False
+            logging.info(f"▶️  Starting video via playlist (loop): {vid_name}")
+            return _start_video_looping(fpp_host, vid_name)
 
         elif default_playlist.startswith('img:'):
             # Static image — render to overlay model shared memory
@@ -1729,10 +1742,9 @@ def return_to_default_playlist():
             logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
 
         elif name_playlist.startswith('vid:'):
-            # Stop the names video
-            vid_name = name_playlist[4:]
-            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Media Stop')}/{urllib.parse.quote(vid_name)}", timeout=3)
-            logging.info(f"⏹️  Media Stop (names video): {r.status_code} - {r.text}")
+            # Stop the names video playlist
+            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
+            logging.info(f"⏹️  Stop Now (names video): {r.status_code}")
             # Restart default content if it's also vid: or img: (won't auto-resume)
             if default_content.startswith('vid:') or default_content.startswith('img:'):
                 start_default_playlist()
