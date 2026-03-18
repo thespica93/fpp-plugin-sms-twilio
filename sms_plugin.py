@@ -3005,8 +3005,10 @@ def index():
                 // Returns {type, file} for the configured Names Display content, or null.
                 function getConfiguredContent() {
                     var dp = document.getElementById('name_display_playlist');
-                    if (!dp || !dp.value) return null;
-                    var val = dp.value;
+                    var defaultDp = document.getElementById('default_playlist');
+                    // Fall back to waiting content when names content is "None"
+                    var val = (dp && dp.value) ? dp.value : (defaultDp ? defaultDp.value : '');
+                    if (!val) return null;
                     if (val.startsWith('seq:')) {
                         return { type: 'seq', file: val.replace(/^seq:/, '').replace(/\.fseq$/, '') };
                     }
@@ -3023,7 +3025,7 @@ def index():
                     var ct = getConfiguredContent();
                     var label = document.getElementById('fseq_seq_label');
                     if (!ct) {
-                        label.textContent = '\u26a0 Names Display Playlist must be a .fseq, video, or image file for background preview.';
+                        label.textContent = '\u26a0 Select a .fseq, video, or image as Waiting or Names content for background preview.';
                         label.style.color = '#ff9800';
                         return;
                     }
