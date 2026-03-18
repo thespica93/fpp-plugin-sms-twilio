@@ -2675,9 +2675,10 @@ def index():
                     }
                     var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
                     var color      = document.getElementById('text_color').value || '#ff0000';
+                    var fontName   = document.getElementById('text_font').value || 'sans-serif';
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
                     var lineH      = Math.round(scaledFont * 1.2);
-                    ctx.font = 'bold ' + scaledFont + 'px sans-serif';
+                    ctx.font = scaledFont + 'px ' + fontName + ', sans-serif';
                     ctx.textBaseline = 'top';
 
                     lineRects = [null, null, null, null];
@@ -2697,7 +2698,7 @@ def index():
                         var arrowX = pos === 'L2R' ? 4 : canvas.width - ctx.measureText(arrowTxt).width - 4;
                         ctx.fillText(arrowTxt, arrowX, 4);
                         ctx.restore();
-                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+                        ctx.font = scaledFont + 'px ' + fontName + ', sans-serif'; ctx.textBaseline = 'top';
 
                         var stackIdx = 0;
                         for (var i = 0; i < 4; i++) {
@@ -2731,7 +2732,7 @@ def index():
                         var sarrow = pos === 'T2B' ? '↓' : '↑';
                         ctx.fillText(sarrow, canvas.width / 2 - ctx.measureText(sarrow).width / 2, 4);
                         ctx.restore();
-                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
+                        ctx.font = scaledFont + 'px ' + fontName + ', sans-serif'; ctx.textBaseline = 'top';
 
                         var stackIdx = 0;
                         for (var i = 0; i < 4; i++) {
