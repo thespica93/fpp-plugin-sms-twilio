@@ -2162,7 +2162,6 @@ def index():
                                 <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
                                 <span id="pos_display" style="font-size:12px; color:#888;"></span>
                             </div>
-                            <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
 
                             <!-- Canvas background preview (FSEQ / video / image) -->
                             <div style="margin-top:10px; padding:10px; background:#616161; border:1px solid #777; border-radius:4px;">
@@ -3236,6 +3235,9 @@ def index():
                     } else {
                         fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
                     }
+
+                    // Load background preview now that dropdowns are populated
+                    if (window.toggleFseqPreview) window.toggleFseqPreview();
                 })
                 .catch(function(e) { console.error('FPP data load failed:', e); });
             }
@@ -3344,8 +3346,7 @@ var _saveTimer = null;
                 ['name_display_playlist', 'overlay_model_name'].forEach(function(id) {
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', function() {
-                        var en = document.getElementById('fseq_preview_enabled');
-                        if (en && en.checked && window.toggleFseqPreview) window.toggleFseqPreview();
+                        if (window.toggleFseqPreview) window.toggleFseqPreview();
                     });
                 });
 
