@@ -2355,10 +2355,11 @@ def index():
                     var row = document.getElementById('row_duplicate');
                     var cb = document.getElementById('sms_response_duplicate');
                     var warn = document.getElementById('duplicate_disabled_warning');
+                    if (!row) return;
                     if (allowDupes) {
                         row.classList.add('locked');
                         row.classList.remove('enabled');
-                        cb.checked = false;
+                        if (cb) cb.checked = false;
                     } else {
                         row.classList.remove('locked');
                         toggleResp('duplicate');
@@ -2701,6 +2702,7 @@ def index():
                     var fontName   = document.getElementById('text_font').value || 'sans-serif';
                     var scaledFont = Math.round(fontSize * canvas.width / mw);
                     var lineH      = Math.round(scaledFont * 1.2);
+                    var posLabel   = '';
                     ctx.font = scaledFont + 'px ' + fontName + ', sans-serif';
                     ctx.textBaseline = 'top';
 
