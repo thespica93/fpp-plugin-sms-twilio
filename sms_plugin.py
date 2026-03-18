@@ -1598,10 +1598,12 @@ def send_to_fpp(name):
         logging.error(traceback.format_exc())
         return False
 def _start_video_looping(fpp_host, vid_name):
-    """Start a video via FPP 'Play Media' command. Loop count 0 = infinite."""
+    """Start a video via FPP 'Play Media' command.
+    FPP clamps loop count < 1 to 1 (play once); there is no infinite-loop value.
+    999 bypasses the UI cap of 100 and tells VLC input-repeat=998 (~8hrs at 30s/loop)."""
     import urllib.parse
     cmd_url = (f"{fpp_host}/api/command/{urllib.parse.quote('Play Media')}/"
-               f"{urllib.parse.quote(vid_name)}/0/0")
+               f"{urllib.parse.quote(vid_name)}/999/0")
     r = requests.get(cmd_url, timeout=5)
     logging.info(f"▶️  Play Media ({vid_name}): {r.status_code} - {r.text}")
     return r.status_code == 200
@@ -2053,7 +2055,7 @@ def index():
         <!-- Plugin Live Banner -->
         <div id="plugin_live_banner" style="display:none; background:#1b5e20; color:#fff; padding:10px 16px; border-radius:5px; margin-top:10px; font-size:14px; font-weight:bold; align-items:center; gap:10px;">
             <span style="display:inline-block; width:12px; height:12px; background:#69f0ae; border-radius:50%; box-shadow:0 0 6px #69f0ae;"></span>
-            Plugin is Live — TwilioStart is running
+            Plugin is Live
         </div>
 
         <!-- Settings Tab -->
@@ -2087,7 +2089,7 @@ def index():
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
                         <div id="fpp_content_live_warning" style="display:none; background:#b71c1c; color:#fff; border-radius:5px; padding:8px 12px; margin-bottom:10px; font-size:13px;">
-                            🔴 <strong>Plugin is Live</strong> — run TwilioStop to edit these settings
+                            🔴 <strong>Plugin is Live</strong> — run TwilioStop to edit
                         </div>
                         <div id="fpp_content_inputs">
                             <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
