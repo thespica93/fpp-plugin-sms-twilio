@@ -5069,10 +5069,18 @@ def api_deactivate():
             r = requests.get(effect_stop_url, timeout=3)
             logging.info(f"🛑 FSEQ Effect Stop: {r.status_code} - {r.text}")
 
-        # Stop Now catches playlists and any foreground sequences
+        # Stop Now catches playlists, videos, and foreground sequences
         command_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('Stop Now')}"
         r2 = requests.get(command_url, timeout=3)
         logging.info(f"🛑 Stop Now: {r2.status_code} - {r2.text}")
+
+        # Image content renders via overlay model (State 2 Opaque) — must clear explicitly
+        overlay_model = config.get('overlay_model_name', '')
+        if default.startswith('img:') and overlay_model:
+            encoded = urllib.parse.quote(overlay_model)
+            state_url = f"{FPP_HOST}/api/overlays/model/{encoded}/state"
+            requests.put(state_url, json={"State": 0}, timeout=3)
+            logging.info(f"🛑 Overlay cleared (img content stopped)")
     except Exception as e:
         logging.warning(f"Could not stop FPP playback: {e}")
 
