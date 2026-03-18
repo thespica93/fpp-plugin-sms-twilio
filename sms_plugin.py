@@ -1477,7 +1477,22 @@ def send_to_fpp(name):
 
             except Exception as e:
                 logging.error(f"💥 ERROR starting name playlist: {e}")
-        
+        else:
+            # No names content configured.
+            # vid: waiting content plays through FPP's media player which renders above the
+            # overlay model compositing layer — stop it so the overlay text is actually visible.
+            # seq:/playlist waiting content composites correctly underneath the overlay, so
+            # those are left running (maintained by the State-3 refresh loop in display_worker).
+            _default = config.get('default_playlist', '')
+            if _default.startswith('vid:'):
+                try:
+                    import urllib.parse
+                    logging.info("⏸️  Pausing vid: waiting content — video layer sits above overlay model")
+                    requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
+                    time.sleep(0.2)
+                except Exception as _e:
+                    logging.error(f"Error stopping video for overlay: {_e}")
+
         # Step 2: Display text ON TOP of the sequence
         if overlay_model:
             try:
@@ -1721,9 +1736,14 @@ def return_to_default_playlist():
         default_content = config.get('default_playlist', '')
 
         if not name_playlist:
-            # No names content was started — waiting content was never interrupted.
-            # Overlay already cleared above; nothing else to stop or restart.
-            logging.info("ℹ️  No names playlist — waiting content unchanged, overlay cleared")
+            # No names content. vid:/img: content was paused/replaced for the overlay display —
+            # restart it now. seq:/playlist content was never stopped, so leave it alone.
+            _default = config.get('default_playlist', '')
+            if _default.startswith('vid:') or _default.startswith('img:'):
+                start_default_playlist()
+                logging.info("ℹ️  No names playlist — restarted default vid/img content after overlay")
+            else:
+                logging.info("ℹ️  No names playlist — waiting content unchanged, overlay cleared")
             return
 
         if name_playlist.startswith('seq:'):
