@@ -3169,6 +3169,7 @@ def index():
                 fetch('/api/fpp/data')
                 .then(r => r.json())
                 .then(data => {
+                    if (data.error) console.warn('FPP data partial error:', data.error);
                     const defaultSelect = document.getElementById('default_playlist');
                     const nameSelect = document.getElementById('name_display_playlist');
                     const currentDefault = "{{ config.get('default_playlist', '') }}";
@@ -3547,7 +3548,12 @@ def get_fpp_data():
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {executor.submit(fn): key for key, fn in tasks.items()}
             for future in as_completed(futures):
-                results[futures[future]] = future.result()
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception as e:
+                    logging.error(f"FPP data task '{key}' failed: {e}")
+                    results[key] = []
 
         _fpp_data_cache = results
         _fpp_data_cache_time = time.time()
