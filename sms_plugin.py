@@ -1799,14 +1799,32 @@ def display_worker():
             except Exception as e:
                 logging.error(f"💥 Error sending to FPP: {e}")
             
-            display_duration = config.get('display_duration', 30)
+            display_duration = int(config.get('display_duration', 30))
             logging.info(f"⏱️  Displaying for {display_duration} seconds...")
-            
+
             try:
-                time.sleep(display_duration)
+                name_playlist_chk = config.get('name_display_playlist', '')
+                overlay_model_chk = config.get('overlay_model_name', '')
+                if not name_playlist_chk and overlay_model_chk:
+                    # No names content — FPP can reset the overlay state while the waiting
+                    # content is active (e.g. playlist steps, effect transitions).
+                    # Re-enable State 3 every 2 s to keep the text on screen for the full duration.
+                    import urllib.parse as _ul
+                    _surl = f"{FPP_HOST}/api/overlays/model/{_ul.quote(overlay_model_chk)}/state"
+                    _end = time.time() + display_duration
+                    while time.time() < _end and not stop_display:
+                        try:
+                            requests.put(_surl, json={"State": 3}, timeout=2)
+                        except Exception:
+                            pass
+                        _rem = _end - time.time()
+                        if _rem > 0:
+                            time.sleep(min(2.0, _rem))
+                else:
+                    time.sleep(display_duration)
                 logging.info(f"⏱️  Display duration completed")
             except Exception as e:
-                logging.error(f"💥 Error during sleep: {e}")
+                logging.error(f"💥 Error during display: {e}")
             
             try:
                 logging.info(f"🔄 Returning to default playlist...")
