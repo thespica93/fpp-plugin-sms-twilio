@@ -2517,7 +2517,6 @@ def index():
                     if (help) help.textContent = 'Each line scrolls vertically at its own X position. Click a line then drag left/right to reposition it.';
                 } else {
                     if (hint) hint.textContent = 'click a line to select, drag to reposition';
-                    if (help) help.textContent = 'Click a line on the preview then drag it anywhere on the canvas.';
                 }
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
             }
@@ -2955,20 +2954,12 @@ def index():
                                     return;
                                 }
                                 _fseqMeta = data;
-                                var ctype = data.compression_type === 0 ? 'uncompressed'
-                                          : data.compression_type === 1 ? 'zlib' : 'zstd';
-                                var mw2 = parseInt(document.getElementById('overlay_model_width').value)  || 0;
-                                var mh2 = parseInt(document.getElementById('overlay_model_height').value) || 0;
-                                var info = data.frame_count + ' frames \u00b7 '
-                                    + Math.round(data.fps) + ' fps \u00b7 '
-                                    + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype;
                                 if (data.detected_start_channel) {
-                                    loadEl.style.color = '#aaa';
+                                    loadEl.textContent = '';
                                 } else {
-                                    info += ' \u00b7 \u26a0 model not found \u2014 verify overlay model name';
+                                    loadEl.textContent = '\u26a0 Overlay model not found \u2014 verify model name in settings';
                                     loadEl.style.color = '#ff9800';
                                 }
-                                loadEl.textContent = info;
                                 var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
                                 var scrubber = document.getElementById('fseq_scrubber');
                                 scrubber.max = totalSec;
@@ -2987,8 +2978,7 @@ def index():
 
                     } else if (ct.type === 'vid') {
                         // ---- Video: show scrubber (time in seconds), fetch frames ----
-                        loadEl.textContent = 'Video preview loaded';
-                        loadEl.style.color = '#aaa';
+                        loadEl.textContent = '';
                         var scrubber = document.getElementById('fseq_scrubber');
                         scrubber.max = 300;  // assume up to 5 min; user can scrub
                         scrubber.value = 0;
@@ -3000,8 +2990,7 @@ def index():
 
                     } else {
                         // ---- Image: load once, no scrubber ----
-                        loadEl.textContent = 'Loading image\u2026';
-                        loadEl.style.color = '#aaa';
+                        loadEl.textContent = '';
                         document.getElementById('fseq_scrubber_row').style.display = 'none';
                         doMediaFetch(0);
                     }
@@ -3105,7 +3094,6 @@ def index():
             loadFPPData();
             initRespRows();
             setupAutoSave();
-            if (window.toggleFseqPreview) window.toggleFseqPreview();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
             updateScrollSpeedVisibility();
@@ -3356,7 +3344,8 @@ var _saveTimer = null;
                 ['name_display_playlist', 'overlay_model_name'].forEach(function(id) {
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', function() {
-                        if (window.toggleFseqPreview) window.toggleFseqPreview();
+                        var en = document.getElementById('fseq_preview_enabled');
+                        if (en && en.checked && window.toggleFseqPreview) window.toggleFseqPreview();
                     });
                 });
 
