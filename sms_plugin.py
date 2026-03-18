@@ -2165,13 +2165,10 @@ def index():
                             <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
 
                             <!-- Canvas background preview (FSEQ / video / image) -->
-                            <div style="margin-top:10px; padding:10px; background:#4a4a4a; border:1px solid #555; border-radius:4px;">
-                                <label style="margin:0; font-size:13px; cursor:pointer;">
-                                    <input type="checkbox" id="fseq_preview_enabled" onchange="toggleFseqPreview()" style="margin-right:6px;">
-                                    Background Preview
-                                    <span style="font-weight:normal; font-size:11px; color:#888; margin-left:6px;">renders Names Display content (FSEQ / video frame / image) behind text on canvas</span>
-                                </label>
-                                <div id="fseq_preview_controls" style="display:none; margin-top:8px;">
+                            <div style="margin-top:10px; padding:10px; background:#616161; border:1px solid #777; border-radius:4px;">
+                                <span style="font-size:13px; font-weight:bold; color:#eee;">Background Preview</span>
+                                <span style="font-weight:normal; font-size:11px; color:#bbb; margin-left:6px;">Use scroll bar to move preview.</span>
+                                <div id="fseq_preview_controls" style="margin-top:8px;">
                                     <div style="margin-bottom:6px;">
                                         <span id="fseq_seq_label" style="font-size:12px; color:#ccc;">Sequence: —</span>
                                     </div>
@@ -2633,8 +2630,6 @@ def index():
                     // Stacked-group Y: center the group, space lines by lineH
                     var stackStartY = (canvas.height - nLines * lineH) / 2;
 
-                    var posLabel = 'Click a line to select, then drag';
-
                     if (pos === 'L2R' || pos === 'R2L') {
                         // Per-line Y control; text scrolls full width at each line's Y
                         ctx.save();
@@ -2914,23 +2909,17 @@ def index():
                 }
 
                 window.toggleFseqPreview = function() {
-                    var en = document.getElementById('fseq_preview_enabled').checked;
-                    document.getElementById('fseq_preview_controls').style.display = en ? '' : 'none';
-                    if (en) {
-                        var ct = getConfiguredContent();
-                        var label = document.getElementById('fseq_seq_label');
-                        if (!ct) {
-                            label.textContent = '\u26a0 Names Display Playlist must be a .fseq, video, or image file for background preview.';
-                            label.style.color = '#ff9800';
-                            return;
-                        }
-                        var icon = ct.type === 'seq' ? '🎬 ' : ct.type === 'vid' ? '🎥 ' : '🖼️ ';
-                        label.textContent = icon + ct.file;
-                        label.style.color = '#ccc';
-                        loadBgPreview();
-                    } else {
-                        _clearState();
+                    var ct = getConfiguredContent();
+                    var label = document.getElementById('fseq_seq_label');
+                    if (!ct) {
+                        label.textContent = '\u26a0 Names Display Playlist must be a .fseq, video, or image file for background preview.';
+                        label.style.color = '#ff9800';
+                        return;
                     }
+                    var icon = ct.type === 'seq' ? '🎬 ' : ct.type === 'vid' ? '🎥 ' : '🖼️ ';
+                    label.textContent = icon + ct.file;
+                    label.style.color = '#ccc';
+                    loadBgPreview();
                 };
 
                 function _clearState() {
@@ -2970,22 +2959,13 @@ def index():
                                           : data.compression_type === 1 ? 'zlib' : 'zstd';
                                 var mw2 = parseInt(document.getElementById('overlay_model_width').value)  || 0;
                                 var mh2 = parseInt(document.getElementById('overlay_model_height').value) || 0;
-                                var modelCh = data.detected_channel_count || (mw2 * mh2 * 3);
                                 var info = data.frame_count + ' frames \u00b7 '
                                     + Math.round(data.fps) + ' fps \u00b7 '
-                                    + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype
-                                    + ' \u00b7 FSEQ ch: ' + data.channel_count
-                                    + ' \u00b7 model ch: ' + modelCh
-                                    + ' \u00b7 model: ' + mw2 + '\u00d7' + mh2;
+                                    + fmtTime(data.duration_ms) + ' \u00b7 ' + ctype;
                                 if (data.detected_start_channel) {
-                                    info += ' \u00b7 start ch: ' + data.detected_start_channel;
-                                    if (data.detected_channel_count) {
-                                        var bpp = Math.round(data.detected_channel_count / (mw2 * mh2));
-                                        info += ' \u00b7 ' + (bpp === 4 ? 'RGBW' : 'RGB');
-                                    }
                                     loadEl.style.color = '#aaa';
                                 } else {
-                                    info += ' \u00b7 \u26a0 start ch not found \u2014 verify overlay model name';
+                                    info += ' \u00b7 \u26a0 model not found \u2014 verify overlay model name';
                                     loadEl.style.color = '#ff9800';
                                 }
                                 loadEl.textContent = info;
@@ -3125,6 +3105,7 @@ def index():
             loadFPPData();
             initRespRows();
             setupAutoSave();
+            if (window.toggleFseqPreview) window.toggleFseqPreview();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
             updateScrollSpeedVisibility();
@@ -3375,8 +3356,7 @@ var _saveTimer = null;
                 ['name_display_playlist', 'overlay_model_name'].forEach(function(id) {
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', function() {
-                        var en = document.getElementById('fseq_preview_enabled');
-                        if (en && en.checked && window.toggleFseqPreview) window.toggleFseqPreview();
+                        if (window.toggleFseqPreview) window.toggleFseqPreview();
                     });
                 });
 
