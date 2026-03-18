@@ -2168,7 +2168,7 @@ def index():
                             <!-- Canvas background preview (FSEQ / video / image) -->
                             <div style="margin-top:10px; padding:10px; background:#616161; border:1px solid #777; border-radius:4px;">
                                 <span style="font-size:13px; font-weight:bold; color:#eee;">Background Preview</span>
-                                <span style="font-weight:normal; font-size:11px; color:#bbb; margin-left:6px;">Use scroll bar to move preview.</span>
+                                <span id="fseq_scrub_hint" style="font-weight:normal; font-size:11px; color:#bbb; margin-left:6px;">Use scroll bar to move preview.</span>
                                 <div id="fseq_preview_controls" style="margin-top:8px;">
                                     <div style="margin-bottom:6px;">
                                         <span id="fseq_seq_label" style="font-size:12px; color:#ccc;">Sequence: —</span>
@@ -2979,8 +2979,10 @@ def index():
                     _fseqSeq     = (ct.type === 'seq') ? ct.file : null;
 
                     var loadEl = document.getElementById('fseq_load_status');
+                    var scrubHint = document.getElementById('fseq_scrub_hint');
                     loadEl.textContent = 'Loading\u2026';
                     loadEl.style.color = '#aaa';
+                    if (scrubHint) scrubHint.style.display = (ct.type === 'img') ? 'none' : '';
 
                     if (ct.type === 'seq') {
                         // ---- FSEQ: fetch info then show scrubber ----
