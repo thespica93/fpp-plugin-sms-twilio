@@ -2063,8 +2063,13 @@ def index():
             .view-btn:hover { background: #e68900; }
             .refresh-btn { background: #9C27B0; }
             .refresh-btn:hover { background: #7B1FA2; }
-            .checkbox-label { display: inline; margin-left: 5px; font-weight: normal; }
-            input[type="checkbox"] { width: auto; }
+            .checkbox-label { display: inline; margin-left: 10px; font-weight: normal; vertical-align: middle; }
+            .toggle-switch { position: relative; display: inline-block; width: 44px; height: 26px; flex-shrink: 0; vertical-align: middle; }
+            .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+            .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #555; border-radius: 26px; transition: background .2s; }
+            .toggle-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+            .toggle-switch input:checked + .toggle-slider { background: #4CAF50; }
+            .toggle-switch input:checked + .toggle-slider:before { transform: translateX(18px); }
             .success { color: #4CAF50; }
             .error { color: #f44336; }
             .info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #90caf9; color: #333; }
@@ -2115,7 +2120,7 @@ def index():
                     <div class="section">
                         <h2>Twilio Settings</h2>
                         <label>Enable Plugin:</label>
-                        <input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}>
+                        <label class="toggle-switch"><input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}><span class="toggle-slider"></span></label>
                         <label class="checkbox-label">Enable SMS polling</label>
 
                         <label>Twilio Account SID:</label>
@@ -2172,8 +2177,8 @@ def index():
                         <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
 
                         <div style="margin-top:10px;">
-                            <input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();">
-                            <label class="checkbox-label">✓ Allow Duplicate Names — same name can be submitted multiple times per day</label>
+                            <label class="toggle-switch"><input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();"><span class="toggle-slider"></span></label>
+                            <label class="checkbox-label">Allow Duplicate Names — same name can be submitted multiple times per day</label>
                         </div>
 
                         <div id="max_length_section">
@@ -2503,8 +2508,8 @@ def index():
                     <!-- Sub-col 1: Profanity + Whitelist -->
                     <div style="flex:1; min-width:220px;">
                         <div id="blacklist_section">
-                            <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState(); saveConfig();">
-                            <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
+                            <label class="toggle-switch"><input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                            <label class="checkbox-label">Enable Profanity Filter</label><br>
                             <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top:6px;">🚫 Manage Blacklist</button>
                         </div>
                         <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
@@ -2516,8 +2521,8 @@ def index():
 
                         <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
 
-                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); saveConfig();">
-                        <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
+                        <label class="toggle-switch"><input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                        <label class="checkbox-label">Enable Name Whitelist — only allow approved names</label><br>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top:6px;">📋 Manage Whitelist</button>
                     </div>
 
@@ -2529,13 +2534,13 @@ def index():
                                 ⚠️ Name format rules are disabled when the whitelist is active.
                             </div>
                             <div id="format_rules_inputs">
-                                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
-                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning(); saveConfig();">
-                                <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
+                                <label class="toggle-switch"><input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
+                                <label class="checkbox-label">One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
 
-                                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
-                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning(); saveConfig();">
-                                <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
+                                <label class="toggle-switch"><input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
+                                <label class="checkbox-label">Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
 
                                 <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
                                     ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
@@ -2658,8 +2663,8 @@ def index():
 
                 <div id="row_show_not_live" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_show_not_live" {{ 'checked' if config.get('sms_response_show_not_live', False) else '' }} onchange="toggleResp('show_not_live')">
-                        <label for="sms_response_show_not_live">🔴 Show Not Live — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_show_not_live" {{ 'checked' if config.get('sms_response_show_not_live', False) else '' }} onchange="toggleResp('show_not_live')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_show_not_live" style="margin-left:10px;vertical-align:middle;">🔴 Show Not Live — Send Response</label>
                     </div>
                     <p class="help-text" style="margin:4px 0 6px;">Sent to anyone who texts while the show is not active (TwilioStop has been called).</p>
                     <textarea id="response_show_not_live" rows="2">{{ config.get('response_show_not_live', "Ho, Ho, Ho, It looks like our show isn't running now. Try again later.") }}</textarea>
@@ -2667,26 +2672,26 @@ def index():
 
                 <div id="row_blocked" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_blocked" {{ 'checked' if config.get('sms_response_blocked', False) else '' }} onchange="toggleResp('blocked')">
-                        <label for="sms_response_blocked">🚫 Blocked Number — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_blocked" {{ 'checked' if config.get('sms_response_blocked', False) else '' }} onchange="toggleResp('blocked')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_blocked" style="margin-left:10px;vertical-align:middle;">🚫 Blocked Number — Send Response</label>
                     </div>
                     <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
                 </div>
 
                 <div id="row_profanity" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_profanity" {{ 'checked' if config.get('sms_response_profanity', False) else '' }} onchange="toggleResp('profanity')">
-                        <label for="sms_response_profanity">🤬 Profanity Detected — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_profanity" {{ 'checked' if config.get('sms_response_profanity', False) else '' }} onchange="toggleResp('profanity')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_profanity" style="margin-left:10px;vertical-align:middle;">🤬 Profanity Detected — Send Response</label>
                     </div>
                     <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
                 </div>
 
                 <div id="row_duplicate" class="resp-row{% if config.get('allow_duplicate_names', False) %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_duplicate"
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_duplicate"
                                {{ 'checked' if config.get('sms_response_duplicate', False) and not config.get('allow_duplicate_names', False) else '' }}
-                               onchange="toggleResp('duplicate')">
-                        <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
+                               onchange="toggleResp('duplicate')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_duplicate" style="margin-left:10px;vertical-align:middle;">🔄 Duplicate Name — Send Response</label>
                     </div>
                     <p id="duplicate_disabled_warning" class="resp-locked-note" style="{{ '' if config.get('allow_duplicate_names', False) else 'display:none;' }}">⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.</p>
                     <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
@@ -2694,11 +2699,11 @@ def index():
 
                 <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_invalid_format"
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_invalid_format"
                                {{ 'checked' if config.get('sms_response_invalid_format', False) and not config.get('use_whitelist', False) else '' }}
                                {{ 'disabled' if config.get('use_whitelist', False) else '' }}
-                               onchange="toggleResp('invalid_format')">
-                        <label for="sms_response_invalid_format">❌ Invalid Format — Send Response</label>
+                               onchange="toggleResp('invalid_format')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_invalid_format" style="margin-left:10px;vertical-align:middle;">❌ Invalid Format — Send Response</label>
                     </div>
                     {% if config.get('use_whitelist', False) %}
                     <p class="resp-locked-note">⚠️ Invalid Format responses are disabled when the whitelist is active — all names are validated against the whitelist instead of format rules.</p>
@@ -2708,24 +2713,24 @@ def index():
 
                 <div id="row_rate_limited" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_rate_limited" {{ 'checked' if config.get('sms_response_rate_limited', False) else '' }} onchange="toggleResp('rate_limited')">
-                        <label for="sms_response_rate_limited">⛔ Rate Limited — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_rate_limited" {{ 'checked' if config.get('sms_response_rate_limited', False) else '' }} onchange="toggleResp('rate_limited')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_rate_limited" style="margin-left:10px;vertical-align:middle;">⛔ Rate Limited — Send Response</label>
                     </div>
                     <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
                 </div>
 
                 <div id="row_not_whitelisted" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_not_whitelisted" {{ 'checked' if config.get('sms_response_not_whitelisted', False) else '' }} onchange="toggleResp('not_whitelisted')">
-                        <label for="sms_response_not_whitelisted">📋 Not on Whitelist — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_not_whitelisted" {{ 'checked' if config.get('sms_response_not_whitelisted', False) else '' }} onchange="toggleResp('not_whitelisted')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_not_whitelisted" style="margin-left:10px;vertical-align:middle;">📋 Not on Whitelist — Send Response</label>
                     </div>
                     <textarea id="response_not_whitelisted" rows="2">{{ config.get('response_not_whitelisted', 'Sorry, that name is not on our approved list.') }}</textarea>
                 </div>
 
                 <div id="row_success" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_success" {{ 'checked' if config.get('sms_response_success', False) else '' }} onchange="toggleResp('success')">
-                        <label for="sms_response_success">✅ Success — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_success" {{ 'checked' if config.get('sms_response_success', False) else '' }} onchange="toggleResp('success')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_success" style="margin-left:10px;vertical-align:middle;">✅ Success — Send Response</label>
                     </div>
                     <textarea id="response_success" rows="2">{{ config.get('response_success', 'Thanks! Your name will appear on our display soon! 🎄') }}</textarea>
                 </div>
