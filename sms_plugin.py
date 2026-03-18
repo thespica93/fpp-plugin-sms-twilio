@@ -1720,6 +1720,12 @@ def return_to_default_playlist():
         name_playlist  = config.get('name_display_playlist', '')
         default_content = config.get('default_playlist', '')
 
+        if not name_playlist:
+            # No names content was started — waiting content was never interrupted.
+            # Overlay already cleared above; nothing else to stop or restart.
+            logging.info("ℹ️  No names playlist — waiting content unchanged, overlay cleared")
+            return
+
         if name_playlist.startswith('seq:'):
             # Stop the names FSEQ Effect — waiting FSEQ keeps running underneath
             seq_name = name_playlist[4:].removesuffix('.fseq')
