@@ -3010,8 +3010,6 @@ def index():
                                 document.getElementById('fseq_scrubber_row').style.display = '';
                                 document.getElementById('fseq_time_display').textContent =
                                     '0:00 / ' + fmtTime(data.duration_ms);
-                                document.getElementById('fseq_status').textContent =
-                                    'Scrub to preview different parts of the sequence';
                                 doFseqFetch(0);
                             })
                             .catch(function(e) {
