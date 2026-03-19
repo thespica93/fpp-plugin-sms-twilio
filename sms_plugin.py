@@ -3602,12 +3602,7 @@ var _saveTimer = null;
                     modal.addEventListener('click', function(e) { if (e.target === modal) cwClose(); });
                 }
                 document.getElementById('color_swatch_btn').addEventListener('click', cwOpen);
-                var eyedropBtn = document.getElementById('eyedropper_btn');
-                if (window.EyeDropper) {
-                    eyedropBtn.addEventListener('click', cwEyedrop);
-                } else {
-                    eyedropBtn.style.display = 'none';
-                }
+                document.getElementById('eyedropper_btn').addEventListener('click', cwEyedrop);
                 document.getElementById('text_color_hex').addEventListener('change', function() { cwApply(this.value); });
                 document.getElementById('cw_close_x').addEventListener('click', cwClose);
                 document.getElementById('cw_cancel_btn').addEventListener('click', cwClose);
