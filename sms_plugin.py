@@ -2238,14 +2238,11 @@ def index():
 
                         <label>Text Color:</label>
                         <div style="display: flex; align-items: center; gap: 10px;">
-                            <button type="button" id="color_swatch_btn"
-                                    style="width:60px;height:40px;border:2px solid #555;border-radius:4px;cursor:pointer;background:{{ config.get('text_color','#FF0000') }};padding:0;flex-shrink:0;"
-                                    title="Open color wheel"></button>
+                            <input type="color" id="color_swatch_btn" value="{{ config.get('text_color','#FF0000') }}"
+                                   style="width:60px;height:40px;border:2px solid #555;border-radius:4px;cursor:pointer;padding:2px;background:none;"
+                                   title="Pick color">
                             <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
                                    placeholder="#FF0000" style="width:100px;">
-                            <button type="button" id="eyedropper_btn"
-                                    style="background:#2d2d2d;color:#ddd;border:1px solid #555;border-radius:4px;padding:7px 9px;cursor:pointer;line-height:0;"
-                                    title="Pick color from screen"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M13.354.646a1.207 1.207 0 0 0-1.708 0L8.5 3.793l-.646-.647a.5.5 0 1 0-.708.708L8.293 5l-7.147 7.146A.5.5 0 0 0 1 12.5v1.793l-.854.853a.5.5 0 1 0 .708.707L1.707 15H3.5a.5.5 0 0 0 .354-.146L11 7.707l1.146 1.147a.5.5 0 0 0 .708-.708l-.647-.646 3.147-3.146a1.207 1.207 0 0 0 0-1.708l-2-2z"/></svg></button>
                         </div>
 
                         <label>Font:</label>
@@ -3567,197 +3564,24 @@ var _saveTimer = null;
                 });
             }
 
-            // ===== Color Wheel =====
-            var _cw = { h: 0, s: 1, v: 1, dragging: false };
-
+            // ===== Color Picker =====
             function setupColorWheel() {
-                if (!document.getElementById('color_wheel_modal')) {
-                    var modal = document.createElement('div');
-                    modal.id = 'color_wheel_modal';
-                    modal.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;';
-                    modal.innerHTML =
-                        '<div style="background:#1e1e1e;border:1px solid #444;border-radius:10px;padding:20px;width:300px;box-shadow:0 8px 32px rgba(0,0,0,0.6);">' +
-                          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
-                            '<span style="color:#fff;font-weight:bold;font-size:14px;">Pick Color</span>' +
-                            '<button id="cw_close_x" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;padding:0;">\u00d7</button>' +
-                          '</div>' +
-                          '<div style="display:flex;justify-content:center;margin-bottom:14px;">' +
-                            '<canvas id="cw_wheel" width="220" height="220" style="cursor:crosshair;display:block;"></canvas>' +
-                          '</div>' +
-                          '<div style="margin-bottom:12px;">' +
-                            '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px;">Brightness</label>' +
-                            '<input type="range" id="cw_brightness" min="0" max="100" value="100" style="width:100%;">' +
-                          '</div>' +
-                          '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">' +
-                            '<div id="cw_preview" style="width:44px;height:44px;border-radius:4px;border:1px solid #555;flex-shrink:0;"></div>' +
-                            '<input type="text" id="cw_hex_input" placeholder="#FF0000" maxlength="7" ' +
-                              'style="flex:1;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px;padding:6px 10px;font-size:14px;font-family:monospace;">' +
-                          '</div>' +
-                          '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
-                            '<button id="cw_cancel_btn" style="background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:8px 16px;cursor:pointer;">Cancel</button>' +
-                            '<button id="cw_ok_btn" style="background:#1565c0;color:#fff;border:none;border-radius:4px;padding:8px 16px;cursor:pointer;font-weight:bold;">OK</button>' +
-                          '</div>' +
-                        '</div>';
-                    document.body.appendChild(modal);
-                    modal.addEventListener('click', function(e) { if (e.target === modal) cwClose(); });
-                }
-                document.getElementById('color_swatch_btn').addEventListener('click', cwOpen);
-                document.getElementById('eyedropper_btn').addEventListener('click', cwEyedrop);
-                document.getElementById('text_color_hex').addEventListener('change', function() { cwApply(this.value); });
-                document.getElementById('cw_close_x').addEventListener('click', cwClose);
-                document.getElementById('cw_cancel_btn').addEventListener('click', cwClose);
-                document.getElementById('cw_ok_btn').addEventListener('click', cwConfirm);
-                setTimeout(cwInitCanvas, 50);
-            }
-
-            function cwOpen() {
-                var hex = document.getElementById('text_color_hex').value || '#FF0000';
-                if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) hex = '#FF0000';
-                var rgb = cwHexToRgb(hex);
-                var hsv = cwRgbToHsv(rgb.r, rgb.g, rgb.b);
-                _cw.h = hsv.h; _cw.s = hsv.s; _cw.v = hsv.v;
-                document.getElementById('color_wheel_modal').style.display = 'flex';
-                document.getElementById('cw_brightness').value = Math.round(_cw.v * 100);
-                cwDrawWheel(document.getElementById('cw_wheel'));
-                cwUpdatePreview();
-            }
-
-            function cwClose() {
-                document.getElementById('color_wheel_modal').style.display = 'none';
-            }
-
-            function cwConfirm() {
-                var hex = document.getElementById('cw_hex_input').value;
-                if (/^#[0-9A-Fa-f]{6}$/.test(hex)) cwApply(hex);
-                cwClose();
-            }
-
-            function cwApply(hex) {
-                if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) return;
-                hex = hex.toUpperCase();
-                document.getElementById('text_color_hex').value = hex;
-                var swatchBtn = document.getElementById('color_swatch_btn');
-                if (swatchBtn) swatchBtn.style.background = hex;
-                if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
-                if (typeof saveConfig === 'function') saveConfig();
-            }
-
-            function cwEyedrop() {
-                if (!window.EyeDropper) return;
-                new EyeDropper().open().then(function(result) { cwApply(result.sRGBHex); }).catch(function() {});
-            }
-
-            function cwInitCanvas() {
-                var canvas = document.getElementById('cw_wheel');
-                if (!canvas) return;
-                canvas.addEventListener('mousedown', function(e) { _cw.dragging = true; cwUpdatePos(e); });
-                canvas.addEventListener('mousemove', function(e) { if (_cw.dragging) cwUpdatePos(e); });
-                document.addEventListener('mouseup', function() { _cw.dragging = false; });
-                document.getElementById('cw_brightness').addEventListener('input', function() {
-                    _cw.v = this.value / 100;
-                    cwDrawWheel(canvas);
-                    cwUpdatePreview();
+                var colorInput = document.getElementById('color_swatch_btn');
+                var hexInput = document.getElementById('text_color_hex');
+                colorInput.addEventListener('input', function() {
+                    var hex = this.value.toUpperCase();
+                    hexInput.value = hex;
+                    if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
+                    if (typeof saveConfig === 'function') saveConfig();
                 });
-                document.getElementById('cw_hex_input').addEventListener('input', function() {
-                    if (/^#[0-9A-Fa-f]{6}$/.test(this.value)) {
-                        var rgb = cwHexToRgb(this.value);
-                        var hsv = cwRgbToHsv(rgb.r, rgb.g, rgb.b);
-                        _cw.h = hsv.h; _cw.s = hsv.s; _cw.v = hsv.v;
-                        document.getElementById('cw_brightness').value = Math.round(_cw.v * 100);
-                        cwDrawWheel(canvas);
-                        cwUpdatePreview();
+                hexInput.addEventListener('change', function() {
+                    var hex = this.value.trim().toUpperCase();
+                    if (/^#[0-9A-F]{6}$/.test(hex)) {
+                        colorInput.value = hex;
+                        if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
+                        if (typeof saveConfig === 'function') saveConfig();
                     }
                 });
-                cwDrawWheel(canvas);
-                cwUpdatePreview();
-            }
-
-            function cwDrawWheel(canvas) {
-                var ctx = canvas.getContext('2d');
-                var cx = canvas.width / 2, cy = canvas.height / 2, r = cx - 2;
-                var img = ctx.createImageData(canvas.width, canvas.height);
-                for (var y = 0; y < canvas.height; y++) {
-                    for (var x = 0; x < canvas.width; x++) {
-                        var dx = x - cx, dy = y - cy;
-                        var dist = Math.sqrt(dx * dx + dy * dy);
-                        if (dist <= r) {
-                            var h = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
-                            var s = dist / r;
-                            var rgb = cwHsvToRgb(h, s, _cw.v);
-                            var idx = (y * canvas.width + x) * 4;
-                            img.data[idx] = rgb.r; img.data[idx+1] = rgb.g;
-                            img.data[idx+2] = rgb.b; img.data[idx+3] = 255;
-                        }
-                    }
-                }
-                ctx.putImageData(img, 0, 0);
-                var angle = _cw.h * Math.PI / 180;
-                var px = cx + _cw.s * r * Math.cos(angle);
-                var py = cy + _cw.s * r * Math.sin(angle);
-                ctx.beginPath(); ctx.arc(px, py, 7, 0, 2 * Math.PI);
-                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.stroke();
-                ctx.beginPath(); ctx.arc(px, py, 5, 0, 2 * Math.PI);
-                ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
-            }
-
-            function cwUpdatePos(e) {
-                var canvas = document.getElementById('cw_wheel');
-                var rect = canvas.getBoundingClientRect();
-                var cx = canvas.width / 2, cy = canvas.height / 2, r = cx - 2;
-                var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-                var dx = (e.clientX - rect.left) * sx - cx;
-                var dy = (e.clientY - rect.top) * sy - cy;
-                _cw.h = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
-                _cw.s = Math.min(Math.sqrt(dx * dx + dy * dy) / r, 1);
-                cwDrawWheel(canvas);
-                cwUpdatePreview();
-            }
-
-            function cwUpdatePreview() {
-                var rgb = cwHsvToRgb(_cw.h, _cw.s, _cw.v);
-                var hex = cwRgbToHex(rgb.r, rgb.g, rgb.b);
-                document.getElementById('cw_preview').style.background = hex;
-                document.getElementById('cw_hex_input').value = hex;
-            }
-
-            function cwHsvToRgb(h, s, v) {
-                var r, g, b, i = Math.floor(h / 60) % 6;
-                var f = h / 60 - Math.floor(h / 60);
-                var p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
-                switch (i) {
-                    case 0: r=v; g=t; b=p; break; case 1: r=q; g=v; b=p; break;
-                    case 2: r=p; g=v; b=t; break; case 3: r=p; g=q; b=v; break;
-                    case 4: r=t; g=p; b=v; break; case 5: r=v; g=p; b=q; break;
-                }
-                return {r: Math.round(r*255), g: Math.round(g*255), b: Math.round(b*255)};
-            }
-
-            function cwRgbToHsv(r, g, b) {
-                r /= 255; g /= 255; b /= 255;
-                var max = Math.max(r,g,b), min = Math.min(r,g,b), d = max - min;
-                var h, s = (max === 0) ? 0 : d / max, v = max;
-                if (max === min) { h = 0; } else {
-                    switch (max) {
-                        case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-                        case g: h = ((b - r) / d + 2) / 6; break;
-                        case b: h = ((r - g) / d + 4) / 6; break;
-                    }
-                }
-                return {h: h * 360, s: s, v: v};
-            }
-
-            function cwHexToRgb(hex) {
-                return {
-                    r: parseInt(hex.slice(1,3), 16),
-                    g: parseInt(hex.slice(3,5), 16),
-                    b: parseInt(hex.slice(5,7), 16)
-                };
-            }
-
-            function cwRgbToHex(r, g, b) {
-                return '#' + [r, g, b].map(function(x) {
-                    return ('0' + x.toString(16)).slice(-2).toUpperCase();
-                }).join('');
             }
 
         </script>
