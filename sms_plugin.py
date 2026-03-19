@@ -807,17 +807,18 @@ def get_fpp_sequences():
         return []
 
 def get_fpp_videos():
-    """Get list of video files from FPP media/videos directory."""
-    video_exts = {'.mp4', '.mkv', '.avi', '.mpg', '.mpeg', '.mov'}
-    try:
-        if os.path.isdir(FPP_VIDEOS_PATH):
-            return sorted(
-                f for f in os.listdir(FPP_VIDEOS_PATH)
-                if os.path.splitext(f.lower())[1] in video_exts
-            )
-    except Exception as e:
-        logging.error(f"Error listing FPP videos: {e}")
+    # VIDEO SUPPORT DISABLED — plugin only accepts .fseq, images, and playlists
     return []
+    # video_exts = {'.mp4', '.mkv', '.avi', '.mpg', '.mpeg', '.mov'}
+    # try:
+    #     if os.path.isdir(FPP_VIDEOS_PATH):
+    #         return sorted(
+    #             f for f in os.listdir(FPP_VIDEOS_PATH)
+    #             if os.path.splitext(f.lower())[1] in video_exts
+    #         )
+    # except Exception as e:
+    #     logging.error(f"Error listing FPP videos: {e}")
+    # return []
 
 
 def get_fpp_images():
@@ -1457,10 +1458,11 @@ def send_to_fpp(name):
                     start_response = requests.get(effect_url, timeout=3)
                     logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
 
-                elif name_playlist.startswith('vid:'):
-                    vid_name = name_playlist[4:]
-                    _start_video_looping(fpp_host, vid_name)
-                    logging.info(f"   Names video started via playlist: {vid_name}")
+                # VIDEO SUPPORT DISABLED — vid: names content branch removed
+                # elif name_playlist.startswith('vid:'):
+                #     vid_name = name_playlist[4:]
+                #     _start_video_looping(fpp_host, vid_name)
+                #     logging.info(f"   Names video started via playlist: {vid_name}")
 
                 elif name_playlist.startswith('img:'):
                     # Image background — will be composited with text in Step 2 below
@@ -1478,20 +1480,10 @@ def send_to_fpp(name):
             except Exception as e:
                 logging.error(f"💥 ERROR starting name playlist: {e}")
         else:
-            # No names content configured.
-            # vid: waiting content plays through FPP's media player which renders above the
-            # overlay model compositing layer — stop it so the overlay text is actually visible.
-            # seq:/playlist waiting content composites correctly underneath the overlay, so
-            # those are left running (maintained by the State-3 refresh loop in display_worker).
-            _default = config.get('default_playlist', '')
-            if _default.startswith('vid:'):
-                try:
-                    import urllib.parse
-                    logging.info("⏸️  Pausing vid: waiting content — video layer sits above overlay model")
-                    requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
-                    time.sleep(0.2)
-                except Exception as _e:
-                    logging.error(f"Error stopping video for overlay: {_e}")
+            # No names content configured — seq:/playlist waiting content composites
+            # correctly underneath the overlay and is left running.
+            # VIDEO SUPPORT DISABLED — vid: stop logic removed
+            pass
 
         # Step 2: Display text ON TOP of the sequence
         if overlay_model:
@@ -1612,16 +1604,17 @@ def send_to_fpp(name):
         import traceback
         logging.error(traceback.format_exc())
         return False
-def _start_video_looping(fpp_host, vid_name):
-    """Start a video via FPP 'Play Media' command.
-    FPP clamps loop count < 1 to 1 (play once); there is no infinite-loop value.
-    999 bypasses the UI cap of 100 and tells VLC input-repeat=998 (~8hrs at 30s/loop)."""
-    import urllib.parse
-    cmd_url = (f"{fpp_host}/api/command/{urllib.parse.quote('Play Media')}/"
-               f"{urllib.parse.quote(vid_name)}/999/0")
-    r = requests.get(cmd_url, timeout=5)
-    logging.info(f"▶️  Play Media ({vid_name}): {r.status_code} - {r.text}")
-    return r.status_code == 200
+# VIDEO SUPPORT DISABLED — _start_video_looping() commented out
+# def _start_video_looping(fpp_host, vid_name):
+#     """Start a video via FPP 'Play Media' command.
+#     FPP clamps loop count < 1 to 1 (play once); there is no infinite-loop value.
+#     999 bypasses the UI cap of 100 and tells VLC input-repeat=998 (~8hrs at 30s/loop)."""
+#     import urllib.parse
+#     cmd_url = (f"{fpp_host}/api/command/{urllib.parse.quote('Play Media')}/"
+#                f"{urllib.parse.quote(vid_name)}/999/0")
+#     r = requests.get(cmd_url, timeout=5)
+#     logging.info(f"▶️  Play Media ({vid_name}): {r.status_code} - {r.text}")
+#     return r.status_code == 200
 
 
 def start_default_playlist():
@@ -1657,10 +1650,11 @@ def start_default_playlist():
             logging.error(f"❌ FSEQ Effect Start failed: {response.status_code} - {response.text}")
             return False
 
-        elif default_playlist.startswith('vid:'):
-            vid_name = default_playlist[4:]
-            logging.info(f"▶️  Starting video via playlist (loop): {vid_name}")
-            return _start_video_looping(fpp_host, vid_name)
+        # VIDEO SUPPORT DISABLED — vid: default playlist branch removed
+        # elif default_playlist.startswith('vid:'):
+        #     vid_name = default_playlist[4:]
+        #     logging.info(f"▶️  Starting video via playlist (loop): {vid_name}")
+        #     return _start_video_looping(fpp_host, vid_name)
 
         elif default_playlist.startswith('img:'):
             # Static image — render to overlay model shared memory
@@ -1736,12 +1730,13 @@ def return_to_default_playlist():
         default_content = config.get('default_playlist', '')
 
         if not name_playlist:
-            # No names content. vid:/img: content was paused/replaced for the overlay display —
+            # No names content. img: content was paused/replaced for the overlay display —
             # restart it now. seq:/playlist content was never stopped, so leave it alone.
+            # VIDEO SUPPORT DISABLED — vid: check removed
             _default = config.get('default_playlist', '')
-            if _default.startswith('vid:') or _default.startswith('img:'):
+            if _default.startswith('img:'):
                 start_default_playlist()
-                logging.info("ℹ️  No names playlist — restarted default vid/img content after overlay")
+                logging.info("ℹ️  No names playlist — restarted default img content after overlay")
             else:
                 logging.info("ℹ️  No names playlist — waiting content unchanged, overlay cleared")
             return
@@ -1752,25 +1747,25 @@ def return_to_default_playlist():
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=3)
             logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
 
-        elif name_playlist.startswith('vid:'):
-            # Stop the names video playlist
-            r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
-            logging.info(f"⏹️  Stop Now (names video): {r.status_code}")
-            # Restart default content if it's also vid: or img: (won't auto-resume)
-            if default_content.startswith('vid:') or default_content.startswith('img:'):
-                start_default_playlist()
+        # VIDEO SUPPORT DISABLED — vid: names playlist branch removed
+        # elif name_playlist.startswith('vid:'):
+        #     r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
+        #     logging.info(f"⏹️  Stop Now (names video): {r.status_code}")
+        #     if default_content.startswith('vid:') or default_content.startswith('img:'):
+        #         start_default_playlist()
 
         elif name_playlist.startswith('img:'):
             # Image mode: overlay was used, nothing extra to stop.
-            # Re-apply default content (img:/vid: won't auto-resume)
-            if default_content.startswith('vid:') or default_content.startswith('img:'):
+            # Re-apply default img content (it won't auto-resume)
+            if default_content.startswith('img:'):
                 start_default_playlist()
 
         else:
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
             logging.info(f"⏹️  Stop Now ({r.status_code})")
-            # If default is vid:/img:, restart it (it was interrupted)
-            if default_content.startswith('vid:') or default_content.startswith('img:'):
+            # If default is img:, restart it (it was interrupted)
+            # VIDEO SUPPORT DISABLED — vid: check removed
+            if default_content.startswith('img:'):
                 start_default_playlist()
 
     except Exception as e:
@@ -2293,196 +2288,6 @@ def index():
                                     style="background:#2d2d2d;color:#ddd;border:1px solid #555;border-radius:4px;padding:7px 9px;cursor:pointer;line-height:0;"
                                     title="Pick color from screen"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M13.354.646a1.207 1.207 0 0 0-1.708 0L8.5 3.793l-.646-.647a.5.5 0 1 0-.708.708L8.293 5l-7.147 7.146A.5.5 0 0 0 1 12.5v1.793l-.854.853a.5.5 0 1 0 .708.707L1.707 15H3.5a.5.5 0 0 0 .354-.146L11 7.707l1.146 1.147a.5.5 0 0 0 .708-.708l-.647-.646 3.147-3.146a1.207 1.207 0 0 0 0-1.708l-2-2z"/></svg></button>
                         </div>
-                        <script>
-                        (function() {
-                            if (document.getElementById('color_wheel_modal')) return;
-                            var modal = document.createElement('div');
-                            modal.id = 'color_wheel_modal';
-                            modal.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;';
-                            modal.innerHTML =
-                                '<div style="background:#1e1e1e;border:1px solid #444;border-radius:10px;padding:20px;width:300px;box-shadow:0 8px 32px rgba(0,0,0,0.6);">' +
-                                  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
-                                    '<span style="color:#fff;font-weight:bold;font-size:14px;">Pick Color</span>' +
-                                    '<button onclick="closeColorWheel()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;padding:0;">\u2715</button>' +
-                                  '</div>' +
-                                  '<div style="display:flex;justify-content:center;margin-bottom:14px;">' +
-                                    '<canvas id="cw_wheel" width="220" height="220" style="cursor:crosshair;display:block;"></canvas>' +
-                                  '</div>' +
-                                  '<div style="margin-bottom:12px;">' +
-                                    '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px;">Brightness</label>' +
-                                    '<input type="range" id="cw_brightness" min="0" max="100" value="100" style="width:100%;">' +
-                                  '</div>' +
-                                  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">' +
-                                    '<div id="cw_preview" style="width:44px;height:44px;border-radius:4px;border:1px solid #555;flex-shrink:0;"></div>' +
-                                    '<input type="text" id="cw_hex_input" placeholder="#FF0000" maxlength="7" ' +
-                                      'style="flex:1;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px;padding:6px 10px;font-size:14px;font-family:monospace;">' +
-                                  '</div>' +
-                                  '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
-                                    '<button onclick="closeColorWheel()" style="background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:8px 16px;cursor:pointer;">Cancel</button>' +
-                                    '<button onclick="confirmColorWheel()" style="background:#1565c0;color:#fff;border:none;border-radius:4px;padding:8px 16px;cursor:pointer;font-weight:bold;">OK</button>' +
-                                  '</div>' +
-                                '</div>';
-                            document.body.appendChild(modal);
-                            modal.addEventListener('click', function(e) { if (e.target === modal) closeColorWheel(); });
-                            setTimeout(initColorWheel, 50);
-                        })();
-
-                        var _cw = { h: 0, s: 1, v: 1, dragging: false };
-
-                        function initColorWheel() {
-                            var canvas = document.getElementById('cw_wheel');
-                            if (!canvas) return;
-                            canvas.addEventListener('mousedown', function(e) { _cw.dragging = true; _cwUpdate(e); });
-                            canvas.addEventListener('mousemove', function(e) { if (_cw.dragging) _cwUpdate(e); });
-                            document.addEventListener('mouseup', function() { _cw.dragging = false; });
-                            document.getElementById('cw_brightness').addEventListener('input', function() {
-                                _cw.v = this.value / 100;
-                                _cwDrawWheel(document.getElementById('cw_wheel'));
-                                _cwUpdatePreview();
-                            });
-                            document.getElementById('cw_hex_input').addEventListener('input', function() {
-                                if (/^#[0-9A-Fa-f]{6}$/.test(this.value)) {
-                                    var rgb = _hexToRgb(this.value);
-                                    var hsv = _rgbToHsv(rgb.r, rgb.g, rgb.b);
-                                    _cw.h = hsv.h; _cw.s = hsv.s; _cw.v = hsv.v;
-                                    document.getElementById('cw_brightness').value = Math.round(_cw.v * 100);
-                                    _cwDrawWheel(document.getElementById('cw_wheel'));
-                                    _cwUpdatePreview();
-                                }
-                            });
-                        }
-
-                        function _cwDrawWheel(canvas) {
-                            var ctx = canvas.getContext('2d');
-                            var cx = canvas.width / 2, cy = canvas.height / 2, r = cx - 2;
-                            var img = ctx.createImageData(canvas.width, canvas.height);
-                            for (var y = 0; y < canvas.height; y++) {
-                                for (var x = 0; x < canvas.width; x++) {
-                                    var dx = x - cx, dy = y - cy;
-                                    var dist = Math.sqrt(dx * dx + dy * dy);
-                                    if (dist <= r) {
-                                        var h = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
-                                        var s = dist / r;
-                                        var rgb = _hsvToRgb(h, s, _cw.v);
-                                        var idx = (y * canvas.width + x) * 4;
-                                        img.data[idx] = rgb.r; img.data[idx+1] = rgb.g;
-                                        img.data[idx+2] = rgb.b; img.data[idx+3] = 255;
-                                    }
-                                }
-                            }
-                            ctx.putImageData(img, 0, 0);
-                            var angle = _cw.h * Math.PI / 180;
-                            var px = cx + _cw.s * r * Math.cos(angle);
-                            var py = cy + _cw.s * r * Math.sin(angle);
-                            ctx.beginPath(); ctx.arc(px, py, 7, 0, 2 * Math.PI);
-                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.stroke();
-                            ctx.beginPath(); ctx.arc(px, py, 5, 0, 2 * Math.PI);
-                            ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
-                        }
-
-                        function _cwUpdate(e) {
-                            var canvas = document.getElementById('cw_wheel');
-                            var rect = canvas.getBoundingClientRect();
-                            var cx = canvas.width / 2, cy = canvas.height / 2, r = cx - 2;
-                            var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-                            var dx = (e.clientX - rect.left) * sx - cx;
-                            var dy = (e.clientY - rect.top) * sy - cy;
-                            _cw.h = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
-                            _cw.s = Math.min(Math.sqrt(dx * dx + dy * dy) / r, 1);
-                            _cwDrawWheel(canvas);
-                            _cwUpdatePreview();
-                        }
-
-                        function _cwUpdatePreview() {
-                            var rgb = _hsvToRgb(_cw.h, _cw.s, _cw.v);
-                            var hex = _rgbToHex(rgb.r, rgb.g, rgb.b);
-                            document.getElementById('cw_preview').style.background = hex;
-                            document.getElementById('cw_hex_input').value = hex;
-                        }
-
-                        function openColorWheel() {
-                            var hex = document.getElementById('text_color_hex').value || '#FF0000';
-                            if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) hex = '#FF0000';
-                            var rgb = _hexToRgb(hex);
-                            var hsv = _rgbToHsv(rgb.r, rgb.g, rgb.b);
-                            _cw.h = hsv.h; _cw.s = hsv.s; _cw.v = hsv.v;
-                            var modal = document.getElementById('color_wheel_modal');
-                            modal.style.display = 'flex';
-                            document.getElementById('cw_brightness').value = Math.round(_cw.v * 100);
-                            _cwDrawWheel(document.getElementById('cw_wheel'));
-                            _cwUpdatePreview();
-                        }
-
-                        function closeColorWheel() {
-                            document.getElementById('color_wheel_modal').style.display = 'none';
-                        }
-
-                        function confirmColorWheel() {
-                            var hex = document.getElementById('cw_hex_input').value;
-                            if (/^#[0-9A-Fa-f]{6}$/.test(hex)) applyColorHex(hex);
-                            closeColorWheel();
-                        }
-
-                        function applyColorHex(hex) {
-                            if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) return;
-                            hex = hex.toUpperCase();
-                            document.getElementById('text_color_hex').value = hex;
-                            var swatchBtn = document.getElementById('color_swatch_btn');
-                            if (swatchBtn) swatchBtn.style.background = hex;
-                            if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
-                            if (typeof saveConfig === 'function') saveConfig();
-                        }
-
-                        function pickColorFromScreen() {
-                            if (!window.EyeDropper) {
-                                alert('Eyedropper is not supported in this browser.\nRequires Chrome or Edge 95+.');
-                                return;
-                            }
-                            new EyeDropper().open().then(function(result) {
-                                applyColorHex(result.sRGBHex);
-                            }).catch(function() {});
-                        }
-
-                        function _hsvToRgb(h, s, v) {
-                            var r, g, b, i = Math.floor(h / 60) % 6;
-                            var f = h / 60 - Math.floor(h / 60);
-                            var p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
-                            switch (i) {
-                                case 0: r=v; g=t; b=p; break; case 1: r=q; g=v; b=p; break;
-                                case 2: r=p; g=v; b=t; break; case 3: r=p; g=q; b=v; break;
-                                case 4: r=t; g=p; b=v; break; case 5: r=v; g=p; b=q; break;
-                            }
-                            return {r: Math.round(r*255), g: Math.round(g*255), b: Math.round(b*255)};
-                        }
-
-                        function _rgbToHsv(r, g, b) {
-                            r /= 255; g /= 255; b /= 255;
-                            var max = Math.max(r,g,b), min = Math.min(r,g,b), d = max - min;
-                            var h, s = (max === 0) ? 0 : d / max, v = max;
-                            if (max === min) { h = 0; } else {
-                                switch (max) {
-                                    case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-                                    case g: h = ((b - r) / d + 2) / 6; break;
-                                    case b: h = ((r - g) / d + 4) / 6; break;
-                                }
-                            }
-                            return {h: h * 360, s: s, v: v};
-                        }
-
-                        function _hexToRgb(hex) {
-                            return {
-                                r: parseInt(hex.slice(1,3), 16),
-                                g: parseInt(hex.slice(3,5), 16),
-                                b: parseInt(hex.slice(5,7), 16)
-                            };
-                        }
-
-                        function _rgbToHex(r, g, b) {
-                            return '#' + [r, g, b].map(function(x) {
-                                return ('0' + x.toString(16)).slice(-2).toUpperCase();
-                            }).join('');
-                        }
-                        </script>
 
                         <label>Font:</label>
                         <select id="text_font">
@@ -3217,7 +3022,7 @@ def index():
             }
 
             // ---------------------------------------------------------------------------
-            // Canvas background preview — supports FSEQ (.fseq), video (vid:), image (img:)
+            // Canvas background preview — supports FSEQ (.fseq) and image (img:)
             // ---------------------------------------------------------------------------
             (function() {
                 var _fseqMeta   = null;
@@ -3243,9 +3048,10 @@ def index():
                     if (val.startsWith('seq:')) {
                         return { type: 'seq', file: val.replace(/^seq:/, '').replace(/\.fseq$/, '') };
                     }
-                    if (val.startsWith('vid:')) {
-                        return { type: 'vid', file: val.replace(/^vid:/, '') };
-                    }
+                    // VIDEO SUPPORT DISABLED
+                    // if (val.startsWith('vid:')) {
+                    //     return { type: 'vid', file: val.replace(/^vid:/, '') };
+                    // }
                     if (val.startsWith('img:')) {
                         return { type: 'img', file: val.replace(/^img:/, '') };
                     }
@@ -3256,11 +3062,11 @@ def index():
                     var ct = getConfiguredContent();
                     var label = document.getElementById('fseq_seq_label');
                     if (!ct) {
-                        label.textContent = '\u26a0 Select a .fseq, video, or image as Waiting or Names content for background preview.';
+                        label.textContent = '\u26a0 Select a .fseq or image as Waiting or Names content for background preview.';
                         label.style.color = '#ff9800';
                         return;
                     }
-                    var icon = ct.type === 'seq' ? '🎬 ' : ct.type === 'vid' ? '🎥 ' : '🖼️ ';
+                    var icon = ct.type === 'seq' ? '🎬 ' : '🖼️ ';  // VIDEO SUPPORT DISABLED — vid: removed
                     label.textContent = icon + ct.file;
                     label.style.color = '#ccc';
                     loadBgPreview();
@@ -3321,17 +3127,9 @@ def index():
                                 loadEl.style.color = '#f44336';
                             });
 
-                    } else if (ct.type === 'vid') {
-                        // ---- Video: show scrubber (time in seconds), fetch frames ----
-                        loadEl.textContent = '';
-                        var scrubber = document.getElementById('fseq_scrubber');
-                        scrubber.max = 300;  // assume up to 5 min; user can scrub
-                        scrubber.value = 0;
-                        document.getElementById('fseq_scrubber_row').style.display = '';
-                        document.getElementById('fseq_time_display').textContent = '0:00';
-                        document.getElementById('fseq_status').textContent =
-                            'Scrub to preview different parts of the video';
-                        doMediaFetch(0);
+                    // VIDEO SUPPORT DISABLED — vid preview branch removed
+                    // } else if (ct.type === 'vid') {
+                    //     ...video frame scrubber...
 
                     } else {
                         // ---- Image: load once, no scrubber ----
@@ -3418,10 +3216,10 @@ def index():
                             fmtTime(parseInt(seconds) * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
                         clearTimeout(_scrubTimer);
                         _scrubTimer = setTimeout(function() { doFseqFetch(seconds); }, 150);
-                    } else if (_contentType === 'vid') {
-                        document.getElementById('fseq_time_display').textContent = fmtTime(parseInt(seconds) * 1000);
-                        clearTimeout(_scrubTimer);
-                        _scrubTimer = setTimeout(function() { doMediaFetch(seconds); }, 150);
+                    // VIDEO SUPPORT DISABLED — vid scrubber branch removed
+                    // } else if (_contentType === 'vid') {
+                    //     ...
+                    // }
                     }
                     // img: no scrubbing
                 };
@@ -3531,19 +3329,20 @@ def index():
                         nameSelect.add(sg2);
                     }
 
-                    if (data.videos && data.videos.length > 0) {
-                        const vg1 = document.createElement('optgroup');
-                        vg1.label = '🎥 Videos';
-                        const vg2 = document.createElement('optgroup');
-                        vg2.label = '🎥 Videos';
-                        data.videos.forEach(vid => {
-                            const val = 'vid:' + vid;
-                            vg1.appendChild(new Option(vid, val, false, val === currentDefault));
-                            vg2.appendChild(new Option(vid, val, false, val === currentName));
-                        });
-                        defaultSelect.add(vg1);
-                        nameSelect.add(vg2);
-                    }
+                    // VIDEO SUPPORT DISABLED — vid: dropdown group removed
+                    // if (data.videos && data.videos.length > 0) {
+                    //     const vg1 = document.createElement('optgroup');
+                    //     vg1.label = '🎥 Videos';
+                    //     const vg2 = document.createElement('optgroup');
+                    //     vg2.label = '🎥 Videos';
+                    //     data.videos.forEach(vid => {
+                    //         const val = 'vid:' + vid;
+                    //         vg1.appendChild(new Option(vid, val, false, val === currentDefault));
+                    //         vg2.appendChild(new Option(vid, val, false, val === currentName));
+                    //     });
+                    //     defaultSelect.add(vg1);
+                    //     nameSelect.add(vg2);
+                    // }
 
                     if (data.images && data.images.length > 0) {
                         const ig1 = document.createElement('optgroup');
@@ -3801,6 +3600,192 @@ var _saveTimer = null;
                     }
                 });
             }
+
+            // ── Color Wheel Picker ──────────────────────────────────────────
+            var _cw = { h: 0, s: 1, v: 1, dragging: false };
+
+            (function _initColorWheelModal() {
+                if (document.getElementById('color_wheel_modal')) return;
+                var modal = document.createElement('div');
+                modal.id = 'color_wheel_modal';
+                modal.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;';
+                modal.innerHTML =
+                    '<div style="background:#1e1e1e;border:1px solid #444;border-radius:10px;padding:20px;width:300px;box-shadow:0 8px 32px rgba(0,0,0,0.6);">' +
+                      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">' +
+                        '<span style="color:#fff;font-weight:bold;font-size:14px;">Pick Color</span>' +
+                        '<button onclick="closeColorWheel()" style="background:none;border:none;color:#aaa;font-size:20px;cursor:pointer;padding:0;">\u2715</button>' +
+                      '</div>' +
+                      '<div style="display:flex;justify-content:center;margin-bottom:14px;">' +
+                        '<canvas id="cw_wheel" width="220" height="220" style="cursor:crosshair;display:block;"></canvas>' +
+                      '</div>' +
+                      '<div style="margin-bottom:12px;">' +
+                        '<label style="color:#aaa;font-size:12px;display:block;margin-bottom:4px;">Brightness</label>' +
+                        '<input type="range" id="cw_brightness" min="0" max="100" value="100" style="width:100%;">' +
+                      '</div>' +
+                      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">' +
+                        '<div id="cw_preview" style="width:44px;height:44px;border-radius:4px;border:1px solid #555;flex-shrink:0;"></div>' +
+                        '<input type="text" id="cw_hex_input" placeholder="#FF0000" maxlength="7" ' +
+                          'style="flex:1;background:#2a2a2a;color:#fff;border:1px solid #555;border-radius:4px;padding:6px 10px;font-size:14px;font-family:monospace;">' +
+                      '</div>' +
+                      '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+                        '<button onclick="closeColorWheel()" style="background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:8px 16px;cursor:pointer;">Cancel</button>' +
+                        '<button onclick="confirmColorWheel()" style="background:#1565c0;color:#fff;border:none;border-radius:4px;padding:8px 16px;cursor:pointer;font-weight:bold;">OK</button>' +
+                      '</div>' +
+                    '</div>';
+                document.body.appendChild(modal);
+                modal.addEventListener('click', function(e) { if (e.target === modal) closeColorWheel(); });
+                var canvas = document.getElementById('cw_wheel');
+                canvas.addEventListener('mousedown', function(e) { _cw.dragging = true; _cwUpdate(e); });
+                canvas.addEventListener('mousemove', function(e) { if (_cw.dragging) _cwUpdate(e); });
+                document.addEventListener('mouseup', function() { _cw.dragging = false; });
+                document.getElementById('cw_brightness').addEventListener('input', function() {
+                    _cw.v = this.value / 100;
+                    _cwDrawWheel(document.getElementById('cw_wheel'));
+                    _cwUpdatePreview();
+                });
+                document.getElementById('cw_hex_input').addEventListener('input', function() {
+                    if (/^#[0-9A-Fa-f]{6}$/.test(this.value)) {
+                        var rgb = _hexToRgb(this.value);
+                        var hsv = _rgbToHsv(rgb.r, rgb.g, rgb.b);
+                        _cw.h = hsv.h; _cw.s = hsv.s; _cw.v = hsv.v;
+                        document.getElementById('cw_brightness').value = Math.round(_cw.v * 100);
+                        _cwDrawWheel(document.getElementById('cw_wheel'));
+                        _cwUpdatePreview();
+                    }
+                });
+            })();
+
+            function _cwDrawWheel(canvas) {
+                var ctx = canvas.getContext('2d');
+                var cx = canvas.width / 2, cy = canvas.height / 2, r = cx - 2;
+                var img = ctx.createImageData(canvas.width, canvas.height);
+                for (var y = 0; y < canvas.height; y++) {
+                    for (var x = 0; x < canvas.width; x++) {
+                        var dx = x - cx, dy = y - cy;
+                        var dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist <= r) {
+                            var h = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+                            var s = dist / r;
+                            var rgb = _hsvToRgb(h, s, _cw.v);
+                            var idx = (y * canvas.width + x) * 4;
+                            img.data[idx] = rgb.r; img.data[idx+1] = rgb.g;
+                            img.data[idx+2] = rgb.b; img.data[idx+3] = 255;
+                        }
+                    }
+                }
+                ctx.putImageData(img, 0, 0);
+                var angle = _cw.h * Math.PI / 180;
+                var px = cx + _cw.s * r * Math.cos(angle);
+                var py = cy + _cw.s * r * Math.sin(angle);
+                ctx.beginPath(); ctx.arc(px, py, 7, 0, 2 * Math.PI);
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.stroke();
+                ctx.beginPath(); ctx.arc(px, py, 5, 0, 2 * Math.PI);
+                ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
+            }
+
+            function _cwUpdate(e) {
+                var canvas = document.getElementById('cw_wheel');
+                var rect = canvas.getBoundingClientRect();
+                var cx = canvas.width / 2, cy = canvas.height / 2, r = cx - 2;
+                var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+                var dx = (e.clientX - rect.left) * sx - cx;
+                var dy = (e.clientY - rect.top) * sy - cy;
+                _cw.h = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+                _cw.s = Math.min(Math.sqrt(dx * dx + dy * dy) / r, 1);
+                _cwDrawWheel(canvas);
+                _cwUpdatePreview();
+            }
+
+            function _cwUpdatePreview() {
+                var rgb = _hsvToRgb(_cw.h, _cw.s, _cw.v);
+                var hex = _rgbToHex(rgb.r, rgb.g, rgb.b);
+                document.getElementById('cw_preview').style.background = hex;
+                document.getElementById('cw_hex_input').value = hex;
+            }
+
+            function openColorWheel() {
+                var hex = document.getElementById('text_color_hex').value || '#FF0000';
+                if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) hex = '#FF0000';
+                var rgb = _hexToRgb(hex);
+                var hsv = _rgbToHsv(rgb.r, rgb.g, rgb.b);
+                _cw.h = hsv.h; _cw.s = hsv.s; _cw.v = hsv.v;
+                var modal = document.getElementById('color_wheel_modal');
+                modal.style.display = 'flex';
+                document.getElementById('cw_brightness').value = Math.round(_cw.v * 100);
+                _cwDrawWheel(document.getElementById('cw_wheel'));
+                _cwUpdatePreview();
+            }
+
+            function closeColorWheel() {
+                document.getElementById('color_wheel_modal').style.display = 'none';
+            }
+
+            function confirmColorWheel() {
+                var hex = document.getElementById('cw_hex_input').value;
+                if (/^#[0-9A-Fa-f]{6}$/.test(hex)) applyColorHex(hex);
+                closeColorWheel();
+            }
+
+            function applyColorHex(hex) {
+                if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) return;
+                hex = hex.toUpperCase();
+                document.getElementById('text_color_hex').value = hex;
+                var swatchBtn = document.getElementById('color_swatch_btn');
+                if (swatchBtn) swatchBtn.style.background = hex;
+                if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            function pickColorFromScreen() {
+                if (!window.EyeDropper) {
+                    alert('Eyedropper is not supported in this browser.\nRequires Chrome or Edge 95+.');
+                    return;
+                }
+                new EyeDropper().open().then(function(result) {
+                    applyColorHex(result.sRGBHex);
+                }).catch(function() {});
+            }
+
+            function _hsvToRgb(h, s, v) {
+                var r, g, b, i = Math.floor(h / 60) % 6;
+                var f = h / 60 - Math.floor(h / 60);
+                var p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+                switch (i) {
+                    case 0: r=v; g=t; b=p; break; case 1: r=q; g=v; b=p; break;
+                    case 2: r=p; g=v; b=t; break; case 3: r=p; g=q; b=v; break;
+                    case 4: r=t; g=p; b=v; break; case 5: r=v; g=p; b=q; break;
+                }
+                return {r: Math.round(r*255), g: Math.round(g*255), b: Math.round(b*255)};
+            }
+
+            function _rgbToHsv(r, g, b) {
+                r /= 255; g /= 255; b /= 255;
+                var max = Math.max(r,g,b), min = Math.min(r,g,b), d = max - min;
+                var h, s = (max === 0) ? 0 : d / max, v = max;
+                if (max === min) { h = 0; } else {
+                    switch (max) {
+                        case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+                        case g: h = ((b - r) / d + 2) / 6; break;
+                        case b: h = ((r - g) / d + 4) / 6; break;
+                    }
+                }
+                return {h: h * 360, s: s, v: v};
+            }
+
+            function _hexToRgb(hex) {
+                return {
+                    r: parseInt(hex.slice(1,3), 16),
+                    g: parseInt(hex.slice(3,5), 16),
+                    b: parseInt(hex.slice(5,7), 16)
+                };
+            }
+
+            function _rgbToHex(r, g, b) {
+                return '#' + [r, g, b].map(function(x) {
+                    return ('0' + x.toString(16)).slice(-2).toUpperCase();
+                }).join('');
+            }
+            // ── End Color Wheel Picker ──────────────────────────────────────
         </script>
     </body>
     </html>
@@ -4103,8 +4088,8 @@ def media_preview():
     width  = int(request.args.get('width',  config.get('overlay_model_width',  0)))
     height = int(request.args.get('height', config.get('overlay_model_height', 0)))
 
-    if not filename or media_type not in ('img', 'vid'):
-        return jsonify({'error': 'Requires ?type=img|vid&file=filename'}), 400
+    if not filename or media_type not in ('img',):  # VIDEO SUPPORT DISABLED — 'vid' removed
+        return jsonify({'error': 'Requires ?type=img&file=filename'}), 400
     if width <= 0 or height <= 0:
         return jsonify({'error': 'Overlay model dimensions unknown — select a model first'}), 400
 
@@ -4119,30 +4104,27 @@ def media_preview():
             img = Image.open(img_path).convert('RGB')
             img = img.resize((width, height), Image.LANCZOS)
 
-        else:  # vid
-            vid_path = os.path.join(FPP_VIDEOS_PATH, filename)
-            if not os.path.exists(vid_path):
-                return jsonify({'error': f'Video not found: {filename}'}), 404
-            # Try ffmpeg to extract a single frame at the requested timestamp
-            import subprocess as _sp
-            try:
-                result = _sp.run(
-                    [
-                        'ffmpeg', '-ss', str(time_sec), '-i', vid_path,
-                        '-vframes', '1', '-f', 'image2pipe',
-                        '-vcodec', 'png', '-'
-                    ],
-                    capture_output=True, timeout=10
-                )
-                if result.returncode == 0 and result.stdout:
-                    img = Image.open(io.BytesIO(result.stdout)).convert('RGB')
-                    img = img.resize((width, height), Image.LANCZOS)
-                else:
-                    # ffmpeg failed — return a dark grey placeholder
-                    img = Image.new('RGB', (width, height), (32, 32, 32))
-            except (FileNotFoundError, _sp.TimeoutExpired):
-                # ffmpeg not installed on this system — return placeholder
-                img = Image.new('RGB', (width, height), (32, 32, 32))
+        # VIDEO SUPPORT DISABLED — vid branch removed
+        # else:  # vid
+        #     vid_path = os.path.join(FPP_VIDEOS_PATH, filename)
+        #     if not os.path.exists(vid_path):
+        #         return jsonify({'error': f'Video not found: {filename}'}), 404
+        #     import subprocess as _sp
+        #     try:
+        #         result = _sp.run(
+        #             ['ffmpeg', '-ss', str(time_sec), '-i', vid_path,
+        #              '-vframes', '1', '-f', 'image2pipe', '-vcodec', 'png', '-'],
+        #             capture_output=True, timeout=10
+        #         )
+        #         if result.returncode == 0 and result.stdout:
+        #             img = Image.open(io.BytesIO(result.stdout)).convert('RGB')
+        #             img = img.resize((width, height), Image.LANCZOS)
+        #         else:
+        #             img = Image.new('RGB', (width, height), (32, 32, 32))
+        #     except (FileNotFoundError, _sp.TimeoutExpired):
+        #         img = Image.new('RGB', (width, height), (32, 32, 32))
+        else:
+            return jsonify({'error': 'Unsupported media type'}), 400
 
         buf = io.BytesIO()
         img.save(buf, format='PNG')
