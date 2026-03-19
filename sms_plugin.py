@@ -3602,7 +3602,12 @@ var _saveTimer = null;
                     modal.addEventListener('click', function(e) { if (e.target === modal) cwClose(); });
                 }
                 document.getElementById('color_swatch_btn').addEventListener('click', cwOpen);
-                document.getElementById('eyedropper_btn').addEventListener('click', cwEyedrop);
+                var eyedropBtn = document.getElementById('eyedropper_btn');
+                if (window.EyeDropper) {
+                    eyedropBtn.addEventListener('click', cwEyedrop);
+                } else {
+                    eyedropBtn.style.display = 'none';
+                }
                 document.getElementById('text_color_hex').addEventListener('change', function() { cwApply(this.value); });
                 document.getElementById('cw_close_x').addEventListener('click', cwClose);
                 document.getElementById('cw_cancel_btn').addEventListener('click', cwClose);
@@ -3643,10 +3648,7 @@ var _saveTimer = null;
             }
 
             function cwEyedrop() {
-                if (!window.EyeDropper) {
-                    alert('Eyedropper is not supported in this browser.\\nRequires Chrome or Edge 95+.');
-                    return;
-                }
+                if (!window.EyeDropper) return;
                 new EyeDropper().open().then(function(result) { cwApply(result.sRGBHex); }).catch(function() {});
             }
 
