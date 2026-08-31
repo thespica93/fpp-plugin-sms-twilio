@@ -1513,10 +1513,13 @@ def send_to_fpp(name):
                 shm_rendered = False
                 scroll_started = False
 
-                # For img: names content, composite text onto the image (State 2 = Opaque)
+                # For img: names content, composite text onto the image (State 2 = Opaque).
+                # When no Names content is configured, fall back to an img: Default Waiting
+                # content so the name displays over it instead of wiping it with plain text.
+                img_source = name_playlist if name_playlist else config.get('default_playlist', '')
                 img_bg_path = None
-                if name_playlist.startswith('img:'):
-                    img_bg_path = os.path.join(FPP_IMAGES_PATH, name_playlist[4:])
+                if img_source.startswith('img:'):
+                    img_bg_path = os.path.join(FPP_IMAGES_PATH, img_source[4:])
                     if not os.path.exists(img_bg_path):
                         logging.warning(f"⚠️ Image not found: {img_bg_path}")
                         img_bg_path = None
@@ -3464,8 +3467,9 @@ var _saveTimer = null;
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', saveConfig);
                 });
-                // Reload background preview when Names Display content or model changes
-                ['name_display_playlist', 'overlay_model_name'].forEach(function(id) {
+                // Reload background preview when Names Display content, Default Waiting
+                // content (used as the fallback when Names content is None), or model changes
+                ['name_display_playlist', 'default_playlist', 'overlay_model_name'].forEach(function(id) {
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', function() {
                         if (window.toggleFseqPreview) window.toggleFseqPreview();
