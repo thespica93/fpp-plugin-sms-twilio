@@ -1,9 +1,9 @@
 #!/bin/bash
-# FPP SMS Twilio Plugin - Activate
+# FPP SMS Twilio Plugin (beta) - Activate
 # Enables the plugin, starts SMS polling, and starts the default waiting playlist.
-# FPP Scheduler: Command → Run Script → TwilioStart
+# FPP Scheduler: Command → Run Script → TwilioStartBeta
 
-PLUGIN_URL="http://127.0.0.1:5000/api/activate"
+PLUGIN_URL="http://127.0.0.1:5001/api/activate"
 
 # Wait up to 15s for the plugin service to be ready (in case FPP just started)
 for i in $(seq 1 5); do

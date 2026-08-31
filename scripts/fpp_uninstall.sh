@@ -1,9 +1,12 @@
 #!/bin/bash
 ###############################################################################
-# FPP SMS Twilio Plugin - Comprehensive Uninstall Script
+# FPP SMS Twilio Plugin (beta) - Comprehensive Uninstall Script
 ###############################################################################
 
-LOG="/home/fpp/media/logs/sms_plugin_uninstall.log"
+# Resolve this plugin's own install directory dynamically, same as fpp_install.sh
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+LOG="/home/fpp/media/logs/sms_plugin_uninstall_beta.log"
 
 # Function to log and display
 log_and_show() {
@@ -11,41 +14,44 @@ log_and_show() {
 }
 
 log_and_show "========================================"
-log_and_show "FPP SMS Twilio Plugin Uninstaller"
+log_and_show "FPP SMS Twilio Plugin Uninstaller (beta)"
 log_and_show "$(date)"
 log_and_show "========================================"
 
-# Stop the service
-log_and_show "Stopping SMS Twilio service..."
-pkill -f sms_plugin.py 2>/dev/null || true
+# Stop the service — matched by full path so a co-installed stable variant's own
+# sms_plugin.py process is never touched.
+log_and_show "Stopping SMS Twilio service (beta)..."
+pkill -f "$PLUGIN_DIR/sms_plugin.py" 2>/dev/null || true
 sleep 2
 log_and_show "✓ Service stopped"
 
-# Remove Python packages
-log_and_show "Removing Python packages..."
-pip3 uninstall -y --break-system-packages twilio >> "$LOG" 2>&1 && log_and_show "✓ Twilio removed"
-pip3 uninstall -y --break-system-packages flask >> "$LOG" 2>&1 && log_and_show "✓ Flask removed"
-pip3 uninstall -y --break-system-packages requests >> "$LOG" 2>&1 && log_and_show "✓ Requests removed"
+# NOTE: Flask/Twilio/Requests are intentionally NOT pip-uninstalled here. They are
+# shared, system-wide Python packages (not per-plugin, not reference-counted) — a
+# co-installed stable variant (or any other plugin) may still depend on them, so
+# removing them here could break something else on the box.
 
-# Remove configuration files
-log_and_show "Removing configuration files..."
-rm -f /home/fpp/media/config/plugin.fpp-sms-twilio.json
-rm -f /home/fpp/media/config/blacklist.txt
-rm -f /home/fpp/media/config/whitelist.txt
-rm -f /home/fpp/media/config/blocked_phones.json
-rm -f /home/fpp/media/config/received_messages.json
-log_and_show "✓ Configuration files removed"
+# Remove this variant's own scheduler scripts
+log_and_show "Removing scheduler scripts..."
+rm -f /home/fpp/media/scripts/TwilioStartBeta.sh
+rm -f /home/fpp/media/scripts/TwilioStopBeta.sh
+log_and_show "✓ Scheduler scripts removed"
 
-# Remove log files
+# Remove this variant's own sudoers rule (shm chmod access) — suffixed "-beta" so
+# this never removes a co-installed stable variant's rule.
+log_and_show "Removing sudoers rule..."
+rm -f /etc/sudoers.d/90-fpp-sms-shm-beta
+log_and_show "✓ Sudoers rule removed"
+
+# Remove this variant's own transient/install log files (its runtime config, log,
+# and message history under PLUGIN_DATA_DIR are intentionally left in place so a
+# reinstall doesn't lose them).
 log_and_show "Removing log files..."
-rm -f /home/fpp/media/logs/sms_plugin.log
-rm -f /home/fpp/media/logs/sms_plugin_install.log
-rm -f /home/fpp/media/logs/received_messages.json
+rm -f /home/fpp/media/logs/sms_plugin_beta.log
+rm -f /home/fpp/media/logs/sms_plugin_install_beta.log
 log_and_show "✓ Log files removed"
 
 log_and_show "========================================"
 log_and_show "✅ Uninstall complete!"
-log_and_show "All plugin files and dependencies removed"
 log_and_show "========================================"
 
 # No errors — remove the uninstall log, it's only useful for debugging failures

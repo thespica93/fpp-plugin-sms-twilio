@@ -1,5 +1,5 @@
 <?php
-// Plugin Name: SMS Twilio Integration
+// Plugin Name: SMS Twilio Integration (beta)
 // Plugin Description: Allow viewers to text names that appear on your display
 // Plugin Version: 2.5
 // Plugin Author: Nick
@@ -7,9 +7,9 @@
 
 // This file is required by FPP to recognize and install the plugin
 
-$pluginName = "fpp-plugin-sms-twilio";
+$pluginName = "fpp-plugin-sms-twilio-beta";
 $pluginVersion = "2.5";
-$pluginDescription = "SMS Twilio Integration - Allow viewers to text names that appear on your display";
+$pluginDescription = "SMS Twilio Integration (beta) - Allow viewers to text names that appear on your display";
 $pluginAuthor = "Nick";
 
 // Plugin configuration
@@ -35,19 +35,21 @@ function isPluginEnabled() {
 // Start the Python service
 function startPlugin() {
     global $pluginPythonScript, $pluginLogFile;
-    
-    // Kill any existing instances
-    exec("pkill -f sms_plugin.py");
-    
+
+    // Kill any existing instance of THIS variant only (full path, not bare filename,
+    // so a stable install running its own sms_plugin.py is never touched)
+    exec("pkill -f " . escapeshellarg($pluginPythonScript));
+
     // Start the Python service in the background
     exec("nohup python3 " . escapeshellarg($pluginPythonScript) . " > " . escapeshellarg($pluginLogFile) . " 2>&1 &");
-    
+
     return true;
 }
 
 // Stop the Python service
 function stopPlugin() {
-    exec("pkill -f sms_plugin.py");
+    global $pluginPythonScript;
+    exec("pkill -f " . escapeshellarg($pluginPythonScript));
     return true;
 }
 
@@ -60,7 +62,8 @@ function restartPlugin() {
 
 // Check if the plugin service is running
 function isPluginRunning() {
-    $output = shell_exec("pgrep -f sms_plugin.py");
+    global $pluginPythonScript;
+    $output = shell_exec("pgrep -f " . escapeshellarg($pluginPythonScript));
     return !empty(trim($output));
 }
 

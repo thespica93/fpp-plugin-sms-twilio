@@ -1,6 +1,6 @@
 <?php
 $host = preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST']);
-$pluginUrl = "http://$host:5000/messages";
+$pluginUrl = "http://$host:5001/messages"; // beta variant runs on 5001, stable stays on 5000
 ?>
 <style>
     #sms-messages-frame {

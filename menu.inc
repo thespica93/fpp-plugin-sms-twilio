@@ -2,13 +2,13 @@
 
 $menuEntries = Array(
 	Array(
-		'text' => 'SMS Twilio',
+		'text' => 'SMS Twilio (beta)',
 		'type' => 'content',
 		'page' => 'ui.php',
 		'wrap' => 1
 	),
 	Array(
-		'text' => 'SMS Twilio Plugin',
+		'text' => 'SMS Twilio Plugin (beta)',
 		'type' => 'help',
 		'page' => 'help.php',
 		'wrap' => 1
