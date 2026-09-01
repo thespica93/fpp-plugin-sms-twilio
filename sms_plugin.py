@@ -2171,13 +2171,22 @@ def index():
 
                         <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
                         <style>
-                            .line-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+                            .line-card { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:10px 10px 8px; margin-bottom:10px; }
+                            .line-row { display:flex; align-items:center; gap:6px; }
                             .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
                             .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
                             .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
                             .reset-line-btn:hover { background:#666; }
-                            .line-color-swatch { width:24px; height:24px; padding:0; border:1px solid #666; border-radius:4px; cursor:pointer; flex-shrink:0; background:none; }
-                            .line-group-box { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:8px 10px; margin:-2px 0 10px 52px; }
+                            .line-color-group { position:relative; display:flex; align-items:center; flex-shrink:0; }
+                            .line-color-swatch { width:24px; height:24px; padding:0; border:1px solid #666; border-radius:4px 0 0 4px; cursor:pointer; background:none; }
+                            .color-palette-btn { width:16px; height:24px; padding:0; border:1px solid #666; border-left:none; border-radius:0 4px 4px 0; background:#444; color:#ccc; font-size:9px; cursor:pointer; }
+                            .color-palette-btn:hover { background:#666; }
+                            .color-palette-popover { position:absolute; top:28px; right:0; z-index:50; background:#2a2a2a; border:1px solid #666; border-radius:5px; padding:8px; width:140px; box-shadow:0 4px 12px rgba(0,0,0,0.5); }
+                            .color-palette-swatches { display:flex; flex-wrap:wrap; gap:4px; }
+                            .color-palette-swatch { width:20px; height:20px; border:1px solid #666; border-radius:3px; padding:0; cursor:pointer; }
+                            .color-palette-save-btn { margin-top:6px; width:100%; font-size:11px; background:#444; color:#ccc; border:1px dashed #888; border-radius:3px; padding:4px; cursor:pointer; }
+                            .color-palette-empty { font-size:10px; color:#888; text-align:center; padding:4px 0; }
+                            .line-movement-row { margin-top:8px; padding-top:8px; border-top:1px solid #555; }
                             .line-group-label { font-size:11px; color:#999; font-weight:bold; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.3px; }
                             .line-group-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
                             .line-group-controls select { width:auto; margin-bottom:0; flex:1; min-width:160px; }
@@ -2188,104 +2197,127 @@ def index():
                         {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
                         {% set lp = config.get('line_positions') or [] %}
                         {% set lc = config.get('line_colors') or ['', '', '', ''] %}
-                        {% set default_color = config.get('text_color', '#FF0000') %}
                         {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
                         {% set ls = config.get('line_speeds') or [5, 5, 5, 5] %}
                         <div id="message_lines_section">
-                            <div class="line-row">
-                                <span class="line-label">Line 1:</span>
-                                <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
-                                <input type="color" id="line_1_color" class="line-color-swatch" value="{{ lc[0] if lc|length > 0 and lc[0] else default_color }}" title="Line 1 color" onchange="onLineColorChange(0)">
-                                <span id="line_1_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-group-box">
-                                <label class="line-group-label">Line 1 Movement</label>
-                                <div class="line-group-controls">
-                                    <select id="line_1_movement" onchange="onLineMovementChange(0)">
-                                        <option value="Center" {{ 'selected' if lm[0] == 'Center' else '' }}>Static</option>
-                                        <option value="L2R" {{ 'selected' if lm[0] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                        <option value="R2L" {{ 'selected' if lm[0] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                        <option value="T2B" {{ 'selected' if lm[0] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                        <option value="B2T" {{ 'selected' if lm[0] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                    </select>
-                                    <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
-                                        <label>Speed:</label>
-                                        <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 1:</span>
+                                    <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_1_color" class="line-color-swatch" value="{{ lc[0] if lc|length > 0 and lc[0] else '#FF0000' }}" title="Line 1 color" onchange="onLineColorChange(0)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(0)" title="Saved colors">▾</button>
+                                        <div id="line_1_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_1_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 1 Movement</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_1_movement" onchange="onLineMovementChange(0)">
+                                            <option value="Center" {{ 'selected' if lm[0] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[0] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[0] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[0] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[0] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="line-row">
-                                <span class="line-label">Line 2:</span>
-                                <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
-                                <input type="color" id="line_2_color" class="line-color-swatch" value="{{ lc[1] if lc|length > 1 and lc[1] else default_color }}" title="Line 2 color" onchange="onLineColorChange(1)">
-                                <span id="line_2_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-group-box">
-                                <label class="line-group-label">Line 2 Movement</label>
-                                <div class="line-group-controls">
-                                    <select id="line_2_movement" onchange="onLineMovementChange(1)">
-                                        <option value="Center" {{ 'selected' if lm[1] == 'Center' else '' }}>Static</option>
-                                        <option value="L2R" {{ 'selected' if lm[1] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                        <option value="R2L" {{ 'selected' if lm[1] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                        <option value="T2B" {{ 'selected' if lm[1] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                        <option value="B2T" {{ 'selected' if lm[1] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                    </select>
-                                    <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
-                                        <label>Speed:</label>
-                                        <input type="number" id="line_2_speed" min="1" max="10" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 2:</span>
+                                    <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_2_color" class="line-color-swatch" value="{{ lc[1] if lc|length > 1 and lc[1] else '#FF0000' }}" title="Line 2 color" onchange="onLineColorChange(1)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(1)" title="Saved colors">▾</button>
+                                        <div id="line_2_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_2_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 2 Movement</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_2_movement" onchange="onLineMovementChange(1)">
+                                            <option value="Center" {{ 'selected' if lm[1] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[1] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[1] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[1] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[1] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_2_speed" min="1" max="10" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="line-row">
-                                <span class="line-label">Line 3:</span>
-                                <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
-                                <input type="color" id="line_3_color" class="line-color-swatch" value="{{ lc[2] if lc|length > 2 and lc[2] else default_color }}" title="Line 3 color" onchange="onLineColorChange(2)">
-                                <span id="line_3_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-group-box">
-                                <label class="line-group-label">Line 3 Movement</label>
-                                <div class="line-group-controls">
-                                    <select id="line_3_movement" onchange="onLineMovementChange(2)">
-                                        <option value="Center" {{ 'selected' if lm[2] == 'Center' else '' }}>Static</option>
-                                        <option value="L2R" {{ 'selected' if lm[2] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                        <option value="R2L" {{ 'selected' if lm[2] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                        <option value="T2B" {{ 'selected' if lm[2] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                        <option value="B2T" {{ 'selected' if lm[2] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                    </select>
-                                    <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
-                                        <label>Speed:</label>
-                                        <input type="number" id="line_3_speed" min="1" max="10" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 3:</span>
+                                    <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_3_color" class="line-color-swatch" value="{{ lc[2] if lc|length > 2 and lc[2] else '#FF0000' }}" title="Line 3 color" onchange="onLineColorChange(2)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(2)" title="Saved colors">▾</button>
+                                        <div id="line_3_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_3_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 3 Movement</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_3_movement" onchange="onLineMovementChange(2)">
+                                            <option value="Center" {{ 'selected' if lm[2] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[2] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[2] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[2] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[2] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_3_speed" min="1" max="10" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="line-row">
-                                <span class="line-label">Line 4:</span>
-                                <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
-                                <input type="color" id="line_4_color" class="line-color-swatch" value="{{ lc[3] if lc|length > 3 and lc[3] else default_color }}" title="Line 4 color" onchange="onLineColorChange(3)">
-                                <span id="line_4_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-group-box">
-                                <label class="line-group-label">Line 4 Movement</label>
-                                <div class="line-group-controls">
-                                    <select id="line_4_movement" onchange="onLineMovementChange(3)">
-                                        <option value="Center" {{ 'selected' if lm[3] == 'Center' else '' }}>Static</option>
-                                        <option value="L2R" {{ 'selected' if lm[3] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                        <option value="R2L" {{ 'selected' if lm[3] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                        <option value="T2B" {{ 'selected' if lm[3] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                        <option value="B2T" {{ 'selected' if lm[3] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                    </select>
-                                    <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
-                                        <label>Speed:</label>
-                                        <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 4:</span>
+                                    <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_4_color" class="line-color-swatch" value="{{ lc[3] if lc|length > 3 and lc[3] else '#FF0000' }}" title="Line 4 color" onchange="onLineColorChange(3)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(3)" title="Saved colors">▾</button>
+                                        <div id="line_4_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_4_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 4 Movement</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_4_movement" onchange="onLineMovementChange(3)">
+                                            <option value="Center" {{ 'selected' if lm[3] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[3] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[3] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[3] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[3] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
-                        <p class="help-text">🎨 Click a line's color swatch to give it its own color. Each line's Movement box controls that line only.</p>
+                        <p class="help-text">🎨 Click the ▾ next to a line's color to save or recall colors. Each card's Movement controls that line only.</p>
 
                         <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
                         <div id="canvas_section">
@@ -2340,17 +2372,6 @@ def index():
                             <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
                         </div>
 
-                        <label>Text Color: <span style="font-size:11px; color:#888; font-weight:normal;">default for lines with no color of their own</span></label>
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <input type="color" id="color_swatch_btn" value="{{ config.get('text_color','#FF0000') }}"
-                                   style="width:60px;height:40px;border:2px solid #555;border-radius:4px;cursor:pointer;padding:2px;background:none;"
-                                   title="Pick color">
-                            <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
-                                   placeholder="#FF0000" style="width:100px;">
-                        </div>
-                        <div id="custom_color_palette" style="display:flex; align-items:center; gap:6px; margin-top:8px; flex-wrap:wrap;"></div>
-                        <p class="help-text">🎨 Click "+" to save the current color. Click a saved swatch to reuse it, right-click to remove it.</p>
-
                         <label>Font:</label>
                         <select id="text_font">
                             <option value="">Loading fonts...</option>
@@ -2363,7 +2384,6 @@ def index():
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
                         <script>
                             window._linePositionsInit = {{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }};
-                            window._lineColorsInit = {{ config.get('line_colors', ['', '', '', '']) | tojson }};
                             window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
                             window._lineSpeedsInit = {{ config.get('line_speeds', [5, 5, 5, 5]) | tojson }};
                             window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
@@ -2842,13 +2862,6 @@ def index():
                 while (initLP.length < 4) initLP.push({x:-1,y:-1});
                 window._linePositions = initLP;
 
-                // Load per-line colors from config; '' means "use the global Text Color"
-                var initLC = (window._lineColorsInit && Array.isArray(window._lineColorsInit))
-                    ? window._lineColorsInit.slice()
-                    : ['', '', '', ''];
-                while (initLC.length < 4) initLC.push('');
-                window._lineColors = initLC;
-
                 // Load per-line movement + speed from config
                 var initLM = (window._lineMovementsInit && Array.isArray(window._lineMovementsInit))
                     ? window._lineMovementsInit.slice()
@@ -2873,10 +2886,10 @@ def index():
                     return el ? el.value.replace('{name}', 'Santa') : '';
                 }
 
-                // Resolves this line's own color, falling back to the global Text Color
+                // Reads this line's own color directly from its color input
                 function getLineColor(i) {
-                    var override = window._lineColors && window._lineColors[i];
-                    return override || document.getElementById('text_color_hex').value || '#ff0000';
+                    var el = document.getElementById('line_' + (i + 1) + '_color');
+                    return (el && el.value) || '#FF0000';
                 }
 
                 // Returns array of indices (0-3) for non-empty lines
@@ -3149,8 +3162,8 @@ def index():
                 // Re-render on text / color / font-size changes
                 for (var li = 1; li <= 4; li++) {
                     (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li));
+                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_color'));
                 }
-                document.getElementById('text_color_hex').addEventListener('input',  renderCanvasPreview);
                 document.getElementById('text_font_size').addEventListener('change', renderCanvasPreview);
                 document.getElementById('text_font').addEventListener('change',      renderCanvasPreview);
 
@@ -3401,7 +3414,7 @@ def index():
                 var h = parseInt(document.getElementById('overlay_model_height').value) || 0;
                 if (w > 0 && h > 0) updateModelAspect(w, h);
             })();
-            setupColorWheel();
+            initCustomColors();
 
             function showTab(tabName, btn) {
                 document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -3581,7 +3594,6 @@ var _saveTimer = null;
                     default_playlist: document.getElementById('default_playlist').value,
                     name_display_playlist: document.getElementById('name_display_playlist').value,
                     overlay_model_name: document.getElementById('overlay_model_name').value,
-                    text_color: document.getElementById('text_color_hex').value,
                     text_font: document.getElementById('text_font').value,
                     text_font_size: parseInt(document.getElementById('text_font_size').value),
                     scroll_speed: parseInt(document.getElementById('scroll_speed').value),
@@ -3595,7 +3607,10 @@ var _saveTimer = null;
                         document.getElementById('line_4').value,
                     ],
                     line_positions: window._linePositions || [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}],
-                    line_colors: window._lineColors || ['', '', '', ''],
+                    line_colors: [0, 1, 2, 3].map(function(i) {
+                        var el = document.getElementById('line_' + (i + 1) + '_color');
+                        return el ? el.value.toUpperCase() : '#FF0000';
+                    }),
                     line_movements: window._lineMovements || ['Center','Center','Center','Center'],
                     line_speeds: window._lineSpeeds || [5,5,5,5],
                     custom_colors: window._customColors || [],
@@ -3671,7 +3686,7 @@ var _saveTimer = null;
                 // Text, number inputs — save when user clicks away
                 ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
-                 'text_color_hex','text_font_size',
+                 'text_font_size',
                  'line_1','line_2','line_3','line_4',
                  'response_success','response_profanity','response_rate_limited',
                  'response_duplicate','response_invalid_format',
@@ -3761,81 +3776,89 @@ var _saveTimer = null;
             }
 
             // ===== Color Picker =====
-            function setupColorWheel() {
-                var colorInput = document.getElementById('color_swatch_btn');
-                var hexInput = document.getElementById('text_color_hex');
-                colorInput.addEventListener('input', function() {
-                    var hex = this.value.toUpperCase();
-                    hexInput.value = hex;
-                    if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
-                    if (typeof saveConfig === 'function') saveConfig();
-                });
-                hexInput.addEventListener('change', function() {
-                    var hex = this.value.trim().toUpperCase();
-                    if (/^#[0-9A-F]{6}$/.test(hex)) {
-                        colorInput.value = hex;
-                        if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
-                        if (typeof saveConfig === 'function') saveConfig();
-                    }
-                });
-
+            function initCustomColors() {
                 window._customColors = (window._customColorsInit && Array.isArray(window._customColorsInit))
                     ? window._customColorsInit.slice() : [];
-                renderCustomColorPalette();
             }
 
             // Per-line color swatch (next to each line's reset-to-center button)
             function onLineColorChange(i) {
-                var el = document.getElementById('line_' + (i + 1) + '_color');
-                if (!el) return;
-                window._lineColors = window._lineColors || ['', '', '', ''];
-                window._lineColors[i] = el.value.toUpperCase();
                 if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
-            // ===== Custom color palette (saved swatches, reused across the Text Color picker) =====
-            function renderCustomColorPalette() {
-                var container = document.getElementById('custom_color_palette');
-                if (!container) return;
-                container.innerHTML = '';
-                (window._customColors || []).forEach(function(hex) {
-                    var sw = document.createElement('button');
-                    sw.type = 'button';
-                    sw.title = hex + ' (right-click to remove)';
-                    sw.style.cssText = 'width:24px;height:24px;border:1px solid #666;border-radius:4px;padding:0;cursor:pointer;background:' + hex + ';flex-shrink:0;';
-                    sw.onclick = function() { applyGlobalColor(hex); };
-                    sw.oncontextmenu = function(e) { e.preventDefault(); removeCustomColor(hex); };
-                    container.appendChild(sw);
-                });
-                var addBtn = document.createElement('button');
-                addBtn.type = 'button';
-                addBtn.title = 'Save current color to palette';
-                addBtn.textContent = '+';
-                addBtn.style.cssText = 'width:24px;height:24px;border:1px dashed #888;border-radius:4px;background:none;color:#aaa;cursor:pointer;font-size:14px;line-height:1;flex-shrink:0;';
-                addBtn.onclick = saveCustomColor;
-                container.appendChild(addBtn);
+            // ===== Per-line saved-color palette popover =====
+            // Lets you save the current swatch color, or recall a previously-saved one,
+            // right where you pick a line's color — there's no separate global picker.
+            function toggleColorPalette(i) {
+                var pop = document.getElementById('line_' + (i + 1) + '_palette_popover');
+                if (!pop) return;
+                var opening = pop.style.display === 'none' || !pop.style.display;
+                document.querySelectorAll('.color-palette-popover').forEach(function(p) { p.style.display = 'none'; });
+                if (opening) {
+                    renderColorPalettePopover(i);
+                    pop.style.display = 'block';
+                }
             }
-            function applyGlobalColor(hex) {
-                document.getElementById('color_swatch_btn').value = hex;
-                document.getElementById('text_color_hex').value = hex;
-                if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
-                if (typeof saveConfig === 'function') saveConfig();
+            document.addEventListener('click', function(e) {
+                if (e.target.closest && e.target.closest('.line-color-group')) return;
+                document.querySelectorAll('.color-palette-popover').forEach(function(p) { p.style.display = 'none'; });
+            });
+            function renderColorPalettePopover(i) {
+                var pop = document.getElementById('line_' + (i + 1) + '_palette_popover');
+                if (!pop) return;
+                pop.innerHTML = '';
+                var swatches = document.createElement('div');
+                swatches.className = 'color-palette-swatches';
+                var colors = window._customColors || [];
+                if (colors.length === 0) {
+                    var empty = document.createElement('div');
+                    empty.className = 'color-palette-empty';
+                    empty.textContent = 'No saved colors yet';
+                    swatches.appendChild(empty);
+                } else {
+                    colors.forEach(function(hex) {
+                        var sw = document.createElement('button');
+                        sw.type = 'button';
+                        sw.className = 'color-palette-swatch';
+                        sw.title = hex + ' (right-click to remove)';
+                        sw.style.background = hex;
+                        sw.onclick = function() { applyLineColor(i, hex); };
+                        sw.oncontextmenu = function(e) { e.preventDefault(); removeCustomColor(i, hex); };
+                        swatches.appendChild(sw);
+                    });
+                }
+                pop.appendChild(swatches);
+                var saveBtn = document.createElement('button');
+                saveBtn.type = 'button';
+                saveBtn.className = 'color-palette-save-btn';
+                saveBtn.textContent = '+ Save current color';
+                saveBtn.onclick = function() { saveCustomColor(i); };
+                pop.appendChild(saveBtn);
             }
-            function saveCustomColor() {
-                var hex = (document.getElementById('text_color_hex').value || '').trim().toUpperCase();
+            function applyLineColor(i, hex) {
+                var el = document.getElementById('line_' + (i + 1) + '_color');
+                if (!el) return;
+                el.value = hex;
+                onLineColorChange(i);
+                var pop = document.getElementById('line_' + (i + 1) + '_palette_popover');
+                if (pop) pop.style.display = 'none';
+            }
+            function saveCustomColor(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_color');
+                var hex = el ? el.value.toUpperCase() : '';
                 if (!/^#[0-9A-F]{6}$/.test(hex)) return;
                 window._customColors = window._customColors || [];
                 if (window._customColors.indexOf(hex) === -1) {
                     window._customColors.push(hex);
                     if (window._customColors.length > 20) window._customColors.shift();
-                    renderCustomColorPalette();
+                    renderColorPalettePopover(i);
                     if (typeof saveConfig === 'function') saveConfig();
                 }
             }
-            function removeCustomColor(hex) {
+            function removeCustomColor(i, hex) {
                 window._customColors = (window._customColors || []).filter(function(c) { return c !== hex; });
-                renderCustomColorPalette();
+                renderColorPalettePopover(i);
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
