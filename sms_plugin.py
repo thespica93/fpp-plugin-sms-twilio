@@ -894,20 +894,36 @@ def get_fpp_models():
         return []
 
 def get_fpp_fonts():
-    """Get list of supported fonts from FPP"""
-    try:
-        fpp_host = FPP_HOST
-        response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=3)
-        if response.status_code == 200:
-            fonts = response.json()
-            logging.info(f"Found {len(fonts)} fonts from FPP")
-            return fonts if isinstance(fonts, list) else []
-        
-        logging.warning(f"FPP fonts API returned status {response.status_code}")
-        return []
-    except Exception as e:
-        logging.error(f"Error fetching FPP fonts: {e}")
-        return []
+    """Enumerate installed fonts by walking the filesystem instead of calling
+    FPP's /api/overlays/fonts. That endpoint is unreliable: FPP's font scanner
+    (PixelOverlay.cpp findFonts()) checks for a dot in the entry name before
+    checking whether it's a directory, so any font subdirectory without a dot
+    in its name (e.g. fonts-freefont-ttf's freefont/) is skipped and the scan
+    never recurses into it — the endpoint then returns null. os.walk has no
+    such bug. Names are derived the same way FPP does (filename minus
+    extension) so they still match what FPP's native overlay text API expects.
+    """
+    search_dirs = [
+        '/usr/share/fonts/truetype',
+        '/usr/share/fonts/X11/Type1',
+        '/usr/local/share/fonts',
+        '/usr/share/fonts/opentype',
+        '/usr/share/fpp/fonts',
+        '/home/fpp/media/fonts',
+    ]
+    extensions = ('.ttf', '.otf', '.pfb')
+    fonts = set()
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+        for dirpath, _, filenames in os.walk(search_dir):
+            for fname in filenames:
+                if fname.lower().endswith(extensions):
+                    fonts.add(os.path.splitext(fname)[0])
+
+    font_list = sorted(fonts, key=str.lower)
+    logging.info(f"Found {len(font_list)} fonts on disk")
+    return font_list
 
 def test_fpp_connection():
     """Test connection to FPP"""
