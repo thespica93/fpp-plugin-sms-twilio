@@ -10,6 +10,7 @@
 mkdir -p /home/fpp/media/config /home/fpp/media/logs
 
 LOG="/home/fpp/media/logs/sms_plugin_install.log"
+PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
 
 # Log to both file and stdout so FPP UI shows progress
 log_and_show() {
@@ -35,50 +36,61 @@ if ! command -v pip3 &> /dev/null; then
 fi
 
 # Install system fonts used for rendering text on the overlay model. Some FPP base
-# images ship with zero TrueType fonts installed — when that's the case, FPP's own
-# /api/overlays/fonts returns null and PIL silently falls back to a tiny built-in
-# bitmap font instead of a real one, so this is required for correct-looking text,
-# not just for the Font dropdown to have options.
+# images ship with zero TrueType fonts installed, which would otherwise make PIL
+# silently fall back to a tiny built-in bitmap font instead of a real one.
 if [ ! -f /usr/share/fonts/truetype/freefont/FreeSans.ttf ]; then
-    log_and_show "[1/6] Installing fonts (fonts-freefont-ttf)... please wait"
+    log_and_show "[1/7] Installing fonts (fonts-freefont-ttf)... please wait"
     DEBIAN_FRONTEND=noninteractive apt-get install -y fonts-freefont-ttf >> "$LOG" 2>&1
-    log_and_show "[1/6] Fonts complete"
+    log_and_show "[1/7] Fonts complete"
 else
-    log_and_show "[1/6] Fonts already installed"
+    log_and_show "[1/7] Fonts already installed"
 fi
 
-# Install packages
-log_and_show "[2/6] Installing Flask... please wait"
-pip3 install --break-system-packages --no-cache-dir flask==3.0.0 >> "$LOG" 2>&1
-log_and_show "[2/6] Flask complete"
+# Install the plugin's bundled Christmas fonts (see fonts/christmas/NOTICE.md for
+# license/attribution — all "100% Free" per dafont.com). Installed flat into
+# /usr/local/share/fonts so both FPP's own font scanner and the plugin's own
+# get_fpp_fonts() pick them up; fc-cache indexes them for fc-match resolution
+# in sms_plugin.py's _find_font().
+log_and_show "[2/7] Installing bundled Christmas fonts... please wait"
+if ! command -v fc-cache &> /dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y fontconfig >> "$LOG" 2>&1
+fi
+mkdir -p /usr/local/share/fonts
+cp "$PLUGIN_DIR"/fonts/christmas/*.ttf "$PLUGIN_DIR"/fonts/christmas/*.otf /usr/local/share/fonts/ 2>> "$LOG"
+fc-cache -f /usr/local/share/fonts >> "$LOG" 2>&1
+log_and_show "[2/7] Christmas fonts complete"
 
-log_and_show "[3/6] Installing Twilio... please wait (this is the slow one)"
+# Install packages
+log_and_show "[3/7] Installing Flask... please wait"
+pip3 install --break-system-packages --no-cache-dir flask==3.0.0 >> "$LOG" 2>&1
+log_and_show "[3/7] Flask complete"
+
+log_and_show "[4/7] Installing Twilio... please wait (this is the slow one)"
 pip3 install --break-system-packages --no-cache-dir twilio==8.10.0 >> "$LOG" 2>&1
 TWILIO_EXIT=$?
 if [ $TWILIO_EXIT -ne 0 ]; then
     log_and_show "ERROR: Twilio installation failed with exit code $TWILIO_EXIT"
     exit 1
 fi
-log_and_show "[3/6] Twilio complete"
+log_and_show "[4/7] Twilio complete"
 
-log_and_show "[4/6] Installing Requests... please wait"
+log_and_show "[5/7] Installing Requests... please wait"
 pip3 install --break-system-packages --no-cache-dir requests==2.31.0 >> "$LOG" 2>&1
-log_and_show "[4/6] Requests complete"
+log_and_show "[5/7] Requests complete"
 
-log_and_show "[5/6] Installing Pillow (image rendering)... please wait"
+log_and_show "[6/7] Installing Pillow (image rendering)... please wait"
 pip3 install --break-system-packages --no-cache-dir pillow >> "$LOG" 2>&1
-log_and_show "[5/6] Pillow complete"
+log_and_show "[6/7] Pillow complete"
 
-log_and_show "[6/6] Installing zstandard (FSEQ zstd decompression)... please wait"
+log_and_show "[7/7] Installing zstandard (FSEQ zstd decompression)... please wait"
 pip3 install --break-system-packages --no-cache-dir zstandard >> "$LOG" 2>&1
-log_and_show "[6/6] zstandard complete"
+log_and_show "[7/7] zstandard complete"
 
 # Create config files if they don't exist
 [ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json
 
 # whitelist.txt and blacklist.txt ship with the plugin via git.
 # Force git checkout to ensure they are present (FPP update may not pull all files).
-PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
 cd "$PLUGIN_DIR" && git checkout -- whitelist.txt blacklist.txt >> "$LOG" 2>&1
 if [ ! -f "$PLUGIN_DIR/whitelist.txt" ]; then
     log_and_show "WARNING: whitelist.txt still missing after git checkout - creating empty file"
@@ -124,7 +136,6 @@ if pgrep -f sms_plugin.py > /dev/null 2>&1; then
     log_and_show "Restarting SMS plugin service..."
     pkill -f sms_plugin.py 2>/dev/null || true
     sleep 1
-    PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
     setsid su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /dev/null 2>/home/fpp/media/logs/sms_plugin.log &" < /dev/null > /dev/null 2>&1
     log_and_show "SMS plugin service restarted"
 fi

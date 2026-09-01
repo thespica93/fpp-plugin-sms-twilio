@@ -286,6 +286,7 @@ def _find_font(font_name, font_size):
         '/usr/share/fonts/truetype',
         '/usr/share/fonts/opentype',
         '/usr/share/fonts',
+        '/usr/local/share/fonts',
         '/usr/share/fpp/fonts',
         '/home/fpp/media/fonts',
     ]
@@ -900,12 +901,14 @@ def get_fpp_fonts():
     checking whether it's a directory, so any font subdirectory without a dot
     in its name (e.g. fonts-freefont-ttf's freefont/) is skipped and the scan
     never recurses into it — the endpoint then returns null. os.walk has no
-    such bug. Only .ttf/.pfb are scanned (matching FPP's own isTTF()/isPFB()
-    checks) and names are derived the same way FPP does — filename minus a
-    fixed 4-char extension — so they still match what FPP's native overlay
-    text API expects. .otf/.ttc are deliberately excluded: FPP's scanner
-    doesn't recognize them either, so surfacing them here would offer fonts
-    the native fallback path can't actually resolve.
+    such bug. .ttf/.pfb names are derived the same way FPP does — filename
+    minus a fixed 4-char extension — so they match what FPP's native overlay
+    text API expects. .otf is also included (needed for some bundled fonts,
+    e.g. fonts/christmas/) even though FPP's own scanner doesn't recognize it
+    (isTTF() checks .ttf only): PIL renders .otf fine, and PIL is the plugin's
+    primary rendering path, so those entries just won't resolve through the
+    rarely-used native-overlay-text fallback (PIL unavailable or overlay
+    dimensions unset).
     """
     search_dirs = [
         '/usr/share/fonts/truetype',
@@ -915,7 +918,7 @@ def get_fpp_fonts():
         '/usr/share/fpp/fonts',
         '/home/fpp/media/fonts',
     ]
-    extensions = ('.ttf', '.pfb')
+    extensions = ('.ttf', '.otf', '.pfb')
     fonts = set()
     for search_dir in search_dirs:
         if not os.path.isdir(search_dir):
