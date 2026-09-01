@@ -25,38 +25,53 @@ log_and_show "NOTE: Installation can take 3-5 minutes."
 log_and_show "Please do not close this window."
 log_and_show ""
 
+log_and_show "Updating package lists... please wait"
+apt-get update -qq >> "$LOG" 2>&1
+
 # Install pip3 if needed
 if ! command -v pip3 &> /dev/null; then
     log_and_show "Installing pip3... please wait"
-    apt-get update -qq >> "$LOG" 2>&1
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip >> "$LOG" 2>&1
 fi
 
-# Install packages
-log_and_show "[1/5] Installing Flask... please wait"
-pip3 install --break-system-packages --no-cache-dir flask==3.0.0 >> "$LOG" 2>&1
-log_and_show "[1/5] Flask complete"
+# Install system fonts used for rendering text on the overlay model. Some FPP base
+# images ship with zero TrueType fonts installed — when that's the case, FPP's own
+# /api/overlays/fonts returns null and PIL silently falls back to a tiny built-in
+# bitmap font instead of a real one, so this is required for correct-looking text,
+# not just for the Font dropdown to have options.
+if [ ! -f /usr/share/fonts/truetype/freefont/FreeSans.ttf ]; then
+    log_and_show "[1/6] Installing fonts (fonts-freefont-ttf)... please wait"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y fonts-freefont-ttf >> "$LOG" 2>&1
+    log_and_show "[1/6] Fonts complete"
+else
+    log_and_show "[1/6] Fonts already installed"
+fi
 
-log_and_show "[2/5] Installing Twilio... please wait (this is the slow one)"
+# Install packages
+log_and_show "[2/6] Installing Flask... please wait"
+pip3 install --break-system-packages --no-cache-dir flask==3.0.0 >> "$LOG" 2>&1
+log_and_show "[2/6] Flask complete"
+
+log_and_show "[3/6] Installing Twilio... please wait (this is the slow one)"
 pip3 install --break-system-packages --no-cache-dir twilio==8.10.0 >> "$LOG" 2>&1
 TWILIO_EXIT=$?
 if [ $TWILIO_EXIT -ne 0 ]; then
     log_and_show "ERROR: Twilio installation failed with exit code $TWILIO_EXIT"
     exit 1
 fi
-log_and_show "[2/5] Twilio complete"
+log_and_show "[3/6] Twilio complete"
 
-log_and_show "[3/5] Installing Requests... please wait"
+log_and_show "[4/6] Installing Requests... please wait"
 pip3 install --break-system-packages --no-cache-dir requests==2.31.0 >> "$LOG" 2>&1
-log_and_show "[3/5] Requests complete"
+log_and_show "[4/6] Requests complete"
 
-log_and_show "[4/5] Installing Pillow (image rendering)... please wait"
+log_and_show "[5/6] Installing Pillow (image rendering)... please wait"
 pip3 install --break-system-packages --no-cache-dir pillow >> "$LOG" 2>&1
-log_and_show "[4/5] Pillow complete"
+log_and_show "[5/6] Pillow complete"
 
-log_and_show "[5/5] Installing zstandard (FSEQ zstd decompression)... please wait"
+log_and_show "[6/6] Installing zstandard (FSEQ zstd decompression)... please wait"
 pip3 install --break-system-packages --no-cache-dir zstandard >> "$LOG" 2>&1
-log_and_show "[5/5] zstandard complete"
+log_and_show "[6/6] zstandard complete"
 
 # Create config files if they don't exist
 [ ! -f "/home/fpp/media/config/blocked_phones.json" ] && echo "[]" > /home/fpp/media/config/blocked_phones.json
