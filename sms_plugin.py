@@ -2215,7 +2215,7 @@ def index():
                             .color-palette-save-btn { margin-top:6px; width:100%; font-size:11px; background:#444; color:#ccc; border:1px dashed #888; border-radius:3px; padding:4px; cursor:pointer; }
                             .color-palette-empty { font-size:10px; color:#888; text-align:center; padding:4px 0; }
                             .line-movement-row { margin-top:5px; padding-top:5px; border-top:1px solid #555; }
-                            .line-group-label { font-size:11px; color:#999; font-weight:bold; display:block; margin:0 0 3px; text-transform:uppercase; letter-spacing:0.3px; }
+                            .line-mini-label { font-weight:normal; font-size:12px; color:#aaa; flex-shrink:0; }
                             .line-group-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
                             .line-group-controls select { width:auto; margin-bottom:0; padding:6px; flex:1; min-width:160px; }
                             .line-speed-row { display:flex; align-items:center; gap:6px; }
@@ -2243,8 +2243,8 @@ def index():
                                     <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 1 Movement</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
                                         <select id="line_1_movement" onchange="onLineMovementChange(0)">
                                             <option value="Center" {{ 'selected' if lm[0] == 'Center' else '' }}>Static</option>
                                             <option value="L2R" {{ 'selected' if lm[0] == 'L2R' else '' }}>Scroll Left to Right</option>
@@ -2259,8 +2259,8 @@ def index():
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 1 Font</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
                                         <select id="line_1_font" onchange="onLineFontChange(0)">
                                             <option value="">Loading fonts...</option>
                                         </select>
@@ -2284,8 +2284,8 @@ def index():
                                     <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 2 Movement</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
                                         <select id="line_2_movement" onchange="onLineMovementChange(1)">
                                             <option value="Center" {{ 'selected' if lm[1] == 'Center' else '' }}>Static</option>
                                             <option value="L2R" {{ 'selected' if lm[1] == 'L2R' else '' }}>Scroll Left to Right</option>
@@ -2300,8 +2300,8 @@ def index():
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 2 Font</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
                                         <select id="line_2_font" onchange="onLineFontChange(1)">
                                             <option value="">Loading fonts...</option>
                                         </select>
@@ -2325,8 +2325,8 @@ def index():
                                     <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 3 Movement</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
                                         <select id="line_3_movement" onchange="onLineMovementChange(2)">
                                             <option value="Center" {{ 'selected' if lm[2] == 'Center' else '' }}>Static</option>
                                             <option value="L2R" {{ 'selected' if lm[2] == 'L2R' else '' }}>Scroll Left to Right</option>
@@ -2341,8 +2341,8 @@ def index():
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 3 Font</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
                                         <select id="line_3_font" onchange="onLineFontChange(2)">
                                             <option value="">Loading fonts...</option>
                                         </select>
@@ -2366,8 +2366,8 @@ def index():
                                     <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 4 Movement</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
                                         <select id="line_4_movement" onchange="onLineMovementChange(3)">
                                             <option value="Center" {{ 'selected' if lm[3] == 'Center' else '' }}>Static</option>
                                             <option value="L2R" {{ 'selected' if lm[3] == 'L2R' else '' }}>Scroll Left to Right</option>
@@ -2382,8 +2382,8 @@ def index():
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
-                                    <label class="line-group-label">Line 4 Font</label>
                                     <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
                                         <select id="line_4_font" onchange="onLineFontChange(3)">
                                             <option value="">Loading fonts...</option>
                                         </select>
