@@ -894,22 +894,40 @@ def get_fpp_models():
         logging.error(f"Error fetching FPP models: {e}")
         return []
 
-def get_fpp_fonts():
+_FONT_EXTENSIONS = ('.ttf', '.otf', '.pfb')
+
+def _enumerate_fonts():
     """Enumerate installed fonts by walking the filesystem instead of calling
     FPP's /api/overlays/fonts. That endpoint is unreliable: FPP's font scanner
     (PixelOverlay.cpp findFonts()) checks for a dot in the entry name before
     checking whether it's a directory, so any font subdirectory without a dot
     in its name (e.g. fonts-freefont-ttf's freefont/) is skipped and the scan
     never recurses into it — the endpoint then returns null. os.walk has no
-    such bug. .ttf/.pfb names are derived the same way FPP does — filename
-    minus a fixed 4-char extension — so they match what FPP's native overlay
-    text API expects. .otf is also included (needed for some bundled fonts,
-    e.g. fonts/christmas/) even though FPP's own scanner doesn't recognize it
-    (isTTF() checks .ttf only): PIL renders .otf fine, and PIL is the plugin's
-    primary rendering path, so those entries just won't resolve through the
-    rarely-used native-overlay-text fallback (PIL unavailable or overlay
-    dimensions unset).
+    such bug.
+
+    Returns a list of {'name', 'category', 'path'} dicts. Bundled fonts under
+    this plugin's fonts/<category>/ (e.g. fonts/christmas/) are tagged with
+    that category name; everything else found in the OS font directories is
+    tagged "System". Names are deduped — a bundled font also gets copied into
+    /usr/local/share/fonts by fpp_install.sh (so FPP's own scanner and
+    fc-match can find it), so without dedup it would show up twice.
     """
+    fonts = []
+    claimed_names = set()
+
+    bundled_root = os.path.join(PLUGIN_DIR, 'fonts')
+    if os.path.isdir(bundled_root):
+        for category in sorted(os.listdir(bundled_root)):
+            cat_dir = os.path.join(bundled_root, category)
+            if not os.path.isdir(cat_dir):
+                continue
+            for fname in sorted(os.listdir(cat_dir)):
+                if fname.lower().endswith(_FONT_EXTENSIONS):
+                    name = os.path.splitext(fname)[0]
+                    fonts.append({'name': name, 'category': category.capitalize(),
+                                  'path': os.path.join(cat_dir, fname)})
+                    claimed_names.add(name)
+
     search_dirs = [
         '/usr/share/fonts/truetype',
         '/usr/share/fonts/X11/Type1',
@@ -918,19 +936,36 @@ def get_fpp_fonts():
         '/usr/share/fpp/fonts',
         '/home/fpp/media/fonts',
     ]
-    extensions = ('.ttf', '.otf', '.pfb')
-    fonts = set()
     for search_dir in search_dirs:
         if not os.path.isdir(search_dir):
             continue
-        for _dirpath, _dirs, filenames in os.walk(search_dir):
+        for dirpath, _dirs, filenames in os.walk(search_dir):
             for fname in filenames:
-                if fname.lower().endswith(extensions):
-                    fonts.add(os.path.splitext(fname)[0])
+                if fname.lower().endswith(_FONT_EXTENSIONS):
+                    name = os.path.splitext(fname)[0]
+                    if name in claimed_names:
+                        continue
+                    claimed_names.add(name)
+                    fonts.append({'name': name, 'category': 'System',
+                                  'path': os.path.join(dirpath, fname)})
 
-    font_list = sorted(fonts, key=str.lower)
-    logging.info(f"Found {len(font_list)} fonts on disk")
-    return font_list
+    fonts.sort(key=lambda f: (f['category'] != 'System', f['category'].lower(), f['name'].lower()))
+    return fonts
+
+def get_fpp_fonts():
+    """Font list for the config UI: name + category, grouped for <optgroup>
+    rendering. .ttf/.pfb names are derived the same way FPP does — filename
+    minus a fixed 4-char extension — so they match what FPP's native overlay
+    text API expects. .otf is also included (needed for some bundled fonts,
+    e.g. Christmas Garland) even though FPP's own scanner doesn't recognize it
+    (isTTF() checks .ttf only): PIL renders .otf fine, and PIL is the plugin's
+    primary rendering path, so those entries just won't resolve through the
+    rarely-used native-overlay-text fallback (PIL unavailable or overlay
+    dimensions unset).
+    """
+    fonts = _enumerate_fonts()
+    logging.info(f"Found {len(fonts)} fonts on disk")
+    return [{'name': f['name'], 'category': f['category']} for f in fonts]
 
 def test_fpp_connection():
     """Test connection to FPP"""
@@ -2849,7 +2884,10 @@ def index():
 
             // Per-line Font select
             function onLineFontChange(i) {
-                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                var name = typeof getLineFont === 'function' ? getLineFont(i) : null;
+                ensureFontLoaded(name).then(function() {
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                });
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
@@ -3471,6 +3509,23 @@ def index():
                     .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh Lists'; } });
             }
 
+            // Loads the actual font file into the browser via the CSS Font Loading API
+            // so canvas ctx.font can render it for real. Without this, the preview
+            // canvas silently falls back to generic sans-serif for every font, since
+            // the browser never has any of these files installed as system fonts.
+            window._loadedFonts = window._loadedFonts || {};
+            function ensureFontLoaded(name) {
+                if (!name || window._loadedFonts[name]) return window._loadedFonts[name] || Promise.resolve();
+                var ff = new FontFace(name, 'url("/api/fonts/file/' + encodeURIComponent(name) + '")');
+                var p = ff.load().then(function(loaded) {
+                    document.fonts.add(loaded);
+                }).catch(function(err) {
+                    console.warn('Font preview load failed for "' + name + '":', err);
+                });
+                window._loadedFonts[name] = p;
+                return p;
+            }
+
             function loadFonts() {
                 var currentFonts = (window._lineFontsInit && Array.isArray(window._lineFontsInit))
                     ? window._lineFontsInit : ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'];
@@ -3483,13 +3538,23 @@ def index():
                         var current = currentFonts[i - 1] || 'FreeSans';
                         if (fonts && fonts.length > 0) {
                             sel.innerHTML = '<option value="">-- Select Font --</option>';
+                            var groups = {};
                             fonts.forEach(function(font) {
-                                sel.add(new Option(font, font, false, font === current));
+                                var cat = font.category || 'System';
+                                if (!groups[cat]) {
+                                    groups[cat] = document.createElement('optgroup');
+                                    groups[cat].label = cat;
+                                    sel.appendChild(groups[cat]);
+                                }
+                                groups[cat].appendChild(new Option(font.name, font.name, false, font.name === current));
                             });
                         } else {
                             sel.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
                         }
                     }
+                    return Promise.all(currentFonts.map(ensureFontLoaded));
+                })
+                .then(function() {
                     if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
                 })
                 .catch(function() {
@@ -3973,6 +4038,26 @@ def fpp_fonts_endpoint():
         return jsonify(get_fpp_fonts())
     except Exception:
         return jsonify([])
+
+@app.route('/api/fonts/file/<name>')
+def serve_font_file(name):
+    """Serve raw font bytes so the browser can @font-face them for the config
+    page's canvas preview — otherwise the preview silently falls back to a
+    generic sans-serif for every font, since the browser never has the actual
+    file. Only serves fonts found by _enumerate_fonts(); name is matched
+    against that list, never used to build a filesystem path directly."""
+    try:
+        for f in _enumerate_fonts():
+            if f['name'] == name:
+                ext = os.path.splitext(f['path'])[1].lower()
+                mimetype = {'.ttf': 'font/ttf', '.otf': 'font/otf'}.get(ext, 'application/octet-stream')
+                with open(f['path'], 'rb') as fh:
+                    data = fh.read()
+                return Response(data, mimetype=mimetype)
+        return Response(status=404)
+    except Exception as e:
+        logging.error(f"Error serving font file '{name}': {e}")
+        return Response(status=500)
 
 @app.route('/api/fpp/data')
 def get_fpp_data():

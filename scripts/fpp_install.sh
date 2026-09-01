@@ -50,15 +50,18 @@ fi
 # license/attribution — all "100% Free" per dafont.com). Installed flat into
 # /usr/local/share/fonts so both FPP's own font scanner and the plugin's own
 # get_fpp_fonts() pick them up; fc-cache indexes them for fc-match resolution
-# in sms_plugin.py's _find_font().
-log_and_show "[2/7] Installing bundled Christmas fonts... please wait"
+# in sms_plugin.py's _find_font(). Every category subfolder under fonts/
+# (christmas/, halloween/, etc.) is picked up automatically — no script
+# changes needed when a new category is added.
+log_and_show "[2/7] Installing bundled theme fonts... please wait"
 if ! command -v fc-cache &> /dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y fontconfig >> "$LOG" 2>&1
 fi
 mkdir -p /usr/local/share/fonts
-cp "$PLUGIN_DIR"/fonts/christmas/*.ttf "$PLUGIN_DIR"/fonts/christmas/*.otf /usr/local/share/fonts/ 2>> "$LOG"
+find "$PLUGIN_DIR/fonts" -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.pfb' \) \
+    -exec cp {} /usr/local/share/fonts/ \; 2>> "$LOG"
 fc-cache -f /usr/local/share/fonts >> "$LOG" 2>&1
-log_and_show "[2/7] Christmas fonts complete"
+log_and_show "[2/7] Theme fonts complete"
 
 # Install packages
 log_and_show "[3/7] Installing Flask... please wait"
