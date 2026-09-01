@@ -146,6 +146,8 @@ DEFAULT_CONFIG = {
     "line_colors": ["", "", "", ""],
     "line_movements": ["Center", "Center", "Center", "Center"],
     "line_speeds": [5, 5, 5, 5],
+    "line_fonts": ["FreeSans", "FreeSans", "FreeSans", "FreeSans"],
+    "line_font_sizes": [48, 48, 48, 48],
     "custom_colors": [],
     "scroll_speed": 5,
     "overlay_model_width": 0,
@@ -218,6 +220,16 @@ def load_config():
             save_config()
         if 'line_speeds' not in loaded:
             config['line_speeds'] = [config.get('scroll_speed', 5)] * 4
+            save_config()
+
+        # Migrate the old single global Font/Font Size onto per-line settings
+        # (introduced alongside per-line font) so upgrading doesn't reset
+        # everyone's lines back to FreeSans/48.
+        if 'line_fonts' not in loaded:
+            config['line_fonts'] = [config.get('text_font', 'FreeSans')] * 4
+            save_config()
+        if 'line_font_sizes' not in loaded:
+            config['line_font_sizes'] = [config.get('text_font_size', 48)] * 4
             save_config()
 
         if config['twilio_account_sid'] and config['twilio_auth_token']:
@@ -299,20 +311,24 @@ def _hex_to_rgb(hex_str):
     return (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
 
 
-def render_to_shm(line_items, model_name, width, height, font_name, font_size):
-    """Render multiple text lines to FPP shared memory, each at its own (x, y) position and color.
-    line_items: list of (text, x, y, color_hex) tuples. x/y < 0 means auto-center that line.
-    Returns True on success, False on failure."""
+def render_to_shm(line_items, model_name, width, height):
+    """Render multiple text lines to FPP shared memory, each with its own position, color, and font.
+    line_items: list of (text, x, y, color_hex, font_name, font_size) tuples.
+    x/y < 0 means auto-center that line. Returns True on success, False on failure."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
         img = Image.new('RGB', (width, height), (0, 0, 0))
         draw = ImageDraw.Draw(img)
-        font = _find_font(font_name, font_size)
+        font_cache = {}
 
-        for (text, x, y, color_hex) in line_items:
+        for (text, x, y, color_hex, font_name, font_size) in line_items:
             if not text:
                 continue
+            font_key = (font_name, font_size)
+            if font_key not in font_cache:
+                font_cache[font_key] = _find_font(font_name, font_size)
+            font = font_cache[font_key]
             if font is not None:
                 bbox = draw.textbbox((0, 0), text, font=font)
                 text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -360,12 +376,12 @@ def render_to_shm(line_items, model_name, width, height, font_name, font_size):
         return False
 
 
-def render_image_to_shm(image_path, model_name, width, height,
-                        line_items=None, font_name=None, font_size=48):
+def render_image_to_shm(image_path, model_name, width, height, line_items=None):
     """Load an image file, resize to model dimensions, optionally composite text on top,
     then write to FPP shared memory.  Returns True on success.
-    line_items: optional list of (text, x, y, color_hex) to draw over the image (same as render_to_shm).
-    State 2 (Opaque) should be used so the image fully covers the background."""
+    line_items: optional list of (text, x, y, color_hex, font_name, font_size) to draw over
+    the image (same as render_to_shm). State 2 (Opaque) should be used so the image fully
+    covers the background."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
@@ -374,10 +390,14 @@ def render_image_to_shm(image_path, model_name, width, height,
 
         if line_items:
             draw = ImageDraw.Draw(img)
-            font = _find_font(font_name, font_size) if font_name else None
-            for (text, x, y, color_hex) in line_items:
+            font_cache = {}
+            for (text, x, y, color_hex, font_name, font_size) in line_items:
                 if not text:
                     continue
+                font_key = (font_name, font_size)
+                if font_key not in font_cache:
+                    font_cache[font_key] = _find_font(font_name, font_size) if font_name else None
+                font = font_cache[font_key]
                 if font is not None:
                     bbox = draw.textbbox((0, 0), text, font=font)
                     text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -420,11 +440,11 @@ def render_image_to_shm(image_path, model_name, width, height,
         return False
 
 
-def animate_lines_via_shm(items, model_name, width, height, font_name, font_size, duration):
-    """Animate independently-moving/colored text lines together in FPP shared memory.
+def animate_lines_via_shm(items, model_name, width, height, duration):
+    """Animate independently-moving/colored/sized text lines together in FPP shared memory.
     Runs in a background thread for `duration` seconds then stops.
 
-    items: [(text, x, y, color_hex, movement, speed), ...]
+    items: [(text, x, y, color_hex, movement, speed, font_name, font_size), ...]
         movement 'Center': fixed at (x, y). x/y < 0 means auto-center that axis.
         movement 'L2R'/'R2L': scrolls horizontally across the full width at fixed y
             (y < 0 means auto-center vertically).
@@ -436,16 +456,20 @@ def animate_lines_via_shm(items, model_name, width, height, font_name, font_size
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
-        font = _find_font(font_name, font_size)
         fps = 30
+        font_cache = {}
 
         # Pre-render each line to its own image strip and resolve its fixed axis/motion
         probe = Image.new('RGB', (1, 1))
         pdraw = ImageDraw.Draw(probe)
         prepared = []
-        for (text, x, y, color_hex, movement, speed) in items:
+        for (text, x, y, color_hex, movement, speed, font_name, font_size) in items:
             if not text:
                 continue
+            font_key = (font_name, font_size)
+            if font_key not in font_cache:
+                font_cache[font_key] = _find_font(font_name, font_size)
+            font = font_cache[font_key]
             if font:
                 bbox = pdraw.textbbox((0, 0), text, font=font)
                 tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -1385,18 +1409,19 @@ def send_to_fpp(name):
         line_colors_cfg = config.get('line_colors', [])
         line_movements_cfg = config.get('line_movements', [])
         line_speeds_cfg = config.get('line_speeds', [])
-        font_size_cfg  = config.get('text_font_size', 48)
-        line_h_px      = int(font_size_cfg * 1.2)  # approximate line height in model pixels
+        line_fonts_cfg = config.get('line_fonts', [])
+        line_font_sizes_cfg = config.get('line_font_sizes', [])
 
         global_text_color = config.get('text_color', '#FF0000')
         if not global_text_color.startswith('#'):
             global_text_color = '#' + global_text_color
         global_scroll_speed = config.get('scroll_speed', 5)
+        global_font = config.get('text_font', 'FreeSans')
+        global_font_size = config.get('text_font_size', 48)
 
-        # Collect non-empty rendered lines + their saved positions/colors/movement/speed.
-        # A line with no color override uses the global text color; no movement/speed
-        # override uses Center / the global scroll speed.
-        rendered_lines = []  # [(rendered_text, px, py, color_hex, movement, speed), ...]
+        # Collect non-empty rendered lines + their saved positions/colors/movement/speed/font.
+        # A line with no override for a given setting falls back to the matching global default.
+        rendered_lines = []  # [(rendered_text, px, py, color_hex, movement, speed, font_name, font_size), ...]
         for i, tmpl_line in enumerate(message_lines):
             if not tmpl_line.strip():
                 continue
@@ -1407,20 +1432,25 @@ def send_to_fpp(name):
                 line_color = '#' + line_color
             movement = line_movements_cfg[i] if i < len(line_movements_cfg) and line_movements_cfg[i] else 'Center'
             speed = line_speeds_cfg[i] if i < len(line_speeds_cfg) and line_speeds_cfg[i] else global_scroll_speed
-            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1), line_color, movement, speed))
+            font_name = line_fonts_cfg[i] if i < len(line_fonts_cfg) and line_fonts_cfg[i] else global_font
+            font_size = line_font_sizes_cfg[i] if i < len(line_font_sizes_cfg) and line_font_sizes_cfg[i] else global_font_size
+            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1), line_color, movement, speed, font_name, font_size))
 
-        # Compute stacked Y defaults (group centered vertically, spaced by line_h_px) — shared
-        # across all lines regardless of each line's own movement type.
+        # Compute stacked Y defaults (group centered vertically). Each line's own font size
+        # determines its own height in the stack now that lines can differ.
         mh_pre = config.get('overlay_model_height', 0)
-        non_empty_count = len(rendered_lines)
-        stack_start_y = max(0, (mh_pre - non_empty_count * line_h_px) // 2) if mh_pre > 0 else 0
+        line_heights = [int(item[7] * 1.2) for item in rendered_lines]
+        total_stack_height = sum(line_heights)
+        stack_start_y = max(0, (mh_pre - total_stack_height) // 2) if mh_pre > 0 else 0
 
         # Resolve each line's Y (stacked default when unset). X stays -1 (auto-centered by
         # measured text width inside the render functions) unless explicitly positioned.
-        all_items = []  # [(text, x, resolved_y, color_hex, movement, speed), ...]
-        for idx, (rendered, px, py, lcolor, movement, speed) in enumerate(rendered_lines):
-            resolved_y = stack_start_y + idx * line_h_px if py < 0 else py
-            all_items.append((rendered, px, resolved_y, lcolor, movement, speed))
+        all_items = []  # [(text, x, resolved_y, color_hex, movement, speed, font_name, font_size), ...]
+        cumulative_y = stack_start_y
+        for idx, (rendered, px, py, lcolor, movement, speed, font_name, font_size) in enumerate(rendered_lines):
+            resolved_y = cumulative_y if py < 0 else py
+            all_items.append((rendered, px, resolved_y, lcolor, movement, speed, font_name, font_size))
+            cumulative_y += line_heights[idx]
 
         # True if at least one line scrolls — decides whether the fast one-shot static
         # render is enough, or the animated per-line renderer is needed.
@@ -1533,17 +1563,15 @@ def send_to_fpp(name):
 
                 if PIL_AVAILABLE and mw > 0 and mh > 0:
                     if not any_moving:
-                        line_items = [(t, x, y, c) for (t, x, y, c, _m, _s) in all_items]
+                        line_items = [(t, x, y, c, fn, fs) for (t, x, y, c, _m, _s, fn, fs) in all_items]
                         if img_bg_path:
                             shm_rendered = render_image_to_shm(
                                 img_bg_path, overlay_model, mw, mh,
-                                line_items=line_items, font_name=text_font,
-                                font_size=font_size
+                                line_items=line_items
                             )
                         else:
                             shm_rendered = render_to_shm(
-                                line_items, overlay_model,
-                                mw, mh, text_font, font_size
+                                line_items, overlay_model, mw, mh
                             )
                     else:
                         duration = config.get('display_duration', 30)
@@ -1551,8 +1579,7 @@ def send_to_fpp(name):
                             logging.warning("⚠️ Image background does not support per-line movement — "
                                             "animating over a black background instead.")
                         scroll_started = animate_lines_via_shm(
-                            all_items, overlay_model,
-                            mw, mh, text_font, font_size, duration
+                            all_items, overlay_model, mw, mh, duration
                         )
                         if scroll_started:
                             time.sleep(0.05)  # let first frame land before enabling overlay
@@ -2042,7 +2069,7 @@ def index():
             .queue-info { background: #f3e5f5; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
-            select#text_font option { padding: 8px; font-size: 14px; }
+            select[id$="_font"] option { padding: 8px; font-size: 14px; }
             .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
             .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
             .column .section { flex: 0 0 auto; }
@@ -2199,6 +2226,8 @@ def index():
                         {% set lc = config.get('line_colors') or ['', '', '', ''] %}
                         {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
                         {% set ls = config.get('line_speeds') or [5, 5, 5, 5] %}
+                        {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
+                        {% set lfs = config.get('line_font_sizes') or [48, 48, 48, 48] %}
                         <div id="message_lines_section">
                             <div class="line-card">
                                 <div class="line-row">
@@ -2225,6 +2254,18 @@ def index():
                                         <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
                                             <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 1 Font</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_1_font" onchange="onLineFontChange(0)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_1_font_size" min="12" max="200" value="{{ lfs[0] if lfs|length > 0 else 48 }}" onchange="onLineFontSizeChange(0)">
                                         </div>
                                     </div>
                                 </div>
@@ -2257,6 +2298,18 @@ def index():
                                         </div>
                                     </div>
                                 </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 2 Font</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_2_font" onchange="onLineFontChange(1)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_2_font_size" min="12" max="200" value="{{ lfs[1] if lfs|length > 1 else 48 }}" onchange="onLineFontSizeChange(1)">
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                             <div class="line-card">
                                 <div class="line-row">
@@ -2286,6 +2339,18 @@ def index():
                                         </div>
                                     </div>
                                 </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 3 Font</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_3_font" onchange="onLineFontChange(2)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_3_font_size" min="12" max="200" value="{{ lfs[2] if lfs|length > 2 else 48 }}" onchange="onLineFontSizeChange(2)">
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                             <div class="line-card">
                                 <div class="line-row">
@@ -2312,6 +2377,18 @@ def index():
                                         <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
                                             <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <label class="line-group-label">Line 4 Font</label>
+                                    <div class="line-group-controls">
+                                        <select id="line_4_font" onchange="onLineFontChange(3)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_4_font_size" min="12" max="200" value="{{ lfs[3] if lfs|length > 3 else 48 }}" onchange="onLineFontSizeChange(3)">
                                         </div>
                                     </div>
                                 </div>
@@ -2351,41 +2428,14 @@ def index():
                             </div>
                         </div>
 
-                        <label>Text Movement (all lines): <span style="font-size:11px; color:#888; font-weight:normal;">sets every line at once</span></label>
-                        <select id="text_position" onchange="applyGlobalMovementToAll(this.value)">
-                            <option value="" id="text_position_mixed_opt" disabled hidden>— Mixed (per-line) —</option>
-                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
-                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
-                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
-                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                        </select>
-                        <p id="movement_mixed_note" style="display:none; background:#3a2f00; border:1px solid #ffc107; color:#ffc107; border-radius:5px; padding:8px 12px; margin-top:-4px; margin-bottom:10px; font-size:13px;">
-                            ⚠️ Lines have different movement settings — each line's own Movement box (below) controls it. Pick a value here to reset all lines to match.
-                        </p>
-
-                        <div id="scroll_speed_row">
-                            <label>Scroll Speed (all lines):</label>
-                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
-                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))"
-                                   onchange="applyGlobalSpeedToAll(this.value)">
-                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
-                        </div>
-
-                        <label>Font:</label>
-                        <select id="text_font">
-                            <option value="">Loading fonts...</option>
-                        </select>
-
-                        <label>Font Size:</label>
-                        <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
-
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
                         <script>
                             window._linePositionsInit = {{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }};
                             window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
                             window._lineSpeedsInit = {{ config.get('line_speeds', [5, 5, 5, 5]) | tojson }};
+                            window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
+                            window._lineFontSizesInit = {{ config.get('line_font_sizes', [48, 48, 48, 48]) | tojson }};
                             window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
                         </script>
                     </div>
@@ -2751,61 +2801,6 @@ def index():
                 if (row) row.style.display = (getLineMovement(i) === 'Center') ? 'none' : '';
             }
 
-            // Reflects per-line movement/speed state onto the global "apply to all" controls:
-            // shows the common value when all 4 lines agree, or a "Mixed" placeholder when they don't.
-            function syncGlobalControlsState() {
-                var movements = window._lineMovements || ['Center','Center','Center','Center'];
-                var speeds    = window._lineSpeeds    || [5,5,5,5];
-                var posSelect = document.getElementById('text_position');
-                var speedInput = document.getElementById('scroll_speed');
-                var mixedNote = document.getElementById('movement_mixed_note');
-                var speedRow  = document.getElementById('scroll_speed_row');
-
-                var movementsMixed = movements.some(function(m) { return m !== movements[0]; });
-                if (posSelect) posSelect.value = movementsMixed ? '' : movements[0];
-                if (mixedNote) mixedNote.style.display = movementsMixed ? 'block' : 'none';
-
-                var speedsMixed = speeds.some(function(s) { return s !== speeds[0]; });
-                if (speedInput) {
-                    if (speedsMixed) {
-                        speedInput.value = '';
-                        speedInput.placeholder = 'Mixed';
-                    } else {
-                        speedInput.value = speeds[0];
-                        speedInput.placeholder = '';
-                    }
-                }
-
-                // Global Scroll Speed row: only meaningful when every line agrees and scrolls
-                if (speedRow) speedRow.style.display = (!movementsMixed && movements[0] !== 'Center') ? '' : 'none';
-            }
-
-            // Global "Text Movement (all lines)" select — resets every line to match
-            function applyGlobalMovementToAll(val) {
-                if (!val) return; // placeholder option is disabled/unselectable, but guard anyway
-                window._lineMovements = [val, val, val, val];
-                for (var i = 0; i < 4; i++) {
-                    var sel = document.getElementById('line_' + (i + 1) + '_movement');
-                    if (sel) sel.value = val;
-                    updateLineSpeedRowVisibility(i);
-                }
-                syncGlobalControlsState();
-                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
-                if (typeof saveConfig === 'function') saveConfig();
-            }
-
-            // Global "Scroll Speed (all lines)" input — resets every line's speed to match
-            function applyGlobalSpeedToAll(val) {
-                var v = Math.min(10, Math.max(1, parseInt(val) || 1));
-                window._lineSpeeds = [v, v, v, v];
-                for (var i = 0; i < 4; i++) {
-                    var el = document.getElementById('line_' + (i + 1) + '_speed');
-                    if (el) el.value = v;
-                }
-                syncGlobalControlsState();
-                if (typeof saveConfig === 'function') saveConfig();
-            }
-
             // Per-line Movement select
             function onLineMovementChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_movement');
@@ -2813,7 +2808,6 @@ def index():
                 window._lineMovements = window._lineMovements || ['Center','Center','Center','Center'];
                 window._lineMovements[i] = el.value;
                 updateLineSpeedRowVisibility(i);
-                syncGlobalControlsState();
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
@@ -2826,7 +2820,18 @@ def index():
                 el.value = v;
                 window._lineSpeeds = window._lineSpeeds || [5,5,5,5];
                 window._lineSpeeds[i] = v;
-                syncGlobalControlsState();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Font select
+            function onLineFontChange(i) {
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Font Size input
+            function onLineFontSizeChange(i) {
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
@@ -2892,11 +2897,14 @@ def index():
                     return (el && el.value) || '#FF0000';
                 }
 
-                // Returns array of indices (0-3) for non-empty lines
-                function getNonEmptyIdx() {
-                    var r = [];
-                    for (var i = 0; i < 4; i++) { if (getLineText(i)) r.push(i); }
-                    return r;
+                // Reads this line's own font/size directly from its font inputs
+                function getLineFont(i) {
+                    var el = document.getElementById('line_' + (i + 1) + '_font');
+                    return (el && el.value) || 'sans-serif';
+                }
+                function getLineFontSize(i) {
+                    var el = document.getElementById('line_' + (i + 1) + '_font_size');
+                    return (el && parseInt(el.value)) || 48;
                 }
 
                 function updateBadges() {
@@ -2942,35 +2950,42 @@ def index():
                         ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
                         ctx.imageSmoothingEnabled = true;
                     }
-                    var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
-                    var fontName   = document.getElementById('text_font').value || 'sans-serif';
-                    var scaledFont = Math.round(fontSize * canvas.width / mw);
-                    var lineH      = Math.round(scaledFont * 1.2);
-                    var arrowFont  = 'bold ' + Math.max(8, Math.round(scaledFont * 0.4)) + 'px sans-serif';
-                    var posLabel   = '';
+                    var posLabel = '';
                     ctx.textBaseline = 'top';
 
                     lineRects = [null, null, null, null];
 
-                    var nonEmptyIdx = getNonEmptyIdx();
-                    var nLines = nonEmptyIdx.length || 1;
-                    // Stacked-group default: center the group, space lines by lineH.
-                    // Shared across all lines regardless of each line's own movement type.
-                    var stackStartY = (canvas.height - nLines * lineH) / 2;
+                    // Each line can now have its own font size, so precompute each non-empty
+                    // line's scaled size/height before stacking (lines no longer share one height).
+                    var scaledSizes = [0, 0, 0, 0], lineHeights = [0, 0, 0, 0];
+                    var totalStackHeight = 0;
+                    for (var pi = 0; pi < 4; pi++) {
+                        if (!getLineText(pi)) continue;
+                        var sz = Math.round(getLineFontSize(pi) * canvas.width / mw);
+                        scaledSizes[pi] = sz;
+                        lineHeights[pi] = Math.round(sz * 1.2);
+                        totalStackHeight += lineHeights[pi];
+                    }
+                    var stackStartY = (canvas.height - totalStackHeight) / 2;
 
-                    var stackIdx = 0;
+                    var cumulativeY = stackStartY;
                     for (var i = 0; i < 4; i++) {
                         var lineText = getLineText(i);
                         if (!lineText) { lineRects[i] = null; continue; }
                         var movement = getLineMovement(i);
                         var lp  = window._linePositions[i];
+                        var fontName   = getLineFont(i);
+                        var scaledFont = scaledSizes[i];
+                        var lineH      = lineHeights[i];
+                        var arrowFont  = 'bold ' + Math.max(8, Math.round(scaledFont * 0.4)) + 'px sans-serif';
+                        var thisStackY = cumulativeY;
                         ctx.font = scaledFont + 'px ' + fontName + ', sans-serif';
                         var lw2 = ctx.measureText(lineText).width;
                         var lh2 = scaledFont;
                         var drawX, drawY;
 
                         if (movement === 'L2R' || movement === 'R2L') {
-                            drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
                             drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
                             drawX = (canvas.width - lw2) / 2;
                             ctx.save();
@@ -2989,7 +3004,7 @@ def index():
                         } else if (movement === 'T2B' || movement === 'B2T') {
                             drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
                             drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
-                            drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
                             drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
                             ctx.save();
                             ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
@@ -3005,7 +3020,7 @@ def index():
 
                         } else {
                             drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
-                            drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
                             drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
                             drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
                             if (i === selectedLine)
@@ -3018,7 +3033,7 @@ def index():
                         lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
                         drawLineDecoration(drawX, drawY, lw2, lh2, i);
                         ctx.fillStyle = getLineColor(i); ctx.fillText(lineText, drawX, drawY);
-                        stackIdx++;
+                        cumulativeY += lineH;
                     }
 
                     var posEl = document.getElementById('pos_display');
@@ -3159,13 +3174,12 @@ def index():
                     renderCanvasPreview(); saveConfig();
                 };
 
-                // Re-render on text / color / font-size changes
+                // Re-render on text / color / font / font-size changes
                 for (var li = 1; li <= 4; li++) {
                     (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li));
                     (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_color'));
+                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_font_size'));
                 }
-                document.getElementById('text_font_size').addEventListener('change', renderCanvasPreview);
-                document.getElementById('text_font').addEventListener('change',      renderCanvasPreview);
 
                 updateBadges();
                 renderCanvasPreview();
@@ -3406,7 +3420,6 @@ def index():
             setupAutoSave();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
-            syncGlobalControlsState();
             for (var _li = 0; _li < 4; _li++) updateLineSpeedRowVisibility(_li);
             initValignButtons();
             (function() {
@@ -3435,23 +3448,31 @@ def index():
             }
 
             function loadFonts() {
-                const fontSelect = document.getElementById('text_font');
-                const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
+                var currentFonts = (window._lineFontsInit && Array.isArray(window._lineFontsInit))
+                    ? window._lineFontsInit : ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'];
                 fetch('/api/fpp/fonts')
                 .then(r => r.json())
                 .then(function(fonts) {
-                    if (fonts && fonts.length > 0) {
-                        fontSelect.innerHTML = '<option value="">-- Select Font --</option>';
-                        fonts.forEach(function(font) {
-                            const opt = new Option(font, font, false, font === currentFont);
-                            fontSelect.add(opt);
-                        });
-                    } else {
-                        fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                    for (var i = 1; i <= 4; i++) {
+                        var sel = document.getElementById('line_' + i + '_font');
+                        if (!sel) continue;
+                        var current = currentFonts[i - 1] || 'FreeSans';
+                        if (fonts && fonts.length > 0) {
+                            sel.innerHTML = '<option value="">-- Select Font --</option>';
+                            fonts.forEach(function(font) {
+                                sel.add(new Option(font, font, false, font === current));
+                            });
+                        } else {
+                            sel.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                        }
                     }
+                    if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
                 })
                 .catch(function() {
-                    fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                    for (var i = 1; i <= 4; i++) {
+                        var sel = document.getElementById('line_' + i + '_font');
+                        if (sel) sel.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                    }
                 });
             }
 
@@ -3594,10 +3615,14 @@ var _saveTimer = null;
                     default_playlist: document.getElementById('default_playlist').value,
                     name_display_playlist: document.getElementById('name_display_playlist').value,
                     overlay_model_name: document.getElementById('overlay_model_name').value,
-                    text_font: document.getElementById('text_font').value,
-                    text_font_size: parseInt(document.getElementById('text_font_size').value),
-                    scroll_speed: parseInt(document.getElementById('scroll_speed').value),
-                    text_position: document.getElementById('text_position').value,
+                    line_fonts: [0, 1, 2, 3].map(function(i) {
+                        var el = document.getElementById('line_' + (i + 1) + '_font');
+                        return el && el.value ? el.value : 'FreeSans';
+                    }),
+                    line_font_sizes: [0, 1, 2, 3].map(function(i) {
+                        var el = document.getElementById('line_' + (i + 1) + '_font_size');
+                        return el ? (parseInt(el.value) || 48) : 48;
+                    }),
                     overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
                     overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
                     message_lines: [
@@ -3664,7 +3689,6 @@ var _saveTimer = null;
                 // Checkboxes, selects, color picker — save immediately on change
                 ['profanity_filter','use_whitelist','allow_duplicate_names',
                  'default_playlist','name_display_playlist','overlay_model_name',
-                 'text_font','text_position','scroll_speed',
                  'one_word_only','two_words_max',
                  'sms_response_success','sms_response_profanity','sms_response_rate_limited',
                  'sms_response_duplicate','sms_response_invalid_format',
@@ -3686,7 +3710,6 @@ var _saveTimer = null;
                 // Text, number inputs — save when user clicks away
                 ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
-                 'text_font_size',
                  'line_1','line_2','line_3','line_4',
                  'response_success','response_profanity','response_rate_limited',
                  'response_duplicate','response_invalid_format',
