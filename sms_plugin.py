@@ -2198,8 +2198,9 @@ def index():
 
                         <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
                         <style>
-                            .line-card { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:10px 10px 8px; margin-bottom:10px; }
+                            .line-card { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:8px 8px 6px; margin-bottom:6px; }
                             .line-row { display:flex; align-items:center; gap:6px; }
+                            .line-row input[type="text"] { margin-bottom:0; padding:6px; }
                             .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
                             .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
                             .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
@@ -2213,10 +2214,10 @@ def index():
                             .color-palette-swatch { width:20px; height:20px; border:1px solid #666; border-radius:3px; padding:0; cursor:pointer; }
                             .color-palette-save-btn { margin-top:6px; width:100%; font-size:11px; background:#444; color:#ccc; border:1px dashed #888; border-radius:3px; padding:4px; cursor:pointer; }
                             .color-palette-empty { font-size:10px; color:#888; text-align:center; padding:4px 0; }
-                            .line-movement-row { margin-top:8px; padding-top:8px; border-top:1px solid #555; }
-                            .line-group-label { font-size:11px; color:#999; font-weight:bold; display:block; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.3px; }
-                            .line-group-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-                            .line-group-controls select { width:auto; margin-bottom:0; flex:1; min-width:160px; }
+                            .line-movement-row { margin-top:5px; padding-top:5px; border-top:1px solid #555; }
+                            .line-group-label { font-size:11px; color:#999; font-weight:bold; display:block; margin:0 0 3px; text-transform:uppercase; letter-spacing:0.3px; }
+                            .line-group-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+                            .line-group-controls select { width:auto; margin-bottom:0; padding:6px; flex:1; min-width:160px; }
                             .line-speed-row { display:flex; align-items:center; gap:6px; }
                             .line-speed-row label { margin:0; font-weight:normal; font-size:12px; color:#aaa; }
                             .line-speed-row input { width:56px; margin-bottom:0; padding:6px; }
