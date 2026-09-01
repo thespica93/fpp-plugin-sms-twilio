@@ -900,8 +900,12 @@ def get_fpp_fonts():
     checking whether it's a directory, so any font subdirectory without a dot
     in its name (e.g. fonts-freefont-ttf's freefont/) is skipped and the scan
     never recurses into it — the endpoint then returns null. os.walk has no
-    such bug. Names are derived the same way FPP does (filename minus
-    extension) so they still match what FPP's native overlay text API expects.
+    such bug. Only .ttf/.pfb are scanned (matching FPP's own isTTF()/isPFB()
+    checks) and names are derived the same way FPP does — filename minus a
+    fixed 4-char extension — so they still match what FPP's native overlay
+    text API expects. .otf/.ttc are deliberately excluded: FPP's scanner
+    doesn't recognize them either, so surfacing them here would offer fonts
+    the native fallback path can't actually resolve.
     """
     search_dirs = [
         '/usr/share/fonts/truetype',
@@ -911,12 +915,12 @@ def get_fpp_fonts():
         '/usr/share/fpp/fonts',
         '/home/fpp/media/fonts',
     ]
-    extensions = ('.ttf', '.otf', '.pfb')
+    extensions = ('.ttf', '.pfb')
     fonts = set()
     for search_dir in search_dirs:
         if not os.path.isdir(search_dir):
             continue
-        for dirpath, _, filenames in os.walk(search_dir):
+        for _dirpath, _dirs, filenames in os.walk(search_dir):
             for fname in filenames:
                 if fname.lower().endswith(extensions):
                     fonts.add(os.path.splitext(fname)[0])
