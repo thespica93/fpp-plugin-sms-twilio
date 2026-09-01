@@ -1,20 +1,15 @@
 #!/bin/bash
 ###############################################################################
-# FPP SMS Twilio Plugin (beta) - Installation Script
+# FPP SMS Twilio Plugin - Installation Script
 ###############################################################################
 
 # Source FPP common functions and set FPPDIR environment
 . ${FPPDIR}/scripts/common
 
-# Resolve this plugin's own install directory dynamically (not hardcoded) so the
-# same script works no matter what repoName FPP installed it under — this is what
-# lets the beta and stable variants coexist without editing this path per-branch.
-PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 # Create directories FIRST before any logging to files
 mkdir -p /home/fpp/media/config /home/fpp/media/logs
 
-LOG="/home/fpp/media/logs/sms_plugin_install_beta.log"
+LOG="/home/fpp/media/logs/sms_plugin_install.log"
 
 # Log to both file and stdout so FPP UI shows progress
 log_and_show() {
@@ -22,7 +17,7 @@ log_and_show() {
 }
 
 log_and_show "========================================"
-log_and_show "FPP SMS Twilio Plugin Installer (beta)"
+log_and_show "FPP SMS Twilio Plugin Installer"
 log_and_show "$(date)"
 log_and_show "========================================"
 log_and_show ""
@@ -68,6 +63,7 @@ log_and_show "[5/5] zstandard complete"
 
 # whitelist.txt and blacklist.txt ship with the plugin via git.
 # Force git checkout to ensure they are present (FPP update may not pull all files).
+PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
 cd "$PLUGIN_DIR" && git checkout -- whitelist.txt blacklist.txt >> "$LOG" 2>&1
 if [ ! -f "$PLUGIN_DIR/whitelist.txt" ]; then
     log_and_show "WARNING: whitelist.txt still missing after git checkout - creating empty file"
@@ -83,41 +79,39 @@ chmod 664 "$PLUGIN_DIR/whitelist.txt" "$PLUGIN_DIR/blacklist.txt" 2>/dev/null
 # Allow fpp user to chmod FPP shared memory files for pixel-accurate text rendering.
 # FPP creates /dev/shm/FPP-Model-Data-* as root AFTER postStart.sh runs, so the
 # plugin needs to be able to fix permissions at runtime without a FPPD restart.
-# Suffixed "-beta" so uninstalling this variant never removes the stable variant's rule.
-SUDOERS_FILE="/etc/sudoers.d/90-fpp-sms-shm-beta"
+SUDOERS_FILE="/etc/sudoers.d/90-fpp-sms-shm"
 echo "fpp ALL=(ALL) NOPASSWD: /usr/bin/chmod 666 /dev/shm/FPP-Model-Data-*" > "$SUDOERS_FILE"
 chmod 0440 "$SUDOERS_FILE"
 log_and_show "Sudoers rule installed for pixel rendering (shm access)"
 
 # Set permissions on config/logs directories
 chown -R fpp:fpp /home/fpp/media/config /home/fpp/media/logs 2>/dev/null
-touch /home/fpp/media/logs/sms_plugin_beta.log
-chmod 666 /home/fpp/media/logs/sms_plugin_beta.log
-chown fpp:fpp /home/fpp/media/logs/sms_plugin_beta.log
+touch /home/fpp/media/logs/sms_plugin.log
+chmod 666 /home/fpp/media/logs/sms_plugin.log
+chown fpp:fpp /home/fpp/media/logs/sms_plugin.log
 
 # Install scheduler scripts into FPP's scripts directory so they appear in
-# the scheduler under: Command → Run Script → TwilioStartBeta / TwilioStopBeta
-# (named "...Beta" so they don't collide with a stable install's TwilioStart/TwilioStop)
+# the scheduler under: Command → Run Script → TwilioStart / TwilioStop
 mkdir -p /home/fpp/media/scripts
-cp "$PLUGIN_DIR/scripts/fpp_activate.sh"   /home/fpp/media/scripts/TwilioStartBeta.sh
-cp "$PLUGIN_DIR/scripts/fpp_deactivate.sh" /home/fpp/media/scripts/TwilioStopBeta.sh
-chmod +x /home/fpp/media/scripts/TwilioStartBeta.sh /home/fpp/media/scripts/TwilioStopBeta.sh
-chown fpp:fpp /home/fpp/media/scripts/TwilioStartBeta.sh /home/fpp/media/scripts/TwilioStopBeta.sh
-log_and_show "Scheduler scripts installed: TwilioStartBeta.sh / TwilioStopBeta.sh"
+cp "$PLUGIN_DIR/scripts/fpp_activate.sh"   /home/fpp/media/scripts/TwilioStart.sh
+cp "$PLUGIN_DIR/scripts/fpp_deactivate.sh" /home/fpp/media/scripts/TwilioStop.sh
+chmod +x /home/fpp/media/scripts/TwilioStart.sh /home/fpp/media/scripts/TwilioStop.sh
+chown fpp:fpp /home/fpp/media/scripts/TwilioStart.sh /home/fpp/media/scripts/TwilioStop.sh
+log_and_show "Scheduler scripts installed: TwilioStart.sh / TwilioStop.sh"
 
 log_and_show "========================================"
 log_and_show "Installation complete!"
 log_and_show "Restart FPPD to start the service"
 log_and_show "========================================"
 
-# Restart the plugin service if it's already running (e.g. during an update).
-# Matched by full path so this never touches a stable install's own sms_plugin.py.
-if pgrep -f "$PLUGIN_DIR/sms_plugin.py" > /dev/null 2>&1; then
-    log_and_show "Restarting SMS plugin service (beta)..."
-    pkill -f "$PLUGIN_DIR/sms_plugin.py" 2>/dev/null || true
+# Restart the plugin service if it's already running (e.g. during an update)
+if pgrep -f sms_plugin.py > /dev/null 2>&1; then
+    log_and_show "Restarting SMS plugin service..."
+    pkill -f sms_plugin.py 2>/dev/null || true
     sleep 1
-    setsid su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /dev/null 2>/home/fpp/media/logs/sms_plugin_beta.log &" < /dev/null > /dev/null 2>&1
-    log_and_show "SMS plugin service (beta) restarted"
+    PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
+    setsid su fpp -c "cd '$PLUGIN_DIR' && nohup python3 sms_plugin.py > /dev/null 2>/home/fpp/media/logs/sms_plugin.log &" < /dev/null > /dev/null 2>&1
+    log_and_show "SMS plugin service restarted"
 fi
 
 # Trigger the "FPPD Restart Required" banner in FPP's UI

@@ -1,9 +1,9 @@
 #!/bin/bash
-# FPP SMS Twilio Plugin (beta) - Deactivate
+# FPP SMS Twilio Plugin - Deactivate
 # Disables the plugin, stops SMS polling, and stops the current playlist/sequence.
-# FPP Scheduler: Command → Run Script → TwilioStopBeta
+# FPP Scheduler: Command → Run Script → TwilioStop
 
-PLUGIN_URL="http://127.0.0.1:5001/api/deactivate"
+PLUGIN_URL="http://127.0.0.1:5000/api/deactivate"
 
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$PLUGIN_URL" 2>&1)
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
