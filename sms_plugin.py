@@ -389,9 +389,11 @@ def render_to_shm(line_items, model_name, width, height):
     """Render multiple text lines to FPP shared memory, each with its own box, color, and font.
     line_items: list of (text, box_x, box_y, box_w, box_h, color_hex, font_name) tuples.
     Font size is auto-fit to (box_w, box_h) — the largest size where the text fits both
-    dimensions — then centered within the box. box_x/box_y < 0 auto-centers the box itself
-    on the canvas (vertical stacking among lines is resolved by the caller before this
-    point, so box_y is normally already concrete). Returns True on success, False on failure."""
+    dimensions — then centered within the box. box_x/box_y == -1 auto-centers the box
+    itself on the canvas (vertical stacking among lines is resolved by the caller before
+    this point, so box_y is normally already concrete). -1 is an exact sentinel, not just
+    any negative value: scrolling lines may legitimately have negative box_x/box_y to
+    position the box off-page. Returns True on success, False on failure."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
@@ -401,8 +403,8 @@ def render_to_shm(line_items, model_name, width, height):
         for (text, box_x, box_y, box_w, box_h, color_hex, font_name) in line_items:
             if not text:
                 continue
-            resolved_bx = max(0, (width - box_w) // 2) if box_x < 0 else box_x
-            resolved_by = max(0, (height - box_h) // 2) if box_y < 0 else box_y
+            resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
+            resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
             font, text_w, text_h = _fit_text_to_box(draw, text, font_name, box_w, box_h)
 
             draw_x = resolved_bx + max(0, (box_w - text_w) // 2)
@@ -463,8 +465,8 @@ def render_image_to_shm(image_path, model_name, width, height, line_items=None):
             for (text, box_x, box_y, box_w, box_h, color_hex, font_name) in line_items:
                 if not text:
                     continue
-                resolved_bx = max(0, (width - box_w) // 2) if box_x < 0 else box_x
-                resolved_by = max(0, (height - box_h) // 2) if box_y < 0 else box_y
+                resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
+                resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
                 font, text_w, text_h = _fit_text_to_box(draw, text, font_name, box_w, box_h)
                 draw_x = resolved_bx + max(0, (box_w - text_w) // 2)
                 draw_y = resolved_by + max(0, (box_h - text_h) // 2)
@@ -514,8 +516,11 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
             across it). The box also acts as a clipping viewport: text is only visible
             while passing through it, appearing to enter and exit at the box's own edges
             rather than the full canvas edges.
-        box_x/box_y < 0 auto-centers the box itself on the canvas (vertical stacking among
-        lines is resolved by the caller before this point, so box_y is normally concrete).
+        box_x/box_y == -1 auto-centers the box itself on the canvas (vertical stacking
+        among lines is resolved by the caller before this point, so box_y is normally
+        concrete). -1 is an exact sentinel: a scrolling line's box may otherwise have a
+        genuinely negative box_x/box_y, positioning it off-page so its text can enter/exit
+        before/after the model's visible edge instead of only at the edge itself.
         speed: 1-10, independent per line.
     Returns True if the thread started, False on error."""
     global _scroll_thread
@@ -532,8 +537,8 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
         for (text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name) in items:
             if not text:
                 continue
-            resolved_bx = max(0, (width - box_w) // 2) if box_x < 0 else box_x
-            resolved_by = max(0, (height - box_h) // 2) if box_y < 0 else box_y
+            resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
+            resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
             scrolling = movement in ('L2R', 'R2L', 'T2B', 'B2T')
             font, tw, th = _fit_text_to_box(pdraw, text, font_name, None if scrolling else box_w, box_h)
             tw, th = max(1, tw), max(1, th)
@@ -1580,7 +1585,7 @@ def send_to_fpp(name):
         all_items = []  # [(text, box_x, resolved_box_y, box_w, box_h, color_hex, movement, speed, font_name), ...]
         cumulative_y = stack_start_y
         for idx, (rendered, bx, by, bw, bh, lcolor, movement, speed, font_name) in enumerate(rendered_lines):
-            resolved_y = cumulative_y if by < 0 else by
+            resolved_y = cumulative_y if by == -1 else by
             all_items.append((rendered, bx, resolved_y, bw, bh, lcolor, movement, speed, font_name))
             cumulative_y += line_heights[idx]
 
@@ -3008,6 +3013,21 @@ def index():
                 var dragging     = false;
                 var dragOffX     = 0, dragOffY = 0;
 
+                // Off-page gutter: a scrolling line's box may extend past the model's own
+                // edge (in its scroll axis only) so text can enter/exit off-page instead of
+                // popping in/out at the visible edge. Sized as a fraction of the model's own
+                // W/H so it scales sensibly with model size; drawn as a shaded margin around
+                // the model area in renderCanvasPreview so the off-page portion of a box stays
+                // visible and grabbable rather than being invisible dead space.
+                // modelScaleX/Y (model units -> canvas px) and gutterOriginX/Y + modelPxW/H
+                // (canvas-px offset/size of the model's true visible area) are recomputed by
+                // renderCanvasPreview() every render and read by the mouse handlers below to
+                // convert between canvas-px and model-unit coordinates.
+                var GUTTER_FRAC = 0.25;
+                var modelScaleX = 1, modelScaleY = 1;
+                var gutterOriginX = 0, gutterOriginY = 0;
+                var modelPxW = 0, modelPxH = 0;
+
                 function getLineText(i) {
                     var el = document.getElementById('line_' + (i + 1));
                     return el ? el.value.replace('{name}', 'Santa') : '';
@@ -3046,7 +3066,7 @@ def index():
                         var badge = document.getElementById('line_' + (i + 1) + '_pos');
                         if (!badge) continue;
                         var b = window._lineBoxes[i];
-                        var txt = (b.x < 0 && b.y < 0) ? 'auto' : ('X:' + b.x + ' Y:' + b.y);
+                        var txt = (b.x === -1 && b.y === -1) ? 'auto' : ('X:' + b.x + ' Y:' + b.y);
                         badge.textContent = txt;
                         badge.style.color = (i === selectedLine) ? '#4CAF50' : '#888';
                     }
@@ -3094,27 +3114,49 @@ def index():
                 function renderCanvasPreview() {
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
-                    ctx.fillStyle = '#000';
+
+                    // modelScaleX/Y convert model units -> canvas px across the FULL canvas
+                    // (model + gutter on both sides); gutterOriginX/Y + modelPxW/H then locate
+                    // the model's true visible area within that canvas. Recomputed every render
+                    // since these depend on the current model size.
+                    modelScaleX = canvas.width  / (mw * (1 + 2 * GUTTER_FRAC));
+                    modelScaleY = canvas.height / (mh * (1 + 2 * GUTTER_FRAC));
+                    gutterOriginX = mw * GUTTER_FRAC * modelScaleX;
+                    gutterOriginY = mh * GUTTER_FRAC * modelScaleY;
+                    modelPxW = mw * modelScaleX;
+                    modelPxH = mh * modelScaleY;
+
+                    // Gutter background (off-page space), then the model's true visible area
+                    // on top of it, outlined so the boundary between on-/off-page is clear.
+                    ctx.fillStyle = '#2a2a2a';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = '#000';
+                    ctx.fillRect(gutterOriginX, gutterOriginY, modelPxW, modelPxH);
                     if (window._fseqBgImage) {
                         ctx.imageSmoothingEnabled = false;
-                        ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(window._fseqBgImage, gutterOriginX, gutterOriginY, modelPxW, modelPxH);
                         ctx.imageSmoothingEnabled = true;
                     }
+                    ctx.save();
+                    ctx.strokeStyle = 'rgba(79,195,247,0.7)';
+                    ctx.lineWidth = 1;
+                    ctx.strokeRect(Math.round(gutterOriginX) + 0.5, Math.round(gutterOriginY) + 0.5,
+                                   Math.round(modelPxW) - 1, Math.round(modelPxH) - 1);
+                    ctx.restore();
+
                     var posLabel = '';
                     ctx.textBaseline = 'top';
 
                     lineRects = [null, null, null, null];
-                    var scaleX = canvas.width / mw, scaleY = canvas.height / mh;
 
                     // Precompute each non-empty line's scaled box height for auto-stacking
                     var boxHeights = [0, 0, 0, 0], totalStackHeight = 0;
                     for (var pi = 0; pi < 4; pi++) {
                         if (!getLineText(pi)) continue;
-                        boxHeights[pi] = window._lineBoxes[pi].h * scaleY;
+                        boxHeights[pi] = window._lineBoxes[pi].h * modelScaleY;
                         totalStackHeight += boxHeights[pi];
                     }
-                    var stackStartY = (canvas.height - totalStackHeight) / 2;
+                    var stackStartY = gutterOriginY + (modelPxH - totalStackHeight) / 2;
 
                     var cumulativeY = stackStartY;
                     for (var i = 0; i < 4; i++) {
@@ -3122,14 +3164,24 @@ def index():
                         if (!lineText) { lineRects[i] = null; continue; }
                         var movement = getLineMovement(i);
                         var scrolling = (movement === 'L2R' || movement === 'R2L' || movement === 'T2B' || movement === 'B2T');
+                        var scrollX = (movement === 'L2R' || movement === 'R2L');
+                        var scrollY = (movement === 'T2B' || movement === 'B2T');
                         var b = window._lineBoxes[i];
                         var fontName = getLineFont(i);
 
-                        var boxW = b.w * scaleX, boxH = b.h * scaleY;
-                        var boxX = b.x < 0 ? (canvas.width - boxW) / 2 : b.x * scaleX;
-                        var boxY = b.y < 0 ? cumulativeY : b.y * scaleY;
-                        boxX = Math.max(0, Math.min(canvas.width - boxW, boxX));
-                        boxY = Math.max(0, Math.min(canvas.height - boxH, boxY));
+                        var boxW = b.w * modelScaleX, boxH = b.h * modelScaleY;
+                        var boxX = b.x === -1 ? gutterOriginX + (modelPxW - boxW) / 2 : gutterOriginX + b.x * modelScaleX;
+                        var boxY = b.y === -1 ? cumulativeY : gutterOriginY + b.y * modelScaleY;
+
+                        // A scrolling line's box may extend into the gutter along its own
+                        // scroll axis (so its text can enter/exit off-page); the cross axis,
+                        // and any non-scrolling box, stays confined to the visible model area.
+                        var minX = scrollX ? 0 : gutterOriginX;
+                        var maxX = scrollX ? canvas.width - boxW : gutterOriginX + modelPxW - boxW;
+                        var minY = scrollY ? 0 : gutterOriginY;
+                        var maxY = scrollY ? canvas.height - boxH : gutterOriginY + modelPxH - boxH;
+                        boxX = Math.max(minX, Math.min(maxX, boxX));
+                        boxY = Math.max(minY, Math.min(maxY, boxY));
 
                         var fitSize = fitTextSize(lineText, fontName, scrolling ? Infinity : boxW, boxH);
                         ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
@@ -3157,14 +3209,20 @@ def index():
                             ctx.fillText(arrowTxt, ax, ay);
                             ctx.restore();
 
-                            // Clip to the box — represents the runtime clip-viewport behavior,
-                            // where scrolling text is only visible while inside its box.
-                            ctx.save();
-                            ctx.beginPath(); ctx.rect(boxX, boxY, boxW, boxH); ctx.clip();
-                            ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
-                            ctx.fillStyle = getLineColor(i);
-                            ctx.fillText(lineText, drawX, drawY);
-                            ctx.restore();
+                            // Clip to the intersection of the box and the model's true visible
+                            // area — matches the runtime, where a box extending past the model
+                            // edge is cut off there regardless of how far the box itself
+                            // continues (there are no pixels beyond the model edge to draw into).
+                            var clipX0 = Math.max(boxX, gutterOriginX), clipY0 = Math.max(boxY, gutterOriginY);
+                            var clipX1 = Math.min(boxX + boxW, gutterOriginX + modelPxW), clipY1 = Math.min(boxY + boxH, gutterOriginY + modelPxH);
+                            if (clipX1 > clipX0 && clipY1 > clipY0) {
+                                ctx.save();
+                                ctx.beginPath(); ctx.rect(clipX0, clipY0, clipX1 - clipX0, clipY1 - clipY0); ctx.clip();
+                                ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
+                                ctx.fillStyle = getLineColor(i);
+                                ctx.fillText(lineText, drawX, drawY);
+                                ctx.restore();
+                            }
                         } else {
                             ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
                             ctx.fillStyle = getLineColor(i);
@@ -3173,7 +3231,7 @@ def index():
 
                         if (i === selectedLine) {
                             posLabel = 'Line ' + (i+1) + (
-                                (b.x < 0 && b.y < 0) ? ': auto position' : (': X:' + b.x + ' Y:' + b.y)
+                                (b.x === -1 && b.y === -1) ? ': auto position' : (': X:' + b.x + ' Y:' + b.y)
                             ) + '  •  ' + b.w + '×' + b.h + ' box';
                         }
                         cumulativeY += boxHeights[i];
@@ -3237,13 +3295,12 @@ def index():
                     var c = canvasXY(e);
                     var handle = hitTestHandle(c.cx, c.cy);
                     if (handle) {
-                        var mw2 = window._canvasModelW || 640, mh2 = window._canvasModelH || 360;
                         var r = lineRects[selectedLine];
                         var b = window._lineBoxes[selectedLine];
                         // Resolve any -1 (auto) position to concrete model coords from the
                         // last render — resizing needs a real edge to anchor against.
-                        var curX = b.x < 0 ? Math.round(r.x * mw2 / canvas.width)  : b.x;
-                        var curY = b.y < 0 ? Math.round(r.y * mh2 / canvas.height) : b.y;
+                        var curX = b.x === -1 ? Math.round((r.x - gutterOriginX) / modelScaleX) : b.x;
+                        var curY = b.y === -1 ? Math.round((r.y - gutterOriginY) / modelScaleY) : b.y;
                         b.x = curX; b.y = curY;
                         resizing = true;
                         resizeHandle = handle;
@@ -3266,28 +3323,45 @@ def index():
                 });
 
                 canvas.addEventListener('mousemove', function(e) {
-                    var mw2 = window._canvasModelW || 640;
-                    var mh2 = window._canvasModelH || 360;
                     var c   = canvasXY(e);
                     var MIN_SIZE = 10;
                     if (resizing && selectedLine >= 0) {
                         var b = window._lineBoxes[selectedLine];
-                        var mx = c.cx * mw2 / canvas.width, my = c.cy * mh2 / canvas.height;
+                        var movementR = getLineMovement(selectedLine);
+                        var scrollXR = (movementR === 'L2R' || movementR === 'R2L');
+                        var scrollYR = (movementR === 'T2B' || movementR === 'B2T');
+                        // Clamp the raw mouse position in canvas-px first -- to the full canvas
+                        // (incl. gutter) on the scroll axis, or to the model's true visible area
+                        // otherwise -- then convert once to model units.
+                        var loPxX = scrollXR ? 0 : gutterOriginX, hiPxX = scrollXR ? canvas.width  : gutterOriginX + modelPxW;
+                        var loPxY = scrollYR ? 0 : gutterOriginY, hiPxY = scrollYR ? canvas.height : gutterOriginY + modelPxH;
+                        var cxClamped = Math.max(loPxX, Math.min(hiPxX, c.cx));
+                        var cyClamped = Math.max(loPxY, Math.min(hiPxY, c.cy));
+                        var mx = (cxClamped - gutterOriginX) / modelScaleX, my = (cyClamped - gutterOriginY) / modelScaleY;
                         var hasW = resizeHandle.indexOf('w') >= 0, hasE = resizeHandle.indexOf('e') >= 0;
                         var hasN = resizeHandle.indexOf('n') >= 0, hasS = resizeHandle.indexOf('s') >= 0;
-                        var newLeft   = hasW ? Math.max(0, Math.min(mx, resizeFixed.right - MIN_SIZE)) : resizeFixed.left;
-                        var newRight  = hasE ? Math.min(mw2, Math.max(mx, resizeFixed.left + MIN_SIZE)) : resizeFixed.right;
-                        var newTop    = hasN ? Math.max(0, Math.min(my, resizeFixed.bottom - MIN_SIZE)) : resizeFixed.top;
-                        var newBottom = hasS ? Math.min(mh2, Math.max(my, resizeFixed.top + MIN_SIZE)) : resizeFixed.bottom;
-                        b.x = Math.round(newLeft);
+                        var newLeft   = hasW ? Math.min(mx, resizeFixed.right - MIN_SIZE)  : resizeFixed.left;
+                        var newRight  = hasE ? Math.max(mx, resizeFixed.left + MIN_SIZE)   : resizeFixed.right;
+                        var newTop    = hasN ? Math.min(my, resizeFixed.bottom - MIN_SIZE) : resizeFixed.top;
+                        var newBottom = hasS ? Math.max(my, resizeFixed.top + MIN_SIZE)    : resizeFixed.bottom;
+                        b.x = Math.round(newLeft);  if (b.x === -1) b.x = -2; // -1 is the auto-position sentinel
                         b.w = Math.round(newRight - newLeft);
-                        b.y = Math.round(newTop);
+                        b.y = Math.round(newTop);   if (b.y === -1) b.y = -2;
                         b.h = Math.round(newBottom - newTop);
                         renderCanvasPreview();
                     } else if (dragging && selectedLine >= 0) {
                         var r2 = lineRects[selectedLine] || {w: 20, h: 20};
-                        var newX = Math.round(Math.max(0, Math.min(canvas.width  - r2.w, c.cx - dragOffX)) * mw2 / canvas.width);
-                        var newY = Math.round(Math.max(0, Math.min(canvas.height - r2.h, c.cy - dragOffY)) * mh2 / canvas.height);
+                        var movementD = getLineMovement(selectedLine);
+                        var scrollXD = (movementD === 'L2R' || movementD === 'R2L');
+                        var scrollYD = (movementD === 'T2B' || movementD === 'B2T');
+                        var loPxXD = scrollXD ? 0 : gutterOriginX, hiPxXD = scrollXD ? canvas.width  - r2.w : gutterOriginX + modelPxW - r2.w;
+                        var loPxYD = scrollYD ? 0 : gutterOriginY, hiPxYD = scrollYD ? canvas.height - r2.h : gutterOriginY + modelPxH - r2.h;
+                        var pxX = Math.max(loPxXD, Math.min(hiPxXD, c.cx - dragOffX));
+                        var pxY = Math.max(loPxYD, Math.min(hiPxYD, c.cy - dragOffY));
+                        var newX = Math.round((pxX - gutterOriginX) / modelScaleX);
+                        var newY = Math.round((pxY - gutterOriginY) / modelScaleY);
+                        if (newX === -1) newX = -2; // -1 is the auto-position sentinel
+                        if (newY === -1) newY = -2;
                         window._lineBoxes[selectedLine].x = newX;
                         window._lineBoxes[selectedLine].y = newY;
                         renderCanvasPreview();
@@ -3326,19 +3400,30 @@ def index():
                     var mw2  = window._canvasModelW || 640;
                     var mh2  = window._canvasModelH || 360;
                     var b    = window._lineBoxes[selectedLine];
+                    var movementK = getLineMovement(selectedLine);
+                    var scrollXK = (movementK === 'L2R' || movementK === 'R2L');
+                    var scrollYK = (movementK === 'T2B' || movementK === 'B2T');
                     var step = e.shiftKey ? 10 : 1;
                     // Resolve auto (-1) positions from the rendered rect so the
                     // first keypress anchors from the visual position, not from 0
                     var curX = b.x, curY = b.y;
                     var r = lineRects[selectedLine];
-                    if (curX < 0 && r) curX = Math.round(r.x * mw2 / canvas.width);
-                    if (curY < 0 && r) curY = Math.round(r.y * mh2 / canvas.height);
-                    if (curX < 0) curX = Math.round(mw2 / 2);
-                    if (curY < 0) curY = Math.round(mh2 / 2);
-                    if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
-                    if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
-                    if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
-                    if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
+                    if (curX === -1 && r) curX = Math.round((r.x - gutterOriginX) / modelScaleX);
+                    if (curY === -1 && r) curY = Math.round((r.y - gutterOriginY) / modelScaleY);
+                    if (curX === -1) curX = Math.round(mw2 / 2);
+                    if (curY === -1) curY = Math.round(mh2 / 2);
+                    // Scroll axis can nudge into the gutter; the cross axis (and any
+                    // non-scrolling box) stays within the model's true visible area.
+                    var loX = scrollXK ? Math.round(-mw2 * GUTTER_FRAC) : 0;
+                    var hiX = (scrollXK ? Math.round(mw2 * (1 + GUTTER_FRAC)) : mw2) - 1;
+                    var loY = scrollYK ? Math.round(-mh2 * GUTTER_FRAC) : 0;
+                    var hiY = (scrollYK ? Math.round(mh2 * (1 + GUTTER_FRAC)) : mh2) - 1;
+                    if (e.key === 'ArrowLeft')  curX = Math.max(loX, curX - step);
+                    if (e.key === 'ArrowRight') curX = Math.min(hiX, curX + step);
+                    if (e.key === 'ArrowUp')    curY = Math.max(loY, curY - step);
+                    if (e.key === 'ArrowDown')  curY = Math.min(hiY, curY + step);
+                    if (curX === -1) curX = -2; // -1 is the auto-position sentinel
+                    if (curY === -1) curY = -2;
                     b.x = curX; b.y = curY;
                     renderCanvasPreview();
                     clearTimeout(_arrowSaveTimer);
@@ -3457,13 +3542,19 @@ def index():
                                     loadEl.textContent = '\u26a0 Overlay model not found \u2014 verify model name in settings';
                                     loadEl.style.color = '#ff9800';
                                 }
-                                var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
+                                // The background always restarts from 0 and is cut off after
+                                // display_duration seconds each time a message shows (see
+                                // send_to_fpp/display loop) -- anything past that point in the
+                                // FSEQ is never actually seen behind a message, so cap the
+                                // scrubber there instead of the file's full length.
+                                var displayDur = parseInt(document.getElementById('display_duration').value) || 30;
+                                var totalSec = Math.min(displayDur, Math.max(1, Math.floor(data.duration_ms / 1000)));
                                 var scrubber = document.getElementById('fseq_scrubber');
                                 scrubber.max = totalSec;
                                 scrubber.value = 0;
                                 document.getElementById('fseq_scrubber_row').style.display = '';
                                 document.getElementById('fseq_time_display').textContent =
-                                    '0:00 / ' + fmtTime(data.duration_ms);
+                                    '0:00 / ' + fmtTime(totalSec * 1000);
                                 doFseqFetch(0);
                             })
                             .catch(function(e) {
@@ -3475,7 +3566,10 @@ def index():
                         // ---- Video: show scrubber (time in seconds), fetch frames ----
                         loadEl.textContent = '';
                         var scrubber = document.getElementById('fseq_scrubber');
-                        scrubber.max = 300;  // assume up to 5 min; user can scrub
+                        // Capped to display_duration, not the video's own length -- playback
+                        // always restarts from 0 and is cut off after display_duration seconds
+                        // each time a message shows, so nothing past that point is ever seen.
+                        scrubber.max = parseInt(document.getElementById('display_duration').value) || 30;
                         scrubber.value = 0;
                         document.getElementById('fseq_scrubber_row').style.display = '';
                         document.getElementById('fseq_time_display').textContent = '0:00';
@@ -3909,6 +4003,12 @@ var _saveTimer = null;
                         if (window.toggleFseqPreview) window.toggleFseqPreview();
                         updateNameDisplayWarning();
                     });
+                });
+                // The scrubber's range is capped to Display Duration (see loadBgPreview) —
+                // reload it on change so that cap stays in sync with the field.
+                var displayDurationEl = document.getElementById('display_duration');
+                if (displayDurationEl) displayDurationEl.addEventListener('change', function() {
+                    if (window.toggleFseqPreview) window.toggleFseqPreview();
                 });
 
                 // Text, number inputs — save when user clicks away
