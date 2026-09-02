@@ -394,7 +394,9 @@ def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orient
     RGB strip (black background, matching the other strip/paste code in this file) for the
     caller to center/paste within its own box. orientation is 'horizontal' (default),
     'vertical_rotated' (whole line rotated 90 degrees), or 'vertical_stacked' (one
-    character per row, each upright). Returns (strip_or_None, w, h)."""
+    character per row, each upright). Either box_w or box_h may be None to leave that
+    dimension unconstrained -- used for T2B/B2T scrolling, where the travel axis has no
+    fixed extent. Returns (strip_or_None, w, h)."""
     probe = Image.new('RGB', (1, 1))
     pdraw = ImageDraw.Draw(probe)
 
@@ -428,7 +430,7 @@ def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orient
             else:
                 max_w, max_h = mid, mid
             total_h = max_h * len(chars)
-            if max_w <= box_w and total_h <= box_h:
+            if (box_w is None or max_w <= box_w) and (box_h is None or total_h <= box_h):
                 best_font, best_w, best_lh = font, max_w, max_h
                 lo = mid + 1
             else:
@@ -584,9 +586,10 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
         orientation), ...]
         movement 'Center': text is auto-fit to (box_w, box_h) and centered in the box, fixed.
         orientation ('horizontal'/'vertical_rotated'/'vertical_stacked') applies to Center
-        (all three) and to T2B/B2T ('vertical_rotated' only -- the glyphs read sideways
-        while still travelling vertically). L2R/R2L are always horizontal glyphs -- the
-        point of that movement is horizontal travel. See _render_oriented_text_strip.
+        and to T2B/B2T (all three -- for rotated the glyphs read sideways, for stacked
+        each upright character is its own row, both still travelling vertically). L2R/R2L
+        are always horizontal glyphs -- the point of that movement is horizontal travel.
+        See _render_oriented_text_strip.
         movement 'L2R'/'R2L'/'T2B'/'B2T': text height is auto-fit to box_h (width
             unconstrained — the text is expected to be wider than the box and travels
             across it). The box also acts as a clipping viewport: text is only visible
@@ -617,23 +620,32 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
             resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
             resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
             scrolling = movement in ('L2R', 'R2L', 'T2B', 'B2T')
-            if scrolling and orientation == 'vertical_rotated' and movement in ('T2B', 'B2T'):
-                # T2B/B2T with rotated text: the rotated block reads sideways while
-                # travelling vertically through the box. Rotated width must fit box_w
-                # (centered horizontally, fixed); rotated height is unconstrained since
-                # it's the travel axis -- pass box_h=None through to
-                # _render_oriented_text_strip's rotated branch, which fits raw
-                # (unrotated) height against box_w with raw width free.
+            vertical_scroll_oriented = (scrolling and movement in ('T2B', 'B2T')
+                                         and orientation in ('vertical_rotated', 'vertical_stacked'))
+            if vertical_scroll_oriented:
+                # T2B/B2T with rotated or stacked text: the block (sideways-reading for
+                # rotated, one upright character per row for stacked) travels vertically
+                # through the box. Its width must fit box_w (centered horizontally,
+                # fixed); its height is unconstrained since it's the travel axis -- pass
+                # box_h=None through to _render_oriented_text_strip.
                 strip, tw, th = _render_oriented_text_strip(text, font_name, box_w, None,
-                                                              _hex_to_rgb(color_hex), 'vertical_rotated')
+                                                              _hex_to_rgb(color_hex), orientation)
                 if strip is None:
                     strip, tw, th = Image.new('RGB', (1, 1), (0, 0, 0)), 1, 1
             elif scrolling:
                 # Horizontal glyphs -- all other scrolling cases (L2R/R2L always, and
-                # T2B/B2T when not rotated). Orientation otherwise only applies to fixed
-                # (Center) lines, where the box's own edges are the whole viewport rather
-                # than a window the text travels through.
-                font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_h)
+                # T2B/B2T when not rotated/stacked). Orientation otherwise only applies
+                # to fixed (Center) lines, where the box's own edges are the whole
+                # viewport rather than a window the text travels through.
+                # The font is only constrained on the CROSS axis -- the travel axis is
+                # unconstrained since the text scrolls through it (using the box's full
+                # extent there rather than being capped by whichever dimension happens
+                # to be smaller). L2R/R2L travel along X, so height (box_h) is the
+                # constraint; T2B/B2T travel along Y, so width (box_w) is.
+                horiz_scroll = movement in ('L2R', 'R2L')
+                box_w_fit = None if horiz_scroll else box_w
+                box_h_fit = box_h if horiz_scroll else None
+                font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_w_fit, box_h_fit)
                 tw, th = max(1, tw), max(1, th)
                 strip = Image.new('RGB', (tw, th), (0, 0, 0))
                 if font is not None:
@@ -3068,22 +3080,20 @@ def index():
             }
             function updateLineOrientationRowVisibility(i) {
                 var m = getLineMovement(i);
-                // Rotated text works for Center (fixed) and T2B/B2T (travels vertically,
-                // glyphs turned 90 degrees) -- not L2R/R2L, where the point of the movement
-                // is horizontal travel and rotating the glyphs on top of that isn't supported.
+                // Rotated/stacked text both work for Center (fixed) and T2B/B2T (travels
+                // vertically -- rotated glyphs read sideways, stacked keeps each character
+                // upright, one per row) -- not L2R/R2L, where the point of the movement is
+                // horizontal travel and neither combines with that meaningfully.
                 var applicable = (m === 'Center' || m === 'T2B' || m === 'B2T');
                 var row = document.getElementById('line_' + (i + 1) + '_orientation_row');
                 if (row) row.style.display = applicable ? 'inline-flex' : 'none';
 
-                // Stacked (one upright character per row) only makes sense for a fixed line --
-                // combined with vertical scroll it would be ambiguous, so it's Center-only.
                 var sel = document.getElementById('line_' + (i + 1) + '_orientation');
                 if (!sel) return;
                 var stackedOpt = sel.querySelector('option[value="vertical_stacked"]');
                 if (!stackedOpt) return;
-                var stackedAllowed = (m === 'Center');
-                stackedOpt.disabled = !stackedAllowed;
-                if (!stackedAllowed && sel.value === 'vertical_stacked') {
+                stackedOpt.disabled = !applicable;
+                if (!applicable && sel.value === 'vertical_stacked') {
                     sel.value = 'horizontal';
                     onLineOrientationChange(i);
                 }
@@ -3426,8 +3436,17 @@ def index():
                         lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
                         drawBoxDecoration(boxX, boxY, boxW, boxH, i);
 
-                        if (scrolling && !(orientation === 'vertical_rotated' && scrollY)) {
-                            var fit = fitTextSize(lineText, fontName, Infinity, boxH);
+                        var vertScrollOriented = scrollY && (orientation === 'vertical_rotated' || orientation === 'vertical_stacked');
+
+                        if (scrolling && !vertScrollOriented) {
+                            // The font is only constrained on the CROSS axis -- the travel
+                            // axis is unconstrained since the text scrolls through it, so it
+                            // can use the box's full extent there rather than being capped by
+                            // whichever dimension happens to be smaller. L2R/R2L travel along
+                            // X, so height (boxH) is the constraint; T2B/B2T travel along Y,
+                            // so width (boxW) is.
+                            var fit = scrollX ? fitTextSize(lineText, fontName, Infinity, boxH)
+                                               : fitTextSize(lineText, fontName, boxW, Infinity);
                             var fitSize = fit.size;
                             ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
                             var textW = ctx.measureText(lineText).width;
@@ -3553,6 +3572,55 @@ def index():
                                 ctx.textBaseline = 'alphabetic';
                                 ctx.fillStyle = getLineColor(i);
                                 ctx.fillText(lineText, -rawWTR / 2, (fitTR.ascent - fitTR.descent) / 2);
+                                ctx.restore();
+                            }
+                        } else if (scrolling && orientation === 'vertical_stacked' && scrollY) {
+                            // T2B/B2T with stacked text: each character stays upright, one per
+                            // row, and the whole stack travels vertically through the box --
+                            // same simulation approach as the rotated branch above, just with
+                            // the stack's own total height as the "moving" extent and no
+                            // rotate transform.
+                            var charsVS = lineText.split('');
+                            var fitVS = fitStackedTextSize(charsVS, fontName, boxW, Infinity);
+                            var totalHVS = fitVS.lineHeight * charsVS.length;
+
+                            var lineSpeedVS = (window._lineSpeeds && window._lineSpeeds[i]) || 5;
+                            var stepPxModelVS = Math.max(1, Math.max(10, lineSpeedVS * 20) / 30);
+                            var stepPxCanvasVS = stepPxModelVS * modelScaleY;
+                            var loopStartVS = (movement === 'B2T') ? (boxY + boxH) : (boxY - totalHVS);
+                            var loopEndVS   = (movement === 'B2T') ? (boxY - totalHVS) : (boxY + boxH);
+                            var dirSignVS   = (movement === 'B2T') ? -1 : 1;
+                            var frameCountVS = Math.round((window._scrubSeconds || 0) * 30);
+                            var posVS = loopStartVS;
+                            for (var sfVS = 0; sfVS < frameCountVS; sfVS++) {
+                                posVS += dirSignVS * stepPxCanvasVS;
+                                if ((dirSignVS < 0 && posVS < loopEndVS) || (dirSignVS > 0 && posVS > loopEndVS)) {
+                                    posVS = loopStartVS;
+                                }
+                            }
+
+                            var arrowFontVS = 'bold ' + Math.max(8, Math.round(fitVS.size * 0.4)) + 'px sans-serif';
+                            var arrowTxtVS = (movement === 'B2T') ? '↑' : '↓';
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = arrowFontVS; ctx.textBaseline = 'top';
+                            var awVS = ctx.measureText(arrowTxtVS).width;
+                            ctx.fillText(arrowTxtVS, boxX + (boxW - awVS) / 2, boxY + 2);
+                            ctx.restore();
+
+                            var clipX0VS = Math.max(boxX, gutterOriginX), clipY0VS = Math.max(boxY, gutterOriginY);
+                            var clipX1VS = Math.min(boxX + boxW, gutterOriginX + modelPxW), clipY1VS = Math.min(boxY + boxH, gutterOriginY + modelPxH);
+                            if (clipX1VS > clipX0VS && clipY1VS > clipY0VS) {
+                                ctx.save();
+                                ctx.beginPath(); ctx.rect(clipX0VS, clipY0VS, clipX1VS - clipX0VS, clipY1VS - clipY0VS); ctx.clip();
+                                ctx.font = fitVS.size + 'px "' + fontName + '", sans-serif';
+                                ctx.textBaseline = 'alphabetic';
+                                ctx.fillStyle = getLineColor(i);
+                                for (var ciVS = 0; ciVS < charsVS.length; ciVS++) {
+                                    var cwVS = ctx.measureText(charsVS[ciVS]).width;
+                                    var cxVS = boxX + Math.max(0, (boxW - cwVS) / 2);
+                                    var cyVS = posVS + ciVS * fitVS.lineHeight + fitVS.ascent;
+                                    ctx.fillText(charsVS[ciVS], cxVS, cyVS);
+                                }
                                 ctx.restore();
                             }
                         } else if (orientation === 'vertical_rotated') {
