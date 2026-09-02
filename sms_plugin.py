@@ -352,13 +352,19 @@ def _find_font(font_name, font_size):
     except Exception:
         return None
 
-def _fit_text_to_box(draw, text, font_name, box_w, box_h, min_size=6, max_size=300):
+def _fit_text_to_box(draw, text, font_name, box_w, box_h, min_size=6, max_size=None):
     """Binary search the largest font size where `text` fits within box_w x box_h.
-    Pass box_w=None to fit height only — used for scrolling lines, where the text is
-    expected to be wider than its box and travels across it rather than being
-    shrunk to fit. Returns (font_or_None, text_w, text_h) at the best-fit size."""
+    Pass box_w=None to fit width only, or box_h=None to fit height only -- used for
+    scrolling lines, where the text is expected to be larger than its box along the
+    travel axis and moves across/through it rather than being shrunk to fit.
+    max_size defaults to a cap that scales with whichever of box_w/box_h is given,
+    rather than a fixed number -- otherwise a constraining dimension bigger than the
+    cap leaves real headroom unused forever, since the search can never explore past
+    it. Returns (font_or_None, text_w, text_h) at the best-fit size."""
     if not PIL_AVAILABLE or not text:
         return None, 0, 0
+    if max_size is None:
+        max_size = max([300] + [int(d * 2) for d in (box_w, box_h) if d is not None])
     lo, hi = min_size, max_size
     # Seed with the smallest size so a box too small for even min_size to fit still
     # renders something (slightly overflowing) instead of the line silently vanishing.
@@ -376,7 +382,7 @@ def _fit_text_to_box(draw, text, font_name, box_w, box_h, min_size=6, max_size=3
             w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
         else:
             w, h = len(text) * (mid * 0.6), mid
-        if (box_w is None or w <= box_w) and h <= box_h:
+        if (box_w is None or w <= box_w) and (box_h is None or h <= box_h):
             best_font, best_w, best_h = font, w, h
             lo = mid + 1
         else:
@@ -3271,7 +3277,14 @@ def index():
                 // invisibly instead of visibly losing its top). Matches the backend's PIL
                 // textbbox-based measurement in _fit_text_to_box.
                 function fitTextSize(text, fontName, boxW, boxH) {
-                    var lo = 6, hi = 300;
+                    var lo = 6;
+                    // The cap has to scale with the box, not be a fixed number -- otherwise
+                    // a constraining dimension bigger than the cap leaves real headroom
+                    // unused forever, since the search can never explore past it (seen with
+                    // a 300px-tall box: the search maxed out at 300 even though that size's
+                    // actual ascent+descent was only ~225, well under the 300 limit).
+                    var hi = Math.max(300, isFinite(boxW) ? Math.ceil(boxW * 2) : 0,
+                                           isFinite(boxH) ? Math.ceil(boxH * 2) : 0);
                     var best = { size: lo, ascent: lo * 0.8, descent: lo * 0.2 };
                     // actualBoundingBoxAscent/Descent are measured relative to whatever
                     // textBaseline is current at measureText() time -- not always
@@ -3302,7 +3315,13 @@ def index():
                 // the largest where the widest character fits boxW and all rows stacked fit
                 // boxH. lineHeight is the per-row height (tallest character's ascent+descent).
                 function fitStackedTextSize(chars, fontName, boxW, boxH) {
-                    var lo = 6, hi = 300;
+                    var lo = 6;
+                    // See fitTextSize -- the cap must scale with the box or real headroom
+                    // goes unused. For stacked text, a single row's height only needs to
+                    // reach boxH / chars.length (the total stack height constraint divided
+                    // across all the rows), not the full boxH.
+                    var hi = Math.max(300, isFinite(boxW) ? Math.ceil(boxW * 2) : 0,
+                                           isFinite(boxH) ? Math.ceil((boxH / chars.length) * 2) : 0);
                     var best = { size: lo, ascent: lo * 0.8, descent: lo * 0.2, lineHeight: lo };
                     ctx.textBaseline = 'alphabetic';
                     while (lo <= hi) {
