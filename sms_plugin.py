@@ -401,10 +401,14 @@ def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orient
     pdraw = ImageDraw.Draw(probe)
 
     if orientation == 'vertical_rotated':
-        # Fit as if box dimensions were swapped -- after a 90-degree rotation, the
-        # text's own width becomes vertical extent (must fit box_h) and its height
-        # becomes horizontal extent (must fit box_w).
-        font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_h, box_w)
+        # Sized by box_w alone (raw height <= box_w, becomes rotated width); raw width
+        # is always left unconstrained here regardless of what box_h the caller passed
+        # -- a box that's wide relative to its height would otherwise leave the font
+        # tiny (bound by fitting the string's full length into box_h) despite box_w
+        # having plenty of room. Static (Center) callers accept the text possibly
+        # running past the box's own height in exchange (no clip is applied there);
+        # scrolling callers already pass box_h=None so this is a no-op for them.
+        font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_w)
         if font is None:
             return None, 0, 0
         strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
@@ -3624,11 +3628,15 @@ def index():
                                 ctx.restore();
                             }
                         } else if (orientation === 'vertical_rotated') {
-                            // Fit as if the box dimensions were swapped -- after a 90-degree
-                            // rotation, the text's own (unrotated) width becomes vertical
-                            // extent (must fit boxH) and its height becomes horizontal extent
-                            // (must fit boxW).
-                            var fitR = fitTextSize(lineText, fontName, boxH, boxW);
+                            // Sized by boxW alone (raw height <= boxW, becomes rotated width),
+                            // raw width left unconstrained -- matches the rotated-scrolling
+                            // branches above rather than also capping by boxH. A box that's
+                            // wide relative to its height would otherwise leave the font tiny
+                            // (bound by fitting the string's full length into boxH) despite
+                            // boxW having plenty of room; this lets the font use that room,
+                            // at the cost of the text possibly running past the box's own
+                            // height since Center draws without a clip.
+                            var fitR = fitTextSize(lineText, fontName, Infinity, boxW);
                             ctx.font = fitR.size + 'px "' + fontName + '", sans-serif';
                             var rawW = ctx.measureText(lineText).width;
                             ctx.save();
