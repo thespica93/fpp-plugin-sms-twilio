@@ -3446,14 +3446,47 @@ def index():
                             ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
                             var textW = ctx.measureText(lineText).width;
                             var textH = fit.ascent + fit.descent;
-                            var drawX = boxX + Math.max(0, (boxW - textW) / 2);
+
+                            // Simulate the exact backend scroll position at the current scrub
+                            // time (see animate_lines_via_shm's per-frame loop): a constant
+                            // per-frame step that SNAPS back to the starting edge once it fully
+                            // exits the box, rather than smoothly wrapping -- so at t=0 the text
+                            // sits fully off-page at its starting edge, not visible in the box
+                            // like a static "sitting on the screen" snapshot. Runs in canvas-px
+                            // (the step is scaled by the same model->canvas factor as everything
+                            // else here) so it stays proportionally correct at any preview size.
+                            var scrollFps = 30;
+                            var lineSpeed = (window._lineSpeeds && window._lineSpeeds[i]) || 5;
+                            var stepPxModel = Math.max(1, Math.max(10, lineSpeed * 20) / scrollFps);
+                            var horizScroll = scrollX; // scrollX/scrollY already computed above
+                            var stepPxCanvas = stepPxModel * (horizScroll ? modelScaleX : modelScaleY);
+                            var loopStart, loopEnd, dirSign;
+                            if (horizScroll) {
+                                loopStart = (movement === 'R2L') ? (boxX + boxW) : (boxX - textW);
+                                loopEnd   = (movement === 'R2L') ? (boxX - textW) : (boxX + boxW);
+                                dirSign   = (movement === 'R2L') ? -1 : 1;
+                            } else {
+                                loopStart = (movement === 'B2T') ? (boxY + boxH) : (boxY - textH);
+                                loopEnd   = (movement === 'B2T') ? (boxY - textH) : (boxY + boxH);
+                                dirSign   = (movement === 'B2T') ? -1 : 1;
+                            }
+                            var scrollFrameCount = Math.round((window._scrubSeconds || 0) * scrollFps);
+                            var scrollPos = loopStart;
+                            for (var sf = 0; sf < scrollFrameCount; sf++) {
+                                scrollPos += dirSign * stepPxCanvas;
+                                if ((dirSign < 0 && scrollPos < loopEnd) || (dirSign > 0 && scrollPos > loopEnd)) {
+                                    scrollPos = loopStart;
+                                }
+                            }
+
+                            var drawX = horizScroll ? scrollPos : (boxX + Math.max(0, (boxW - textW) / 2));
                             // drawTop is the visual top of the text; fillText itself (baseline
                             // 'alphabetic') needs the baseline Y, which sits fit.ascent below
                             // that -- using the font's generic 'top' metric here (as a plain
                             // top-baseline fillText would) is what let decorative fonts render
                             // above where we thought the top was, since actualBoundingBoxAscent
                             // can exceed it.
-                            var drawTop = boxY + Math.max(0, (boxH - textH) / 2);
+                            var drawTop = horizScroll ? (boxY + Math.max(0, (boxH - textH) / 2)) : scrollPos;
                             var drawBaseline = drawTop + fit.ascent;
 
                             var arrowFont = 'bold ' + Math.max(8, Math.round(fitSize * 0.4)) + 'px sans-serif';
@@ -3852,10 +3885,12 @@ def index():
                                 var scrubber = document.getElementById('fseq_scrubber');
                                 scrubber.max = totalSec;
                                 scrubber.value = 0;
+                                window._scrubSeconds = 0;
                                 document.getElementById('fseq_scrubber_row').style.display = '';
                                 document.getElementById('fseq_time_display').textContent =
                                     '0:00 / ' + fmtTime(totalSec * 1000);
                                 doFseqFetch(0);
+                                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                             })
                             .catch(function(e) {
                                 loadEl.textContent = '\u2717 ' + e;
@@ -3871,17 +3906,21 @@ def index():
                         // each time a message shows, so nothing past that point is ever seen.
                         scrubber.max = parseInt(document.getElementById('display_duration').value) || 30;
                         scrubber.value = 0;
+                        window._scrubSeconds = 0;
                         document.getElementById('fseq_scrubber_row').style.display = '';
                         document.getElementById('fseq_time_display').textContent = '0:00';
                         document.getElementById('fseq_status').textContent =
                             'Scrub to preview different parts of the video';
                         doMediaFetch(0);
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
 
                     } else {
                         // ---- Image: load once, no scrubber ----
                         loadEl.textContent = '';
                         document.getElementById('fseq_scrubber_row').style.display = 'none';
+                        window._scrubSeconds = 0;
                         doMediaFetch(0);
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     }
                 }
 
@@ -3955,6 +3994,11 @@ def index():
                 }
 
                 window.fseqScrub = function(seconds) {
+                    // Drives the scrolling-text preview too (see renderCanvasPreview) --
+                    // updated immediately, unlike the network-bound background frame fetch
+                    // below which stays debounced.
+                    window._scrubSeconds = parseFloat(seconds) || 0;
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     var loadEl = document.getElementById('fseq_load_status');
                     if (_contentType === 'seq') {
                         if (!_fseqMeta) return;
