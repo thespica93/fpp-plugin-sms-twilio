@@ -2885,7 +2885,9 @@ def index():
             // Per-line Font select
             function onLineFontChange(i) {
                 var name = typeof getLineFont === 'function' ? getLineFont(i) : null;
+                console.log('[fonts] line ' + i + ' changed to "' + name + '"');
                 ensureFontLoaded(name).then(function() {
+                    console.log('[fonts] redrawing preview after load of "' + name + '"');
                     if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 });
                 if (typeof saveConfig === 'function') saveConfig();
@@ -3041,7 +3043,8 @@ def index():
                         var lineH      = lineHeights[i];
                         var arrowFont  = 'bold ' + Math.max(8, Math.round(scaledFont * 0.4)) + 'px sans-serif';
                         var thisStackY = cumulativeY;
-                        ctx.font = scaledFont + 'px ' + fontName + ', sans-serif';
+                        ctx.font = scaledFont + 'px "' + fontName + '", sans-serif';
+                        console.log('[fonts] line ' + i + ' requested "' + fontName + '", ctx.font is now:', ctx.font);
                         var lw2 = ctx.measureText(lineText).width;
                         var lh2 = scaledFont;
                         var drawX, drawY;
@@ -3091,7 +3094,7 @@ def index():
                                     : 'Line ' + (i+1) + ':  X:' + lp.x + '  Y:' + lp.y;
                         }
 
-                        ctx.font = scaledFont + 'px ' + fontName + ', sans-serif'; ctx.textBaseline = 'top';
+                        ctx.font = scaledFont + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
                         lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
                         drawLineDecoration(drawX, drawY, lw2, lh2, i);
                         ctx.fillStyle = getLineColor(i); ctx.fillText(lineText, drawX, drawY);
@@ -3516,11 +3519,13 @@ def index():
             window._loadedFonts = window._loadedFonts || {};
             function ensureFontLoaded(name) {
                 if (!name || window._loadedFonts[name]) return window._loadedFonts[name] || Promise.resolve();
+                console.log('[fonts] fetching "' + name + '"');
                 var ff = new FontFace(name, 'url("/api/fonts/file/' + encodeURIComponent(name) + '")');
                 var p = ff.load().then(function(loaded) {
                     document.fonts.add(loaded);
+                    console.log('[fonts] loaded "' + name + '", document.fonts.check =', document.fonts.check('16px "' + name + '"'));
                 }).catch(function(err) {
-                    console.warn('Font preview load failed for "' + name + '":', err);
+                    console.error('[fonts] FAILED to load "' + name + '":', err);
                 });
                 window._loadedFonts[name] = p;
                 return p;
