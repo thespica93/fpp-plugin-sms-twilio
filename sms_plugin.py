@@ -3056,15 +3056,37 @@ def index():
                 // Binary search the largest font size where `text` fits within boxW x boxH.
                 // Pass boxW = Infinity to fit height only (used for scrolling lines, where
                 // the text is expected to be wider than its box and travels across it).
+                // Height uses actualBoundingBoxAscent/Descent -- the real measured extent of
+                // this specific text run -- rather than a flat fontSize*1.2 estimate. A
+                // generic estimate undersells how tall decorative/dingbat fonts actually
+                // render (e.g. graphics that rise well above a normal cap-height), letting an
+                // oversized fit through that then gets clipped by a scrolling line's box
+                // (Center draws without a clip, so the same oversized fit there just overflows
+                // invisibly instead of visibly losing its top). Matches the backend's PIL
+                // textbbox-based measurement in _fit_text_to_box.
                 function fitTextSize(text, fontName, boxW, boxH) {
-                    var lo = 6, hi = 300, best = lo;
+                    var lo = 6, hi = 300;
+                    var best = { size: lo, ascent: lo * 0.8, descent: lo * 0.2 };
+                    // actualBoundingBoxAscent/Descent are measured relative to whatever
+                    // textBaseline is current at measureText() time -- not always
+                    // 'alphabetic' -- so it must be pinned here rather than inherited from
+                    // whatever the caller last set (renderCanvasPreview leaves it at 'top',
+                    // which made ascent come back negative and the fit wildly wrong).
+                    ctx.textBaseline = 'alphabetic';
                     while (lo <= hi) {
                         var mid = Math.floor((lo + hi) / 2);
                         ctx.font = mid + 'px "' + fontName + '", sans-serif';
-                        var w = ctx.measureText(text).width;
-                        var h = mid * 1.2;
-                        if (w <= boxW && h <= boxH) { best = mid; lo = mid + 1; }
-                        else { hi = mid - 1; }
+                        var metrics = ctx.measureText(text);
+                        var w = metrics.width;
+                        var ascent = metrics.actualBoundingBoxAscent || mid * 0.8;
+                        var descent = metrics.actualBoundingBoxDescent || mid * 0.2;
+                        var h = ascent + descent;
+                        if (w <= boxW && h <= boxH) {
+                            best = { size: mid, ascent: ascent, descent: descent };
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
                     }
                     return best;
                 }
@@ -3223,11 +3245,19 @@ def index():
                         boxX = Math.max(minX, Math.min(maxX, boxX));
                         boxY = Math.max(minY, Math.min(maxY, boxY));
 
-                        var fitSize = fitTextSize(lineText, fontName, scrolling ? Infinity : boxW, boxH);
+                        var fit = fitTextSize(lineText, fontName, scrolling ? Infinity : boxW, boxH);
+                        var fitSize = fit.size;
                         ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
                         var textW = ctx.measureText(lineText).width;
+                        var textH = fit.ascent + fit.descent;
                         var drawX = boxX + Math.max(0, (boxW - textW) / 2);
-                        var drawY = boxY + Math.max(0, (boxH - fitSize) / 2);
+                        // drawTop is the visual top of the text; fillText itself (baseline
+                        // 'alphabetic') needs the baseline Y, which sits fit.ascent below that --
+                        // using the font's generic 'top' metric here (as a plain top-baseline
+                        // fillText would) is what let decorative fonts render above where we
+                        // thought the top was, since actualBoundingBoxAscent can exceed it.
+                        var drawTop = boxY + Math.max(0, (boxH - textH) / 2);
+                        var drawBaseline = drawTop + fit.ascent;
 
                         lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
                         drawBoxDecoration(boxX, boxY, boxW, boxH, i);
@@ -3241,7 +3271,7 @@ def index():
                             var ax, ay;
                             if (movement === 'T2B' || movement === 'B2T') {
                                 ax = boxX + (boxW - aw) / 2;
-                                ay = (movement === 'B2T') ? boxY + boxH - fitSize - 2 : boxY + 2;
+                                ay = (movement === 'B2T') ? boxY + boxH - textH - 2 : boxY + 2;
                             } else {
                                 ax = (movement === 'R2L') ? boxX + boxW - aw - 2 : boxX + 2;
                                 ay = boxY + 2;
@@ -3258,15 +3288,15 @@ def index():
                             if (clipX1 > clipX0 && clipY1 > clipY0) {
                                 ctx.save();
                                 ctx.beginPath(); ctx.rect(clipX0, clipY0, clipX1 - clipX0, clipY1 - clipY0); ctx.clip();
-                                ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
+                                ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'alphabetic';
                                 ctx.fillStyle = getLineColor(i);
-                                ctx.fillText(lineText, drawX, drawY);
+                                ctx.fillText(lineText, drawX, drawBaseline);
                                 ctx.restore();
                             }
                         } else {
-                            ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
+                            ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'alphabetic';
                             ctx.fillStyle = getLineColor(i);
-                            ctx.fillText(lineText, drawX, drawY);
+                            ctx.fillText(lineText, drawX, drawBaseline);
                         }
 
                         if (i === selectedLine) {
