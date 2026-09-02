@@ -151,6 +151,10 @@ DEFAULT_CONFIG = {
     "line_movements": ["Center", "Center", "Center", "Center"],
     "line_speeds": [5, 5, 5, 5],
     "line_fonts": ["FreeSans", "FreeSans", "FreeSans", "FreeSans"],
+    # Only meaningful for Center (static) lines -- scrolling lines are always
+    # 'horizontal'. 'vertical_rotated' = whole line rotated 90deg; 'vertical_stacked' =
+    # one upright character per row.
+    "line_orientations": ["horizontal", "horizontal", "horizontal", "horizontal"],
     "custom_colors": [],
     "scroll_speed": 5,
     "overlay_model_width": 0,
@@ -385,32 +389,99 @@ def _hex_to_rgb(hex_str):
     return (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
 
 
+def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orientation):
+    """Auto-fit `text` to (box_w, box_h) per `orientation` and render it to a tightly-sized
+    RGB strip (black background, matching the other strip/paste code in this file) for the
+    caller to center/paste within its own box. orientation is 'horizontal' (default),
+    'vertical_rotated' (whole line rotated 90 degrees), or 'vertical_stacked' (one
+    character per row, each upright). Returns (strip_or_None, w, h)."""
+    probe = Image.new('RGB', (1, 1))
+    pdraw = ImageDraw.Draw(probe)
+
+    if orientation == 'vertical_rotated':
+        # Fit as if box dimensions were swapped -- after a 90-degree rotation, the
+        # text's own width becomes vertical extent (must fit box_h) and its height
+        # becomes horizontal extent (must fit box_w).
+        font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_h, box_w)
+        if font is None:
+            return None, 0, 0
+        strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
+        ImageDraw.Draw(strip).text((0, 0), text, fill=color_rgb, font=font)
+        rotated = strip.rotate(-90, expand=True)
+        return rotated, rotated.width, rotated.height
+
+    elif orientation == 'vertical_stacked':
+        chars = list(text)
+        if not chars:
+            return None, 0, 0
+        lo, hi = 6, 300
+        best_font, best_w, best_lh = None, 1, lo
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            font = _find_font(font_name, mid)
+            if font is not None:
+                max_w = max_h = 0
+                for c in chars:
+                    bbox = pdraw.textbbox((0, 0), c, font=font)
+                    max_w = max(max_w, bbox[2] - bbox[0])
+                    max_h = max(max_h, bbox[3] - bbox[1])
+            else:
+                max_w, max_h = mid, mid
+            total_h = max_h * len(chars)
+            if max_w <= box_w and total_h <= box_h:
+                best_font, best_w, best_lh = font, max_w, max_h
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best_font is None:
+            return None, 0, 0
+        total_h = best_lh * len(chars)
+        strip = Image.new('RGB', (max(1, best_w), max(1, total_h)), (0, 0, 0))
+        sdraw = ImageDraw.Draw(strip)
+        for idx, c in enumerate(chars):
+            bbox = pdraw.textbbox((0, 0), c, font=best_font)
+            cw = bbox[2] - bbox[0]
+            cx = max(0, (best_w - cw) // 2)
+            cy = idx * best_lh
+            sdraw.text((cx - bbox[0], cy - bbox[1]), c, fill=color_rgb, font=best_font)
+        return strip, strip.width, strip.height
+
+    else:  # 'horizontal'
+        font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_w, box_h)
+        if font is None:
+            return None, 0, 0
+        strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
+        ImageDraw.Draw(strip).text((0, 0), text, fill=color_rgb, font=font)
+        return strip, strip.width, strip.height
+
+
 def render_to_shm(line_items, model_name, width, height):
-    """Render multiple text lines to FPP shared memory, each with its own box, color, and font.
-    line_items: list of (text, box_x, box_y, box_w, box_h, color_hex, font_name) tuples.
-    Font size is auto-fit to (box_w, box_h) — the largest size where the text fits both
-    dimensions — then centered within the box. box_x/box_y == -1 auto-centers the box
-    itself on the canvas (vertical stacking among lines is resolved by the caller before
-    this point, so box_y is normally already concrete). -1 is an exact sentinel, not just
-    any negative value: scrolling lines may legitimately have negative box_x/box_y to
-    position the box off-page. Returns True on success, False on failure."""
+    """Render multiple text lines to FPP shared memory, each with its own box, color, font,
+    and orientation.
+    line_items: list of (text, box_x, box_y, box_w, box_h, color_hex, font_name, orientation)
+    tuples. orientation is 'horizontal' (default), 'vertical_rotated', or 'vertical_stacked'
+    — see _render_oriented_text_strip. Font size is auto-fit to (box_w, box_h), then the
+    rendered text is centered within the box. box_x/box_y == -1 auto-centers the box itself
+    on the canvas (vertical stacking among lines is resolved by the caller before this
+    point, so box_y is normally already concrete). -1 is an exact sentinel, not just any
+    negative value: scrolling lines may legitimately have negative box_x/box_y to position
+    the box off-page. Returns True on success, False on failure."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
         img = Image.new('RGB', (width, height), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
 
-        for (text, box_x, box_y, box_w, box_h, color_hex, font_name) in line_items:
+        for (text, box_x, box_y, box_w, box_h, color_hex, font_name, orientation) in line_items:
             if not text:
                 continue
             resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
             resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
-            font, text_w, text_h = _fit_text_to_box(draw, text, font_name, box_w, box_h)
-
-            draw_x = resolved_bx + max(0, (box_w - text_w) // 2)
-            draw_y = resolved_by + max(0, (box_h - text_h) // 2)
-            if font is not None:
-                draw.text((draw_x, draw_y), text, fill=_hex_to_rgb(color_hex), font=font)
+            strip, sw, sh = _render_oriented_text_strip(text, font_name, box_w, box_h,
+                                                          _hex_to_rgb(color_hex), orientation)
+            if strip is not None:
+                draw_x = resolved_bx + max(0, (box_w - sw) // 2)
+                draw_y = resolved_by + max(0, (box_h - sh) // 2)
+                img.paste(strip, (draw_x, draw_y))
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         raw = img.tobytes()
@@ -451,9 +522,9 @@ def render_to_shm(line_items, model_name, width, height):
 def render_image_to_shm(image_path, model_name, width, height, line_items=None):
     """Load an image file, resize to model dimensions, optionally composite text on top,
     then write to FPP shared memory.  Returns True on success.
-    line_items: optional list of (text, box_x, box_y, box_w, box_h, color_hex, font_name)
-    to draw over the image (same box-fit behavior as render_to_shm). State 2 (Opaque)
-    should be used so the image fully covers the background."""
+    line_items: optional list of (text, box_x, box_y, box_w, box_h, color_hex, font_name,
+    orientation) to draw over the image (same box-fit behavior as render_to_shm). State 2
+    (Opaque) should be used so the image fully covers the background."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
@@ -461,17 +532,17 @@ def render_image_to_shm(image_path, model_name, width, height, line_items=None):
         img = img.resize((width, height), Image.LANCZOS)
 
         if line_items:
-            draw = ImageDraw.Draw(img)
-            for (text, box_x, box_y, box_w, box_h, color_hex, font_name) in line_items:
+            for (text, box_x, box_y, box_w, box_h, color_hex, font_name, orientation) in line_items:
                 if not text:
                     continue
                 resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
                 resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
-                font, text_w, text_h = _fit_text_to_box(draw, text, font_name, box_w, box_h)
-                draw_x = resolved_bx + max(0, (box_w - text_w) // 2)
-                draw_y = resolved_by + max(0, (box_h - text_h) // 2)
-                if font is not None:
-                    draw.text((draw_x, draw_y), text, fill=_hex_to_rgb(color_hex), font=font)
+                strip, sw, sh = _render_oriented_text_strip(text, font_name, box_w, box_h,
+                                                              _hex_to_rgb(color_hex), orientation)
+                if strip is not None:
+                    draw_x = resolved_bx + max(0, (box_w - sw) // 2)
+                    draw_y = resolved_by + max(0, (box_h - sh) // 2)
+                    img.paste(strip, (draw_x, draw_y))
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         raw = img.tobytes()
@@ -509,8 +580,11 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
     """Animate independently-moving/colored/fitted text lines together in FPP shared memory.
     Runs in a background thread for `duration` seconds then stops.
 
-    items: [(text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name), ...]
+    items: [(text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name,
+        orientation), ...]
         movement 'Center': text is auto-fit to (box_w, box_h) and centered in the box, fixed.
+        orientation ('horizontal'/'vertical_rotated'/'vertical_stacked', Center only --
+        scrolling lines are always horizontal) — see _render_oriented_text_strip.
         movement 'L2R'/'R2L'/'T2B'/'B2T': text height is auto-fit to box_h (width
             unconstrained — the text is expected to be wider than the box and travels
             across it). The box also acts as a clipping viewport: text is only visible
@@ -534,17 +608,27 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
         probe = Image.new('RGB', (1, 1))
         pdraw = ImageDraw.Draw(probe)
         prepared = []
-        for (text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name) in items:
+        for (text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name,
+             orientation) in items:
             if not text:
                 continue
             resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
             resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
             scrolling = movement in ('L2R', 'R2L', 'T2B', 'B2T')
-            font, tw, th = _fit_text_to_box(pdraw, text, font_name, None if scrolling else box_w, box_h)
-            tw, th = max(1, tw), max(1, th)
-            strip = Image.new('RGB', (tw, th), (0, 0, 0))
-            if font is not None:
-                ImageDraw.Draw(strip).text((0, 0), text, fill=_hex_to_rgb(color_hex), font=font)
+            if scrolling:
+                # Scrolling lines are always horizontal -- orientation only applies to
+                # fixed (Center) lines, where the box's own edges are the whole viewport
+                # rather than a window the text travels through.
+                font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_h)
+                tw, th = max(1, tw), max(1, th)
+                strip = Image.new('RGB', (tw, th), (0, 0, 0))
+                if font is not None:
+                    ImageDraw.Draw(strip).text((0, 0), text, fill=_hex_to_rgb(color_hex), font=font)
+            else:
+                strip, tw, th = _render_oriented_text_strip(text, font_name, box_w, box_h,
+                                                              _hex_to_rgb(color_hex), orientation)
+                if strip is None:
+                    strip, tw, th = Image.new('RGB', (1, 1), (0, 0, 0)), 1, 1
 
             entry = {'strip': strip, 'tw': tw, 'th': th, 'movement': movement,
                      'clip': (resolved_bx, resolved_by, box_w, box_h)}
@@ -1547,6 +1631,7 @@ def send_to_fpp(name):
         line_movements_cfg = config.get('line_movements', [])
         line_speeds_cfg = config.get('line_speeds', [])
         line_fonts_cfg = config.get('line_fonts', [])
+        line_orientations_cfg = config.get('line_orientations', [])
 
         global_text_color = config.get('text_color', '#FF0000')
         if not global_text_color.startswith('#'):
@@ -1558,7 +1643,7 @@ def send_to_fpp(name):
         # Collect non-empty rendered lines + their saved box/colors/movement/speed/font.
         # A line with no override for a given setting falls back to the matching global
         # default. Font size is not stored — it's auto-fit to the line's box at render time.
-        rendered_lines = []  # [(rendered_text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name), ...]
+        rendered_lines = []  # [(rendered_text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name, orientation), ...]
         for i, tmpl_line in enumerate(message_lines):
             if not tmpl_line.strip():
                 continue
@@ -1570,8 +1655,9 @@ def send_to_fpp(name):
             movement = line_movements_cfg[i] if i < len(line_movements_cfg) and line_movements_cfg[i] else 'Center'
             speed = line_speeds_cfg[i] if i < len(line_speeds_cfg) and line_speeds_cfg[i] else global_scroll_speed
             font_name = line_fonts_cfg[i] if i < len(line_fonts_cfg) and line_fonts_cfg[i] else global_font
+            orientation = line_orientations_cfg[i] if i < len(line_orientations_cfg) and line_orientations_cfg[i] else 'horizontal'
             rendered_lines.append((rendered, box.get('x', -1), box.get('y', -1), box.get('w', 300), box.get('h', 60),
-                                    line_color, movement, speed, font_name))
+                                    line_color, movement, speed, font_name, orientation))
 
         # Compute stacked Y defaults (group centered vertically). Each line's own box height
         # determines its own height in the stack.
@@ -1582,11 +1668,11 @@ def send_to_fpp(name):
 
         # Resolve each line's box Y (stacked default when unset). Box X stays -1
         # (auto-centered horizontally inside the render functions) unless explicitly positioned.
-        all_items = []  # [(text, box_x, resolved_box_y, box_w, box_h, color_hex, movement, speed, font_name), ...]
+        all_items = []  # [(text, box_x, resolved_box_y, box_w, box_h, color_hex, movement, speed, font_name, orientation), ...]
         cumulative_y = stack_start_y
-        for idx, (rendered, bx, by, bw, bh, lcolor, movement, speed, font_name) in enumerate(rendered_lines):
+        for idx, (rendered, bx, by, bw, bh, lcolor, movement, speed, font_name, orientation) in enumerate(rendered_lines):
             resolved_y = cumulative_y if by == -1 else by
-            all_items.append((rendered, bx, resolved_y, bw, bh, lcolor, movement, speed, font_name))
+            all_items.append((rendered, bx, resolved_y, bw, bh, lcolor, movement, speed, font_name, orientation))
             cumulative_y += line_heights[idx]
 
         # True if at least one line scrolls — decides whether the fast one-shot static
@@ -1702,7 +1788,7 @@ def send_to_fpp(name):
 
                 if PIL_AVAILABLE and mw > 0 and mh > 0:
                     if not any_moving:
-                        line_items = [(t, bx, by, bw, bh, c, fn) for (t, bx, by, bw, bh, c, _m, _s, fn) in all_items]
+                        line_items = [(t, bx, by, bw, bh, c, fn, o) for (t, bx, by, bw, bh, c, _m, _s, fn, o) in all_items]
                         if img_bg_path:
                             shm_rendered = render_image_to_shm(
                                 img_bg_path, overlay_model, mw, mh,
@@ -2366,6 +2452,7 @@ def index():
                         {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
                         {% set ls = config.get('line_speeds') or [5, 5, 5, 5] %}
                         {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
+                        {% set lo = config.get('line_orientations') or ['horizontal', 'horizontal', 'horizontal', 'horizontal'] %}
                         <div id="message_lines_section">
                             <div class="line-card">
                                 <div class="line-row">
@@ -2393,6 +2480,14 @@ def index():
                                             <label>Speed:</label>
                                             <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
                                         </div>
+                                        <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_1_orientation" onchange="onLineOrientationChange(0)">
+                                                <option value="horizontal" {{ 'selected' if lo[0] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[0] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[0] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2430,6 +2525,14 @@ def index():
                                             <label>Speed:</label>
                                             <input type="number" id="line_2_speed" min="1" max="10" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
                                         </div>
+                                        <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_2_orientation" onchange="onLineOrientationChange(1)">
+                                                <option value="horizontal" {{ 'selected' if lo[1] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[1] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[1] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2467,6 +2570,14 @@ def index():
                                             <label>Speed:</label>
                                             <input type="number" id="line_3_speed" min="1" max="10" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
                                         </div>
+                                        <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_3_orientation" onchange="onLineOrientationChange(2)">
+                                                <option value="horizontal" {{ 'selected' if lo[2] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[2] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[2] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2504,6 +2615,14 @@ def index():
                                             <label>Speed:</label>
                                             <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
                                         </div>
+                                        <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_4_orientation" onchange="onLineOrientationChange(3)">
+                                                <option value="horizontal" {{ 'selected' if lo[3] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[3] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[3] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2558,6 +2677,7 @@ def index():
                             window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
                             window._lineSpeedsInit = {{ config.get('line_speeds', [5, 5, 5, 5]) | tojson }};
                             window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
+                            window._lineOrientationsInit = {{ config.get('line_orientations', ['horizontal', 'horizontal', 'horizontal', 'horizontal']) | tojson }};
                             window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
                         </script>
                     </div>
@@ -2923,6 +3043,20 @@ def index():
                 if (row) row.style.display = (getLineMovement(i) === 'Center') ? 'none' : '';
             }
 
+            // Orientation only applies to Center (static) lines -- a scrolling line is
+            // always horizontal (the point of L2R/R2L/T2B/B2T is travel along one axis;
+            // rotating or stacking the glyphs on top of that isn't supported).
+            function getLineOrientation(i) {
+                return (window._lineOrientations && window._lineOrientations[i]) || 'horizontal';
+            }
+            function isVerticalOrientation(o) {
+                return o === 'vertical_rotated' || o === 'vertical_stacked';
+            }
+            function updateLineOrientationRowVisibility(i) {
+                var row = document.getElementById('line_' + (i + 1) + '_orientation_row');
+                if (row) row.style.display = (getLineMovement(i) === 'Center') ? 'inline-flex' : 'none';
+            }
+
             // Per-line Movement select
             function onLineMovementChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_movement');
@@ -2930,6 +3064,25 @@ def index():
                 window._lineMovements = window._lineMovements || ['Center','Center','Center','Center'];
                 window._lineMovements[i] = el.value;
                 updateLineSpeedRowVisibility(i);
+                updateLineOrientationRowVisibility(i);
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Orientation select. Swaps the box's W/H when crossing the
+            // horizontal/vertical boundary (either direction) so switching to vertical
+            // starts from a sensible portrait-shaped box instead of a leftover wide one.
+            function onLineOrientationChange(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_orientation');
+                if (!el) return;
+                window._lineOrientations = window._lineOrientations || ['horizontal','horizontal','horizontal','horizontal'];
+                var prev = getLineOrientation(i);
+                var next = el.value;
+                if (isVerticalOrientation(prev) !== isVerticalOrientation(next)) {
+                    var b = window._lineBoxes && window._lineBoxes[i];
+                    if (b) { var t = b.w; b.w = b.h; b.h = t; }
+                }
+                window._lineOrientations[i] = next;
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
@@ -3008,6 +3161,13 @@ def index():
                 while (initLS.length < 4) initLS.push(5);
                 window._lineSpeeds = initLS;
 
+                // Orientation only applies to Center (static) lines -- see getLineOrientation
+                var initLO = (window._lineOrientationsInit && Array.isArray(window._lineOrientationsInit))
+                    ? window._lineOrientationsInit.slice()
+                    : ['horizontal', 'horizontal', 'horizontal', 'horizontal'];
+                while (initLO.length < 4) initLO.push('horizontal');
+                window._lineOrientations = initLO;
+
                 var selectedLine = -1;
                 var hoveredLine  = -1;
                 var lineRects    = [null, null, null, null]; // canvas-pixel rects, filled by render
@@ -3083,6 +3243,36 @@ def index():
                         var h = ascent + descent;
                         if (w <= boxW && h <= boxH) {
                             best = { size: mid, ascent: ascent, descent: descent };
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    return best;
+                }
+
+                // Like fitTextSize, but for 'vertical_stacked' orientation: each character
+                // sits on its own row (upright, not rotated), all sharing one font size --
+                // the largest where the widest character fits boxW and all rows stacked fit
+                // boxH. lineHeight is the per-row height (tallest character's ascent+descent).
+                function fitStackedTextSize(chars, fontName, boxW, boxH) {
+                    var lo = 6, hi = 300;
+                    var best = { size: lo, ascent: lo * 0.8, descent: lo * 0.2, lineHeight: lo };
+                    ctx.textBaseline = 'alphabetic';
+                    while (lo <= hi) {
+                        var mid = Math.floor((lo + hi) / 2);
+                        ctx.font = mid + 'px "' + fontName + '", sans-serif';
+                        var maxW = 0, maxAscent = 0, maxDescent = 0;
+                        for (var ci = 0; ci < chars.length; ci++) {
+                            var metrics = ctx.measureText(chars[ci]);
+                            maxW = Math.max(maxW, metrics.width);
+                            maxAscent = Math.max(maxAscent, metrics.actualBoundingBoxAscent || mid * 0.8);
+                            maxDescent = Math.max(maxDescent, metrics.actualBoundingBoxDescent || mid * 0.2);
+                        }
+                        var lineHeight = maxAscent + maxDescent;
+                        var totalH = lineHeight * chars.length;
+                        if (maxW <= boxW && totalH <= boxH) {
+                            best = { size: mid, ascent: maxAscent, descent: maxDescent, lineHeight: lineHeight };
                             lo = mid + 1;
                         } else {
                             hi = mid - 1;
@@ -3245,24 +3435,27 @@ def index():
                         boxX = Math.max(minX, Math.min(maxX, boxX));
                         boxY = Math.max(minY, Math.min(maxY, boxY));
 
-                        var fit = fitTextSize(lineText, fontName, scrolling ? Infinity : boxW, boxH);
-                        var fitSize = fit.size;
-                        ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
-                        var textW = ctx.measureText(lineText).width;
-                        var textH = fit.ascent + fit.descent;
-                        var drawX = boxX + Math.max(0, (boxW - textW) / 2);
-                        // drawTop is the visual top of the text; fillText itself (baseline
-                        // 'alphabetic') needs the baseline Y, which sits fit.ascent below that --
-                        // using the font's generic 'top' metric here (as a plain top-baseline
-                        // fillText would) is what let decorative fonts render above where we
-                        // thought the top was, since actualBoundingBoxAscent can exceed it.
-                        var drawTop = boxY + Math.max(0, (boxH - textH) / 2);
-                        var drawBaseline = drawTop + fit.ascent;
+                        var orientation = scrolling ? 'horizontal' : getLineOrientation(i);
 
                         lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
                         drawBoxDecoration(boxX, boxY, boxW, boxH, i);
 
                         if (scrolling) {
+                            var fit = fitTextSize(lineText, fontName, Infinity, boxH);
+                            var fitSize = fit.size;
+                            ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
+                            var textW = ctx.measureText(lineText).width;
+                            var textH = fit.ascent + fit.descent;
+                            var drawX = boxX + Math.max(0, (boxW - textW) / 2);
+                            // drawTop is the visual top of the text; fillText itself (baseline
+                            // 'alphabetic') needs the baseline Y, which sits fit.ascent below
+                            // that -- using the font's generic 'top' metric here (as a plain
+                            // top-baseline fillText would) is what let decorative fonts render
+                            // above where we thought the top was, since actualBoundingBoxAscent
+                            // can exceed it.
+                            var drawTop = boxY + Math.max(0, (boxH - textH) / 2);
+                            var drawBaseline = drawTop + fit.ascent;
+
                             var arrowFont = 'bold ' + Math.max(8, Math.round(fitSize * 0.4)) + 'px sans-serif';
                             var arrowTxt = {L2R:'→', R2L:'←', T2B:'↓', B2T:'↑'}[movement];
                             ctx.save();
@@ -3293,10 +3486,47 @@ def index():
                                 ctx.fillText(lineText, drawX, drawBaseline);
                                 ctx.restore();
                             }
-                        } else {
-                            ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'alphabetic';
+                        } else if (orientation === 'vertical_rotated') {
+                            // Fit as if the box dimensions were swapped -- after a 90-degree
+                            // rotation, the text's own (unrotated) width becomes vertical
+                            // extent (must fit boxH) and its height becomes horizontal extent
+                            // (must fit boxW).
+                            var fitR = fitTextSize(lineText, fontName, boxH, boxW);
+                            ctx.font = fitR.size + 'px "' + fontName + '", sans-serif';
+                            var rawW = ctx.measureText(lineText).width;
+                            ctx.save();
+                            ctx.translate(boxX + boxW / 2, boxY + boxH / 2);
+                            ctx.rotate(-Math.PI / 2);
+                            ctx.textBaseline = 'alphabetic';
                             ctx.fillStyle = getLineColor(i);
-                            ctx.fillText(lineText, drawX, drawBaseline);
+                            // Centers the (unrotated) text on the box's center: horizontally
+                            // by its own width, vertically by the midpoint of its ascent/descent.
+                            ctx.fillText(lineText, -rawW / 2, (fitR.ascent - fitR.descent) / 2);
+                            ctx.restore();
+                        } else if (orientation === 'vertical_stacked') {
+                            var chars = lineText.split('');
+                            var fitS = fitStackedTextSize(chars, fontName, boxW, boxH);
+                            ctx.font = fitS.size + 'px "' + fontName + '", sans-serif';
+                            ctx.textBaseline = 'alphabetic';
+                            ctx.fillStyle = getLineColor(i);
+                            var totalH = fitS.lineHeight * chars.length;
+                            var stackTop = boxY + Math.max(0, (boxH - totalH) / 2);
+                            for (var ci = 0; ci < chars.length; ci++) {
+                                var cw = ctx.measureText(chars[ci]).width;
+                                var cx = boxX + Math.max(0, (boxW - cw) / 2);
+                                var cy = stackTop + ci * fitS.lineHeight + fitS.ascent;
+                                ctx.fillText(chars[ci], cx, cy);
+                            }
+                        } else {
+                            var fitH = fitTextSize(lineText, fontName, boxW, boxH);
+                            ctx.font = fitH.size + 'px "' + fontName + '", sans-serif';
+                            var textWH = ctx.measureText(lineText).width;
+                            var textHH = fitH.ascent + fitH.descent;
+                            var drawXH = boxX + Math.max(0, (boxW - textWH) / 2);
+                            var drawBaselineH = boxY + Math.max(0, (boxH - textHH) / 2) + fitH.ascent;
+                            ctx.textBaseline = 'alphabetic';
+                            ctx.fillStyle = getLineColor(i);
+                            ctx.fillText(lineText, drawXH, drawBaselineH);
                         }
 
                         if (i === selectedLine) {
@@ -3765,7 +3995,7 @@ def index():
             setupAutoSave();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
-            for (var _li = 0; _li < 4; _li++) updateLineSpeedRowVisibility(_li);
+            for (var _li = 0; _li < 4; _li++) { updateLineSpeedRowVisibility(_li); updateLineOrientationRowVisibility(_li); }
             initValignButtons();
             (function() {
                 var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
@@ -4006,6 +4236,7 @@ var _saveTimer = null;
                     }),
                     line_movements: window._lineMovements || ['Center','Center','Center','Center'],
                     line_speeds: window._lineSpeeds || [5,5,5,5],
+                    line_orientations: window._lineOrientations || ['horizontal','horizontal','horizontal','horizontal'],
                     custom_colors: window._customColors || [],
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
