@@ -59,6 +59,11 @@ WHITELIST_FILE = os.path.join(PLUGIN_DIR, "whitelist.txt")
 WHITELIST_REMOVED_FILE = os.path.join(PLUGIN_DIR, "whitelist_removed.txt")
 WHITELIST_ADDED_FILE = os.path.join(PLUGIN_DIR, "whitelist_added.txt")
 
+# SMS auto-responses are functional on the beta branch but not yet verified on
+# stable. Flip to True once beta testing confirms the feature is solid, or drop
+# this whole flag/gating when merging that verification back into stable.
+SMS_AUTO_RESPONSES_ENABLED = False
+
 # Create directory structure before logging setup
 os.makedirs(os.path.join(PLUGIN_DATA_DIR, "logs", "messages"), exist_ok=True)
 
@@ -1111,6 +1116,9 @@ def is_on_whitelist(name):
 
 def send_sms_response(to_phone, message_type):
     """Send an SMS response to the user based on message type"""
+    if not SMS_AUTO_RESPONSES_ENABLED:
+        return False
+
     if not config.get(f'sms_response_{message_type}', False):
         return False
     
@@ -2146,7 +2154,7 @@ def index():
         <!-- Tab navigation -->
         <div class="tabs" style="display:flex; align-items:center; gap:6px;">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
-            <button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>
+            {% if sms_responses_enabled %}<button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>{% endif %}
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
             <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
@@ -2629,6 +2637,7 @@ def index():
         </div>
 
         <!-- SMS Responses Tab -->
+        {% if sms_responses_enabled %}
         <div id="tab-sms" class="tab-content">
             <div class="section" style="border: 2px solid #2196F3; margin-top: 20px;">
                 <h2>📱 SMS Auto-Response Settings</h2>
@@ -2744,6 +2753,7 @@ def index():
 
             </div>
         </div>
+        {% endif %}
 
         <!-- Testing Tab -->
         <div id="tab-testing" class="tab-content">
@@ -2769,6 +2779,7 @@ def index():
                 </div>
             </div>
 
+            {% if sms_responses_enabled %}
             <div class="section" style="border: 2px solid #FF9800;">
                 <h2>🧪 SMS Response Testing</h2>
                 <p style="color: #FF9800; font-size: 14px;">
@@ -2792,6 +2803,7 @@ def index():
 
                 <div id="test_sms_result" style="margin-top: 10px;"></div>
             </div>
+            {% endif %}
 
         </div>
 
@@ -3732,6 +3744,7 @@ var _saveTimer = null;
                     line_movements: window._lineMovements || ['Center','Center','Center','Center'],
                     line_speeds: window._lineSpeeds || [5,5,5,5],
                     custom_colors: window._customColors || [],
+                    {% if sms_responses_enabled %}
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
@@ -3747,7 +3760,8 @@ var _saveTimer = null;
                     response_invalid_format: document.getElementById('response_invalid_format').value,
                     response_not_whitelisted: document.getElementById('response_not_whitelisted').value,
                     response_blocked: document.getElementById('response_blocked').value,
-                    response_show_not_live: document.getElementById('response_show_not_live').value
+                    response_show_not_live: document.getElementById('response_show_not_live').value,
+                    {% endif %}
                 };
 
                 fetch('/api/config', {
@@ -4005,7 +4019,7 @@ var _saveTimer = null;
     </html>
     """
 
-    return render_template_string(html, config=config)
+    return render_template_string(html, config=config, sms_responses_enabled=SMS_AUTO_RESPONSES_ENABLED)
 
 @app.route('/api/config', methods=['POST'])
 def update_config():
@@ -4471,6 +4485,9 @@ def test_message_submission():
 @app.route('/api/test/sms', methods=['POST'])
 def test_sms_response():
     """Test sending an SMS response — bypasses enabled/disabled toggles so any response can be previewed"""
+    if not SMS_AUTO_RESPONSES_ENABLED:
+        return jsonify({"success": False, "error": "SMS auto-responses are disabled on this branch pending beta testing"})
+
     try:
         data = request.json
         phone = data.get('phone', '').strip()
