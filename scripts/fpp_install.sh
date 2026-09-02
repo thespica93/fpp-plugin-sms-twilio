@@ -58,6 +58,13 @@ if ! command -v fc-cache &> /dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y fontconfig >> "$LOG" 2>&1
 fi
 mkdir -p /usr/local/share/fonts
+# Clear previous runs' copies first so /usr/local/share/fonts always exactly
+# mirrors the current repo — otherwise a renamed/removed bundled font (e.g.
+# "Santa Christmas" -> "Present Snow") leaves its old file behind forever,
+# and _enumerate_fonts() then miscategorizes it as a "System" font since its
+# name no longer matches anything under fonts/<category>/. This directory is
+# exclusively managed by this plugin, so it's safe to clear on every install.
+find /usr/local/share/fonts -maxdepth 1 -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.pfb' \) -delete 2>> "$LOG"
 find "$PLUGIN_DIR/fonts" -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.pfb' \) \
     -exec cp {} /usr/local/share/fonts/ \; 2>> "$LOG"
 fc-cache -f /usr/local/share/fonts >> "$LOG" 2>&1
