@@ -3196,9 +3196,17 @@ def index():
                     return -1;
                 }
 
+                // canvas.width/height are the fixed bitmap resolution (see canvas.width = 640
+                // above); the element itself is CSS-stretched to width:100% of its container.
+                // Every hit-test and drawn coordinate downstream operates in bitmap space, so
+                // clientX/Y must be scaled from CSS pixels into that space here -- otherwise
+                // mouse position drifts further from the drawn handles the wider the container
+                // is than 640px (which is any real page layout), making them unreliable to grab.
                 function canvasXY(e) {
                     var rect = canvas.getBoundingClientRect();
-                    return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
+                    var scaleX = canvas.width / rect.width;
+                    var scaleY = canvas.height / rect.height;
+                    return { cx: (e.clientX - rect.left) * scaleX, cy: (e.clientY - rect.top) * scaleY };
                 }
 
                 // Boxes are always freely movable + resizable in both dimensions now,
