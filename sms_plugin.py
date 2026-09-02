@@ -2884,10 +2884,12 @@ def index():
 
             // Per-line Font select
             function onLineFontChange(i) {
-                var name = typeof getLineFont === 'function' ? getLineFont(i) : null;
-                console.log('[fonts] line ' + i + ' changed to "' + name + '"');
+                // Can't call getLineFont(i) here — it's local to initCanvasPreview()'s
+                // closure, not visible in this scope. Read the select directly instead,
+                // same as onLineMovementChange/onLineSpeedChange do for their inputs.
+                var el = document.getElementById('line_' + (i + 1) + '_font');
+                var name = el ? el.value : null;
                 ensureFontLoaded(name).then(function() {
-                    console.log('[fonts] redrawing preview after load of "' + name + '"');
                     if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 });
                 if (typeof saveConfig === 'function') saveConfig();
@@ -3044,7 +3046,6 @@ def index():
                         var arrowFont  = 'bold ' + Math.max(8, Math.round(scaledFont * 0.4)) + 'px sans-serif';
                         var thisStackY = cumulativeY;
                         ctx.font = scaledFont + 'px "' + fontName + '", sans-serif';
-                        console.log('[fonts] line ' + i + ' requested "' + fontName + '", ctx.font is now:', ctx.font);
                         var lw2 = ctx.measureText(lineText).width;
                         var lh2 = scaledFont;
                         var drawX, drawY;
@@ -3519,13 +3520,11 @@ def index():
             window._loadedFonts = window._loadedFonts || {};
             function ensureFontLoaded(name) {
                 if (!name || window._loadedFonts[name]) return window._loadedFonts[name] || Promise.resolve();
-                console.log('[fonts] fetching "' + name + '"');
                 var ff = new FontFace(name, 'url("/api/fonts/file/' + encodeURIComponent(name) + '")');
                 var p = ff.load().then(function(loaded) {
                     document.fonts.add(loaded);
-                    console.log('[fonts] loaded "' + name + '", document.fonts.check =', document.fonts.check('16px "' + name + '"'));
                 }).catch(function(err) {
-                    console.error('[fonts] FAILED to load "' + name + '":', err);
+                    console.warn('Font preview load failed for "' + name + '":', err);
                 });
                 window._loadedFonts[name] = p;
                 return p;
