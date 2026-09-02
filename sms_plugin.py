@@ -2655,7 +2655,7 @@ def index():
                         <div id="canvas_section">
                             <label>Position Preview:</label>
                             <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Click a line to select it, then drag inside its box to move it, or drag an edge/corner to resize. Text auto-sizes to fill the box — the box is the MAX size text can be.</p>
-                            <p class="help-text" style="margin:-4px 0 8px;">↔️ For scrolling text (Left/Right/Top/Bottom movement), the box is also where the text is allowed to show — it enters and exits at the box's own edges, not the display's. Drag the box past the display's edge (into the shaded margin) to make text start or end off-page instead of at the visible boundary.</p>
+                            <p class="help-text" style="margin:-4px 0 8px;">↔️ For scrolling text (Left/Right/Top/Bottom movement), the box is also where the text is allowed to show — it enters and exits at the box's own edges, not the display's, and always starts fully off-page before scrolling in.</p>
                             <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
                                 <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
@@ -3094,7 +3094,16 @@ def index():
                 var el = document.getElementById('line_' + (i + 1) + '_movement');
                 if (!el) return;
                 window._lineMovements = window._lineMovements || ['Center','Center','Center','Center'];
-                window._lineMovements[i] = el.value;
+                var newMovement = el.value;
+                window._lineMovements[i] = newMovement;
+                // T2B/B2T reads much better with the text itself rotated to match its
+                // vertical travel (a single horizontal line moving straight up/down is an
+                // unusual look) -- default to that unless the line already has an explicit
+                // orientation, so switching to T2B/B2T "just works" without an extra step.
+                if ((newMovement === 'T2B' || newMovement === 'B2T') && getLineOrientation(i) === 'horizontal') {
+                    var orientSel = document.getElementById('line_' + (i + 1) + '_orientation');
+                    if (orientSel) { orientSel.value = 'vertical_rotated'; onLineOrientationChange(i); }
+                }
                 updateLineSpeedRowVisibility(i);
                 updateLineOrientationRowVisibility(i);
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
@@ -3209,24 +3218,12 @@ def index():
                 var dragging     = false;
                 var dragOffX     = 0, dragOffY = 0;
 
-                // Off-page gutter: a scrolling line's box may extend past the model's own
-                // edge (in its scroll axis only) so text can enter/exit off-page instead of
-                // popping in/out at the visible edge. Sized as a fraction of the model's own
-                // W/H so it scales sensibly with model size; drawn as a shaded margin around
-                // the model area in renderCanvasPreview so the off-page portion of a box stays
-                // visible and grabbable rather than being invisible dead space. Only actually
-                // reserved on-canvas when at least one line scrolls (see renderCanvasPreview) --
-                // otherwise the model fills the whole canvas as before.
-                // modelScaleX/Y (model units -> canvas px) and gutterOriginX/Y + modelPxW/H
-                // (canvas-px offset/size of the model's true visible area) are recomputed by
+                // modelScaleX/Y (model units -> canvas px) are recomputed by
                 // renderCanvasPreview() every render and read by the mouse handlers below to
-                // convert between canvas-px and model-unit coordinates. X/Y are independent
-                // fractions (most models are much wider than tall, so an equal-fraction gutter
-                // reads as disproportionately wide on the sides); renderCanvasPreview adjusts
-                // canvas.height each render so modelScaleX/Y stay equal despite that (otherwise
-                // the model itself would be drawn non-uniformly stretched).
-                var GUTTER_FRAC_X = 0.10;
-                var GUTTER_FRAC_Y = 0.15;
+                // convert between canvas-px and model-unit coordinates. gutterOriginX/Y and
+                // modelPxW/H are always 0,0 and canvas.width,canvas.height respectively (the
+                // model fills the whole canvas) -- kept as named values since several call
+                // sites read them, rather than inlining canvas.width/height everywhere.
                 var modelScaleX = 1, modelScaleY = 1;
                 var gutterOriginX = 0, gutterOriginY = 0;
                 var modelPxW = 0, modelPxH = 0;
@@ -3370,65 +3367,24 @@ def index():
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
 
-                    // The gutter only takes up canvas space on an axis that could actually use
-                    // it -- a purely left/right-scrolling line has no business reserving a
-                    // vertical margin (that would just shrink modelScaleY, and with it every
-                    // line's auto-fit font height, for no reason), and vice versa. So X and Y
-                    // are gated independently by whether any line actually scrolls that axis.
-                    var hasScrollingLineX = [0, 1, 2, 3].some(function(li) {
-                        var m = getLineMovement(li);
-                        return m === 'L2R' || m === 'R2L';
-                    });
-                    var hasScrollingLineY = [0, 1, 2, 3].some(function(li) {
-                        var m = getLineMovement(li);
-                        return m === 'T2B' || m === 'B2T';
-                    });
-                    var fracX = hasScrollingLineX ? GUTTER_FRAC_X : 0;
-                    var fracY = hasScrollingLineY ? GUTTER_FRAC_Y : 0;
+                    // The model fills the whole canvas -- no off-page margin. Scrolling text
+                    // already starts fully hidden on its own (see the scroll-position
+                    // simulation below: it starts at loop_start, past the box's own clip
+                    // edge, before ever reaching the visible model area) without needing the
+                    // box itself to extend past the model edge.
+                    modelScaleX = canvas.width / mw;
+                    modelScaleY = canvas.height / mh;
+                    gutterOriginX = 0;
+                    gutterOriginY = 0;
+                    modelPxW = canvas.width;
+                    modelPxH = canvas.height;
 
-                    // The model itself always renders at the same fixed scale (640px wide
-                    // equivalent, matching the canvas.width=640 convention used elsewhere) --
-                    // gutters GROW the canvas outward to make room for themselves rather than
-                    // shrinking that base scale to fit within a fixed canvas size. Shrinking
-                    // the scale instead would shrink the model's own on-canvas size (and with
-                    // it every line's auto-fit font height) just from turning scrolling on,
-                    // even on an axis the gutter isn't even needed for.
-                    var newCanvasWidth  = Math.round(640 * (1 + 2 * fracX));
-                    var newCanvasHeight = Math.round(640 * (mh / mw) * (1 + 2 * fracY));
-                    if (canvas.width  !== newCanvasWidth)  canvas.width  = newCanvasWidth;
-                    if (canvas.height !== newCanvasHeight) canvas.height = newCanvasHeight;
-
-                    // modelScaleX/Y convert model units -> canvas px across the FULL canvas
-                    // (model + gutter on both sides); gutterOriginX/Y + modelPxW/H then locate
-                    // the model's true visible area within that canvas. Recomputed every render
-                    // since these depend on the current model size (and whether any line scrolls).
-                    modelScaleX = canvas.width  / (mw * (1 + 2 * fracX));
-                    modelScaleY = canvas.height / (mh * (1 + 2 * fracY));
-                    gutterOriginX = mw * fracX * modelScaleX;
-                    gutterOriginY = mh * fracY * modelScaleY;
-                    modelPxW = mw * modelScaleX;
-                    modelPxH = mh * modelScaleY;
-
-                    // Gutter background (off-page space), then the model's true visible area
-                    // on top of it, outlined so the boundary between on-/off-page is clear.
-                    if (fracX > 0 || fracY > 0) {
-                        ctx.fillStyle = '#2a2a2a';
-                        ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    }
                     ctx.fillStyle = '#000';
-                    ctx.fillRect(gutterOriginX, gutterOriginY, modelPxW, modelPxH);
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
                     if (window._fseqBgImage) {
                         ctx.imageSmoothingEnabled = false;
-                        ctx.drawImage(window._fseqBgImage, gutterOriginX, gutterOriginY, modelPxW, modelPxH);
+                        ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
                         ctx.imageSmoothingEnabled = true;
-                    }
-                    if (fracX > 0 || fracY > 0) {
-                        ctx.save();
-                        ctx.strokeStyle = 'rgba(79,195,247,0.7)';
-                        ctx.lineWidth = 1;
-                        ctx.strokeRect(Math.round(gutterOriginX) + 0.5, Math.round(gutterOriginY) + 0.5,
-                                       Math.round(modelPxW) - 1, Math.round(modelPxH) - 1);
-                        ctx.restore();
                     }
 
                     var posLabel = '';
@@ -3457,20 +3413,15 @@ def index():
                         var fontName = getLineFont(i);
 
                         var boxW = b.w * modelScaleX, boxH = b.h * modelScaleY;
-                        var boxX = b.x === -1 ? gutterOriginX + (modelPxW - boxW) / 2 : gutterOriginX + b.x * modelScaleX;
-                        var boxY = b.y === -1 ? cumulativeY : gutterOriginY + b.y * modelScaleY;
+                        var boxX = b.x === -1 ? (modelPxW - boxW) / 2 : b.x * modelScaleX;
+                        var boxY = b.y === -1 ? cumulativeY : b.y * modelScaleY;
+                        boxX = Math.max(0, Math.min(canvas.width - boxW, boxX));
+                        boxY = Math.max(0, Math.min(canvas.height - boxH, boxY));
 
-                        // A scrolling line's box may extend into the gutter along its own
-                        // scroll axis (so its text can enter/exit off-page); the cross axis,
-                        // and any non-scrolling box, stays confined to the visible model area.
-                        var minX = scrollX ? 0 : gutterOriginX;
-                        var maxX = scrollX ? canvas.width - boxW : gutterOriginX + modelPxW - boxW;
-                        var minY = scrollY ? 0 : gutterOriginY;
-                        var maxY = scrollY ? canvas.height - boxH : gutterOriginY + modelPxH - boxH;
-                        boxX = Math.max(minX, Math.min(maxX, boxX));
-                        boxY = Math.max(minY, Math.min(maxY, boxY));
-
-                        var orientation = scrolling ? 'horizontal' : getLineOrientation(i);
+                        // scrollY-gated below rather than forced here -- L2R/R2L stay
+                        // horizontal regardless of what's stored (the Style dropdown is
+                        // hidden for them), and T2B/B2T can be 'vertical_rotated'.
+                        var orientation = getLineOrientation(i);
 
                         lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
                         drawBoxDecoration(boxX, boxY, boxW, boxH, i);
@@ -3717,8 +3668,8 @@ def index():
                         var b = window._lineBoxes[selectedLine];
                         // Resolve any -1 (auto) position to concrete model coords from the
                         // last render — resizing needs a real edge to anchor against.
-                        var curX = b.x === -1 ? Math.round((r.x - gutterOriginX) / modelScaleX) : b.x;
-                        var curY = b.y === -1 ? Math.round((r.y - gutterOriginY) / modelScaleY) : b.y;
+                        var curX = b.x === -1 ? Math.round(r.x / modelScaleX) : b.x;
+                        var curY = b.y === -1 ? Math.round(r.y / modelScaleY) : b.y;
                         b.x = curX; b.y = curY;
                         resizing = true;
                         resizeHandle = handle;
@@ -3745,17 +3696,11 @@ def index():
                     var MIN_SIZE = 10;
                     if (resizing && selectedLine >= 0) {
                         var b = window._lineBoxes[selectedLine];
-                        var movementR = getLineMovement(selectedLine);
-                        var scrollXR = (movementR === 'L2R' || movementR === 'R2L');
-                        var scrollYR = (movementR === 'T2B' || movementR === 'B2T');
-                        // Clamp the raw mouse position in canvas-px first -- to the full canvas
-                        // (incl. gutter) on the scroll axis, or to the model's true visible area
-                        // otherwise -- then convert once to model units.
-                        var loPxX = scrollXR ? 0 : gutterOriginX, hiPxX = scrollXR ? canvas.width  : gutterOriginX + modelPxW;
-                        var loPxY = scrollYR ? 0 : gutterOriginY, hiPxY = scrollYR ? canvas.height : gutterOriginY + modelPxH;
-                        var cxClamped = Math.max(loPxX, Math.min(hiPxX, c.cx));
-                        var cyClamped = Math.max(loPxY, Math.min(hiPxY, c.cy));
-                        var mx = (cxClamped - gutterOriginX) / modelScaleX, my = (cyClamped - gutterOriginY) / modelScaleY;
+                        // Clamp the raw mouse position in canvas-px to the model area first,
+                        // then convert once to model units.
+                        var cxClamped = Math.max(0, Math.min(canvas.width,  c.cx));
+                        var cyClamped = Math.max(0, Math.min(canvas.height, c.cy));
+                        var mx = cxClamped / modelScaleX, my = cyClamped / modelScaleY;
                         var hasW = resizeHandle.indexOf('w') >= 0, hasE = resizeHandle.indexOf('e') >= 0;
                         var hasN = resizeHandle.indexOf('n') >= 0, hasS = resizeHandle.indexOf('s') >= 0;
                         var newLeft   = hasW ? Math.min(mx, resizeFixed.right - MIN_SIZE)  : resizeFixed.left;
@@ -3769,15 +3714,10 @@ def index():
                         renderCanvasPreview();
                     } else if (dragging && selectedLine >= 0) {
                         var r2 = lineRects[selectedLine] || {w: 20, h: 20};
-                        var movementD = getLineMovement(selectedLine);
-                        var scrollXD = (movementD === 'L2R' || movementD === 'R2L');
-                        var scrollYD = (movementD === 'T2B' || movementD === 'B2T');
-                        var loPxXD = scrollXD ? 0 : gutterOriginX, hiPxXD = scrollXD ? canvas.width  - r2.w : gutterOriginX + modelPxW - r2.w;
-                        var loPxYD = scrollYD ? 0 : gutterOriginY, hiPxYD = scrollYD ? canvas.height - r2.h : gutterOriginY + modelPxH - r2.h;
-                        var pxX = Math.max(loPxXD, Math.min(hiPxXD, c.cx - dragOffX));
-                        var pxY = Math.max(loPxYD, Math.min(hiPxYD, c.cy - dragOffY));
-                        var newX = Math.round((pxX - gutterOriginX) / modelScaleX);
-                        var newY = Math.round((pxY - gutterOriginY) / modelScaleY);
+                        var pxX = Math.max(0, Math.min(canvas.width  - r2.w, c.cx - dragOffX));
+                        var pxY = Math.max(0, Math.min(canvas.height - r2.h, c.cy - dragOffY));
+                        var newX = Math.round(pxX / modelScaleX);
+                        var newY = Math.round(pxY / modelScaleY);
                         if (newX === -1) newX = -2; // -1 is the auto-position sentinel
                         if (newY === -1) newY = -2;
                         window._lineBoxes[selectedLine].x = newX;
@@ -3818,28 +3758,19 @@ def index():
                     var mw2  = window._canvasModelW || 640;
                     var mh2  = window._canvasModelH || 360;
                     var b    = window._lineBoxes[selectedLine];
-                    var movementK = getLineMovement(selectedLine);
-                    var scrollXK = (movementK === 'L2R' || movementK === 'R2L');
-                    var scrollYK = (movementK === 'T2B' || movementK === 'B2T');
                     var step = e.shiftKey ? 10 : 1;
                     // Resolve auto (-1) positions from the rendered rect so the
                     // first keypress anchors from the visual position, not from 0
                     var curX = b.x, curY = b.y;
                     var r = lineRects[selectedLine];
-                    if (curX === -1 && r) curX = Math.round((r.x - gutterOriginX) / modelScaleX);
-                    if (curY === -1 && r) curY = Math.round((r.y - gutterOriginY) / modelScaleY);
+                    if (curX === -1 && r) curX = Math.round(r.x / modelScaleX);
+                    if (curY === -1 && r) curY = Math.round(r.y / modelScaleY);
                     if (curX === -1) curX = Math.round(mw2 / 2);
                     if (curY === -1) curY = Math.round(mh2 / 2);
-                    // Scroll axis can nudge into the gutter; the cross axis (and any
-                    // non-scrolling box) stays within the model's true visible area.
-                    var loX = scrollXK ? Math.round(-mw2 * GUTTER_FRAC_X) : 0;
-                    var hiX = (scrollXK ? Math.round(mw2 * (1 + GUTTER_FRAC_X)) : mw2) - 1;
-                    var loY = scrollYK ? Math.round(-mh2 * GUTTER_FRAC_Y) : 0;
-                    var hiY = (scrollYK ? Math.round(mh2 * (1 + GUTTER_FRAC_Y)) : mh2) - 1;
-                    if (e.key === 'ArrowLeft')  curX = Math.max(loX, curX - step);
-                    if (e.key === 'ArrowRight') curX = Math.min(hiX, curX + step);
-                    if (e.key === 'ArrowUp')    curY = Math.max(loY, curY - step);
-                    if (e.key === 'ArrowDown')  curY = Math.min(hiY, curY + step);
+                    if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
+                    if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
+                    if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
+                    if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
                     if (curX === -1) curX = -2; // -1 is the auto-position sentinel
                     if (curY === -1) curY = -2;
                     b.x = curX; b.y = curY;
