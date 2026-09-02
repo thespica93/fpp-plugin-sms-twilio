@@ -46,13 +46,13 @@ else
     log_and_show "[1/7] Fonts already installed"
 fi
 
-# Install the plugin's bundled Christmas fonts (see fonts/christmas/NOTICE.md for
-# license/attribution — all "100% Free" per dafont.com). Installed flat into
-# /usr/local/share/fonts so both FPP's own font scanner and the plugin's own
-# get_fpp_fonts() pick them up; fc-cache indexes them for fc-match resolution
-# in sms_plugin.py's _find_font(). Every category subfolder under fonts/
-# (christmas/, halloween/, etc.) is picked up automatically — no script
-# changes needed when a new category is added.
+# Install the plugin's bundled theme fonts (see fonts/<category>/NOTICE.md in
+# each category folder for license/attribution — all "100% Free" per
+# dafont.com). Installed flat into /usr/local/share/fonts so both FPP's own
+# font scanner and the plugin's own get_fpp_fonts() pick them up; fc-cache
+# indexes them for fc-match resolution in sms_plugin.py's _find_font(). Every
+# category subfolder under fonts/ (christmas/, halloween/, etc.) is picked up
+# automatically — no script changes needed when a new category is added.
 log_and_show "[2/7] Installing bundled theme fonts... please wait"
 if ! command -v fc-cache &> /dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y fontconfig >> "$LOG" 2>&1
