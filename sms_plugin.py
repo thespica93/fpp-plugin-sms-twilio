@@ -2516,7 +2516,7 @@ def index():
                         <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
                         <div id="canvas_section">
                             <label>Position Preview:</label>
-                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Drag any line anywhere within the canvas to reposition it</p>
+                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Click a line to select it, then drag inside its box to move it, or drag an edge/corner to resize. Text auto-sizes to fill the box — the box is the MAX size text can be.</p>
                             <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
                                 <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
@@ -3052,10 +3052,26 @@ def index():
                     }
                 }
 
-                // Draws the box outline + (when selected) its resize handle. The box itself
-                // is now the visible/draggable/resizable element, replacing the old
-                // text-hugging highlight rectangle.
+                // Returns the 8 resize handle points (4 corners + 4 edge midpoints) for a
+                // box rect, each tagged with its handle key and CSS resize cursor.
                 var HANDLE_SIZE = 8;
+                function getHandlePoints(r) {
+                    var midX = r.x + r.w / 2, midY = r.y + r.h / 2;
+                    return {
+                        nw: {x: r.x,       y: r.y,       cursor: 'nwse-resize'},
+                        se: {x: r.x + r.w, y: r.y + r.h, cursor: 'nwse-resize'},
+                        ne: {x: r.x + r.w, y: r.y,       cursor: 'nesw-resize'},
+                        sw: {x: r.x,       y: r.y + r.h, cursor: 'nesw-resize'},
+                        n:  {x: midX,      y: r.y,       cursor: 'ns-resize'},
+                        s:  {x: midX,      y: r.y + r.h, cursor: 'ns-resize'},
+                        e:  {x: r.x + r.w, y: midY,      cursor: 'ew-resize'},
+                        w:  {x: r.x,       y: midY,      cursor: 'ew-resize'}
+                    };
+                }
+
+                // Draws the box outline + (when selected) its 8 resize handles. The box
+                // itself is now the visible/draggable/resizable element, replacing the old
+                // text-hugging highlight rectangle.
                 function drawBoxDecoration(boxX, boxY, boxW, boxH, i) {
                     ctx.save();
                     ctx.strokeStyle = (i === selectedLine) ? '#4CAF50' :
@@ -3066,7 +3082,11 @@ def index():
                     if (i === selectedLine) {
                         ctx.save();
                         ctx.fillStyle = '#4CAF50';
-                        ctx.fillRect(boxX + boxW - HANDLE_SIZE, boxY + boxH - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
+                        var pts = getHandlePoints({x: boxX, y: boxY, w: boxW, h: boxH});
+                        for (var key in pts) {
+                            var p = pts[key];
+                            ctx.fillRect(p.x - HANDLE_SIZE / 2, p.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+                        }
                         ctx.restore();
                     }
                 }
@@ -3182,25 +3202,45 @@ def index():
                 }
 
                 // Boxes are always freely movable + resizable in both dimensions now,
-                // regardless of movement type — resize handle lives at the bottom-right
-                // corner of the selected line's box.
-                function hitTestResizeHandle(cx, cy) {
-                    if (selectedLine < 0) return false;
+                // regardless of movement type. Any of the 8 handles (4 corners + 4 edges)
+                // on the selected line's box can be grabbed — corners resize both width and
+                // height together, edges resize just one dimension, like a normal image
+                // resize in Word/PowerPoint.
+                function hitTestHandle(cx, cy) {
+                    if (selectedLine < 0) return null;
                     var r = lineRects[selectedLine];
-                    if (!r) return false;
-                    var hx = r.x + r.w, hy = r.y + r.h;
-                    var PAD = 6;
-                    return cx >= hx - HANDLE_SIZE - PAD && cx <= hx + PAD &&
-                           cy >= hy - HANDLE_SIZE - PAD && cy <= hy + PAD;
+                    if (!r) return null;
+                    var pts = getHandlePoints(r);
+                    var PAD = 9;
+                    // Corners first so they win over edges on small boxes where zones overlap
+                    var order = ['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'];
+                    for (var idx = 0; idx < order.length; idx++) {
+                        var key = order[idx], p = pts[key];
+                        if (Math.abs(cx - p.x) <= PAD && Math.abs(cy - p.y) <= PAD) return key;
+                    }
+                    return null;
                 }
 
                 var resizing = false;
+                var resizeHandle = null;
+                var resizeFixed = null; // {left, right, top, bottom} in MODEL space, captured at drag start
 
                 canvas.addEventListener('mousedown', function(e) {
                     var c = canvasXY(e);
-                    if (selectedLine >= 0 && hitTestResizeHandle(c.cx, c.cy)) {
+                    var handle = hitTestHandle(c.cx, c.cy);
+                    if (handle) {
+                        var mw2 = window._canvasModelW || 640, mh2 = window._canvasModelH || 360;
+                        var r = lineRects[selectedLine];
+                        var b = window._lineBoxes[selectedLine];
+                        // Resolve any -1 (auto) position to concrete model coords from the
+                        // last render — resizing needs a real edge to anchor against.
+                        var curX = b.x < 0 ? Math.round(r.x * mw2 / canvas.width)  : b.x;
+                        var curY = b.y < 0 ? Math.round(r.y * mh2 / canvas.height) : b.y;
+                        b.x = curX; b.y = curY;
                         resizing = true;
-                        canvas.style.cursor = 'nwse-resize';
+                        resizeHandle = handle;
+                        resizeFixed = {left: curX, right: curX + b.w, top: curY, bottom: curY + b.h};
+                        canvas.style.cursor = getHandlePoints(r)[handle].cursor;
                         e.preventDefault();
                         return;
                     }
@@ -3208,9 +3248,9 @@ def index():
                     selectedLine = hit;
                     if (hit >= 0) {
                         dragging = true;
-                        var r = lineRects[hit];
-                        dragOffX = c.cx - r.x;
-                        dragOffY = c.cy - r.y;
+                        var r2 = lineRects[hit];
+                        dragOffX = c.cx - r2.x;
+                        dragOffY = c.cy - r2.y;
                         canvas.style.cursor = 'grabbing';
                     }
                     renderCanvasPreview();
@@ -3221,13 +3261,20 @@ def index():
                     var mw2 = window._canvasModelW || 640;
                     var mh2 = window._canvasModelH || 360;
                     var c   = canvasXY(e);
+                    var MIN_SIZE = 10;
                     if (resizing && selectedLine >= 0) {
-                        var r = lineRects[selectedLine];
                         var b = window._lineBoxes[selectedLine];
-                        var newWpx = Math.max(10, c.cx - r.x);
-                        var newHpx = Math.max(10, c.cy - r.y);
-                        b.w = Math.max(5, Math.round(newWpx * mw2 / canvas.width));
-                        b.h = Math.max(5, Math.round(newHpx * mh2 / canvas.height));
+                        var mx = c.cx * mw2 / canvas.width, my = c.cy * mh2 / canvas.height;
+                        var hasW = resizeHandle.indexOf('w') >= 0, hasE = resizeHandle.indexOf('e') >= 0;
+                        var hasN = resizeHandle.indexOf('n') >= 0, hasS = resizeHandle.indexOf('s') >= 0;
+                        var newLeft   = hasW ? Math.max(0, Math.min(mx, resizeFixed.right - MIN_SIZE)) : resizeFixed.left;
+                        var newRight  = hasE ? Math.min(mw2, Math.max(mx, resizeFixed.left + MIN_SIZE)) : resizeFixed.right;
+                        var newTop    = hasN ? Math.max(0, Math.min(my, resizeFixed.bottom - MIN_SIZE)) : resizeFixed.top;
+                        var newBottom = hasS ? Math.min(mh2, Math.max(my, resizeFixed.top + MIN_SIZE)) : resizeFixed.bottom;
+                        b.x = Math.round(newLeft);
+                        b.w = Math.round(newRight - newLeft);
+                        b.y = Math.round(newTop);
+                        b.h = Math.round(newBottom - newTop);
                         renderCanvasPreview();
                     } else if (dragging && selectedLine >= 0) {
                         var r2 = lineRects[selectedLine] || {w: 20, h: 20};
@@ -3237,17 +3284,21 @@ def index():
                         window._lineBoxes[selectedLine].y = newY;
                         renderCanvasPreview();
                     } else if (!dragging && !resizing) {
-                        var overHandle = selectedLine >= 0 && hitTestResizeHandle(c.cx, c.cy);
+                        var overHandle = hitTestHandle(c.cx, c.cy);
                         var prev = hoveredLine;
                         hoveredLine = hitTestLine(c.cx, c.cy);
-                        canvas.style.cursor = overHandle ? 'nwse-resize' : (hoveredLine >= 0 ? 'grab' : 'default');
+                        if (overHandle) {
+                            canvas.style.cursor = getHandlePoints(lineRects[selectedLine])[overHandle].cursor;
+                        } else {
+                            canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default';
+                        }
                         if (hoveredLine !== prev) renderCanvasPreview();
                     }
                 });
 
                 window.addEventListener('mouseup', function() {
                     if (dragging || resizing) {
-                        dragging = false; resizing = false;
+                        dragging = false; resizing = false; resizeHandle = null; resizeFixed = null;
                         canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default';
                         saveConfig();
                     }
