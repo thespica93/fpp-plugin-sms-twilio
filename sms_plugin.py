@@ -1,20 +1,9 @@
 #!/usr/bin/env python3
 """
 FPP SMS Plugin v2.5 - Twilio Integration
-Features:
-- Message queueing
-- Display duration controls how long each message shows
-- Shows queue status: "Displaying Now", "Queue 1", "Queue 2"
-- Profanity filtering with whole-word matching
-- Optional whitelist for approved names
-- Name validation (1 or 2 words, hyphens OK)
-- FPP playlist switching and text overlay
-- UI dropdowns to select playlists, models, and fonts from FPP
-- Multi-line message templates with proper case conversion
-- OPTIMIZED: Cached list loading for blacklist, whitelist, and blocked phones
 """
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response
 import logging
 import json
 import requests
@@ -26,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from twilio.rest import Client
 from collections import deque
 import os
+import struct
+import io
 
 # PIL/Pillow for pixel-accurate text rendering (optional — falls back to FPP text API if unavailable)
 try:
@@ -33,6 +24,14 @@ try:
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
+
+# zstandard for FSEQ zstd decompression (optional — install via fpp_install.sh)
+try:
+    import zstandard as _zstd_mod
+    ZSTD_AVAILABLE = True
+except ImportError:
+    _zstd_mod = None
+    ZSTD_AVAILABLE = False
 
 _scroll_thread = None   # background PIL scroll animation thread
 
@@ -47,6 +46,10 @@ QUEUE_FILE      = os.path.join(PLUGIN_DATA_DIR, "queue_pending.json")
 MESSAGES_DIR    = os.path.join(PLUGIN_DATA_DIR, "logs", "messages")
 LAST_SID_FILE   = os.path.join(PLUGIN_DATA_DIR, "last_message_sid.txt")
 BLOCKLIST_FILE  = os.path.join(PLUGIN_DATA_DIR, "blocked_phones.json")
+
+FSEQ_SEQUENCE_PATH = '/home/fpp/media/sequences'
+FPP_VIDEOS_PATH    = '/home/fpp/media/videos'
+FPP_IMAGES_PATH    = '/home/fpp/media/images'
 
 # Whitelist/blacklist source files stay in the plugin git repo directory
 BLACKLIST_FILE = os.path.join(PLUGIN_DIR, "blacklist.txt")
@@ -123,7 +126,7 @@ DEFAULT_CONFIG = {
     "poll_interval": 2,
     "display_duration": 10,
     "max_messages_per_phone": 5,
-    "max_message_length": 100,
+    "max_message_length": 30,
     "max_message_age_mins": 5,
     "one_word_only": False,
     "two_words_max": True,
@@ -140,6 +143,12 @@ DEFAULT_CONFIG = {
     "message_template": "Merry Christmas {name}!",  # legacy — migrated to message_lines on load
     "message_lines": ["Merry Christmas", "{name}!", "", ""],
     "line_positions": [{"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}],
+    "line_colors": ["", "", "", ""],
+    "line_movements": ["Center", "Center", "Center", "Center"],
+    "line_speeds": [5, 5, 5, 5],
+    "line_fonts": ["FreeSans", "FreeSans", "FreeSans", "FreeSans"],
+    "line_font_sizes": [48, 48, 48, 48],
+    "custom_colors": [],
     "scroll_speed": 5,
     "overlay_model_width": 0,
     "overlay_model_height": 0,
@@ -203,6 +212,26 @@ def load_config():
             save_config()
             logging.info(f"Migrated message_template '{tmpl}' to message_lines[0]")
 
+        # Migrate the old single global Text Movement/Scroll Speed onto per-line
+        # settings (introduced alongside per-line movement) so upgrading doesn't
+        # reset everyone's lines back to Center/5.
+        if 'line_movements' not in loaded:
+            config['line_movements'] = [config.get('text_position', 'Center')] * 4
+            save_config()
+        if 'line_speeds' not in loaded:
+            config['line_speeds'] = [config.get('scroll_speed', 5)] * 4
+            save_config()
+
+        # Migrate the old single global Font/Font Size onto per-line settings
+        # (introduced alongside per-line font) so upgrading doesn't reset
+        # everyone's lines back to FreeSans/48.
+        if 'line_fonts' not in loaded:
+            config['line_fonts'] = [config.get('text_font', 'FreeSans')] * 4
+            save_config()
+        if 'line_font_sizes' not in loaded:
+            config['line_font_sizes'] = [config.get('text_font_size', 48)] * 4
+            save_config()
+
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
                 config['twilio_account_sid'],
@@ -236,10 +265,28 @@ def _find_font(font_name, font_size):
     """Locate a PIL ImageFont matching font_name. Returns ImageFont or None."""
     if not PIL_AVAILABLE:
         return None
+
+    # Use fontconfig (fc-match) — same resolution FPP uses for its font names
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['fc-match', '--format=%{file}', font_name],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            font_path = result.stdout.strip()
+            if os.path.exists(font_path):
+                return ImageFont.truetype(font_path, font_size)
+    except Exception:
+        pass
+
+    # Fallback: manual search in common FPP font directories
     search_dirs = [
         '/usr/share/fonts/truetype/freefont',
         '/usr/share/fonts/truetype',
+        '/usr/share/fonts/opentype',
         '/usr/share/fonts',
+        '/usr/local/share/fonts',
         '/usr/share/fpp/fonts',
         '/home/fpp/media/fonts',
     ]
@@ -259,24 +306,30 @@ def _find_font(font_name, font_size):
     except Exception:
         return None
 
+def _hex_to_rgb(hex_str):
+    """Parse a '#RRGGBB' (or 'RRGGBB') string into an (r, g, b) tuple."""
+    hex_str = hex_str.lstrip('#')
+    return (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
 
-def render_to_shm(line_items, model_name, width, height, font_name, font_size, color_hex):
-    """Render multiple text lines to FPP shared memory, each at its own (x, y) position.
-    line_items: list of (text, x, y) tuples. x/y < 0 means auto-center that line.
-    Returns True on success, False on failure."""
+
+def render_to_shm(line_items, model_name, width, height):
+    """Render multiple text lines to FPP shared memory, each with its own position, color, and font.
+    line_items: list of (text, x, y, color_hex, font_name, font_size) tuples.
+    x/y < 0 means auto-center that line. Returns True on success, False on failure."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
-        hex_str = color_hex.lstrip('#')
-        color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
-
         img = Image.new('RGB', (width, height), (0, 0, 0))
         draw = ImageDraw.Draw(img)
-        font = _find_font(font_name, font_size)
+        font_cache = {}
 
-        for (text, x, y) in line_items:
+        for (text, x, y, color_hex, font_name, font_size) in line_items:
             if not text:
                 continue
+            font_key = (font_name, font_size)
+            if font_key not in font_cache:
+                font_cache[font_key] = _find_font(font_name, font_size)
+            font = font_cache[font_key]
             if font is not None:
                 bbox = draw.textbbox((0, 0), text, font=font)
                 text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -286,7 +339,7 @@ def render_to_shm(line_items, model_name, width, height, font_name, font_size, c
 
             draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
             draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
-            draw.text((draw_x, draw_y), text, fill=color, font=font)
+            draw.text((draw_x, draw_y), text, fill=_hex_to_rgb(color_hex), font=font)
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         raw = img.tobytes()
@@ -324,34 +377,100 @@ def render_to_shm(line_items, model_name, width, height, font_name, font_size, c
         return False
 
 
-def scroll_via_shm(line_items, model_name, width, height, scroll_dir,
-                   font_name, font_size, color_hex, scroll_speed, duration):
-    """Animate per-line scrolling text in FPP shared memory.
-    All lines share the same scroll position so they move together.
+def render_image_to_shm(image_path, model_name, width, height, line_items=None):
+    """Load an image file, resize to model dimensions, optionally composite text on top,
+    then write to FPP shared memory.  Returns True on success.
+    line_items: optional list of (text, x, y, color_hex, font_name, font_size) to draw over
+    the image (same as render_to_shm). State 2 (Opaque) should be used so the image fully
+    covers the background."""
+    if not PIL_AVAILABLE or width <= 0 or height <= 0:
+        return False
+    try:
+        img = Image.open(image_path).convert('RGB')
+        img = img.resize((width, height), Image.LANCZOS)
+
+        if line_items:
+            draw = ImageDraw.Draw(img)
+            font_cache = {}
+            for (text, x, y, color_hex, font_name, font_size) in line_items:
+                if not text:
+                    continue
+                font_key = (font_name, font_size)
+                if font_key not in font_cache:
+                    font_cache[font_key] = _find_font(font_name, font_size) if font_name else None
+                font = font_cache[font_key]
+                if font is not None:
+                    bbox = draw.textbbox((0, 0), text, font=font)
+                    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                else:
+                    text_w = len(text) * 6
+                    text_h = font_size
+                draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
+                draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
+                draw.text((draw_x, draw_y), text, fill=_hex_to_rgb(color_hex), font=font)
+
+        shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
+        raw = img.tobytes()
+        expected = width * height * 3
+        if len(raw) != expected:
+            logging.error(f"render_image_to_shm: size mismatch ({len(raw)} != {expected})")
+            return False
+
+        def _write():
+            with open(shm_path, 'r+b') as f:
+                f.write(raw)
+
+        try:
+            _write()
+        except PermissionError:
+            import subprocess
+            result = subprocess.run(
+                ['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
+                capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                _write()
+            else:
+                logging.error(f"render_image_to_shm: sudo chmod failed")
+                return False
+
+        logging.info(f"render_image_to_shm: wrote {image_path} → {shm_path}")
+        return True
+    except Exception as e:
+        logging.error(f"render_image_to_shm failed: {e}")
+        return False
+
+
+def animate_lines_via_shm(items, model_name, width, height, duration):
+    """Animate independently-moving/colored/sized text lines together in FPP shared memory.
     Runs in a background thread for `duration` seconds then stops.
 
-    scroll_dir 'L2R'|'R2L': line_items = [(text, y_pos), ...]
-        Each line scrolls horizontally at its own fixed y_pos.
-        y_pos < 0 means auto-center that line vertically.
-    scroll_dir 'T2B'|'B2T': line_items = [(text, x_pos), ...]
-        Each line scrolls vertically at its own fixed x_pos.
-        x_pos < 0 means auto-center that line horizontally.
+    items: [(text, x, y, color_hex, movement, speed, font_name, font_size), ...]
+        movement 'Center': fixed at (x, y). x/y < 0 means auto-center that axis.
+        movement 'L2R'/'R2L': scrolls horizontally across the full width at fixed y
+            (y < 0 means auto-center vertically).
+        movement 'T2B'/'B2T': scrolls vertically across the full height at fixed x
+            (x < 0 means auto-center horizontally).
+        speed: 1-10, independent per line.
     Returns True if the thread started, False on error."""
     global _scroll_thread
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
-        hex_str = color_hex.lstrip('#')
-        color = (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
-        font = _find_font(font_name, font_size)
+        fps = 30
+        font_cache = {}
 
-        # Pre-render each line to its own image strip
+        # Pre-render each line to its own image strip and resolve its fixed axis/motion
         probe = Image.new('RGB', (1, 1))
         pdraw = ImageDraw.Draw(probe)
-        strips = []
-        for (text, fixed_pos) in line_items:
+        prepared = []
+        for (text, x, y, color_hex, movement, speed, font_name, font_size) in items:
             if not text:
                 continue
+            font_key = (font_name, font_size)
+            if font_key not in font_cache:
+                font_cache[font_key] = _find_font(font_name, font_size)
+            font = font_cache[font_key]
             if font:
                 bbox = pdraw.textbbox((0, 0), text, font=font)
                 tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -359,94 +478,76 @@ def scroll_via_shm(line_items, model_name, width, height, scroll_dir,
                 tw, th = len(text) * 6, font_size
             tw, th = max(1, tw), max(1, th)
             strip = Image.new('RGB', (tw, th), (0, 0, 0))
-            ImageDraw.Draw(strip).text((0, 0), text, fill=color, font=font)
-            strips.append((strip, tw, th, fixed_pos))
+            ImageDraw.Draw(strip).text((0, 0), text, fill=_hex_to_rgb(color_hex), font=font)
 
-        if not strips:
+            entry = {'strip': strip, 'tw': tw, 'th': th, 'movement': movement}
+            if movement in ('L2R', 'R2L'):
+                entry['dy'] = max(0, (height - th) // 2) if y < 0 else max(0, min(height - th, y))
+                entry['pos'] = float(width) if movement == 'R2L' else float(-tw)
+                entry['dir'] = -1.0 if movement == 'R2L' else 1.0
+                entry['loop_start'] = float(width) if movement == 'R2L' else float(-tw)
+                entry['loop_end']   = float(-tw) if movement == 'R2L' else float(width)
+                entry['step_px'] = max(1.0, max(10, speed * 20) / fps)
+            elif movement in ('T2B', 'B2T'):
+                entry['dx'] = max(0, (width - tw) // 2) if x < 0 else max(0, min(width - tw, x))
+                entry['pos'] = float(height) if movement == 'B2T' else float(-th)
+                entry['dir'] = -1.0 if movement == 'B2T' else 1.0
+                entry['loop_start'] = float(height) if movement == 'B2T' else float(-th)
+                entry['loop_end']   = float(-th) if movement == 'B2T' else float(height)
+                entry['step_px'] = max(1.0, max(10, speed * 20) / fps)
+            else:  # Center — fixed, doesn't move
+                entry['dx'] = max(0, (width - tw) // 2) if x < 0 else max(0, min(width - tw, x))
+                entry['dy'] = max(0, (height - th) // 2) if y < 0 else max(0, min(height - th, y))
+            prepared.append(entry)
+
+        if not prepared:
             return False
 
-        max_tw = max(s[1] for s in strips)
-        max_th = max(s[2] for s in strips)
-
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
-        fps = 30
-        pixels_per_sec = max(10, scroll_speed * 20)
-        step_px = max(1.0, pixels_per_sec / fps)
-
         if os.path.exists(shm_path) and not os.access(shm_path, os.W_OK):
             import subprocess
             subprocess.run(['sudo', '-n', '/usr/bin/chmod', '666', shm_path],
                            capture_output=True, timeout=5)
 
-        logging.info(f"🎬 scroll_via_shm: {scroll_dir} model={model_name} "
-                     f"size={width}x{height} lines={len(strips)} "
-                     f"speed={pixels_per_sec}px/s duration={duration}s")
+        logging.info(f"🎬 animate_lines_via_shm: model={model_name} size={width}x{height} "
+                     f"lines={len(prepared)} duration={duration}s")
 
         def _animate():
             import time as _time
             start = _time.time()
-
-            if scroll_dir in ('L2R', 'R2L'):
-                # Resolve y positions (auto-center vertically when < 0)
-                resolved = []
-                for (strip, tw, th, yp) in strips:
-                    dy = max(0, (height - th) // 2) if yp < 0 else max(0, min(height - th, yp))
-                    resolved.append((strip, tw, th, dy))
-                pos = float(width) if scroll_dir == 'R2L' else float(-max_tw)
-                direction = -1.0 if scroll_dir == 'R2L' else 1.0
-                loop_start = float(width) if scroll_dir == 'R2L' else float(-max_tw)
-                loop_end   = float(-max_tw) if scroll_dir == 'R2L' else float(width)
-
-                while _time.time() - start < duration:
-                    frame = Image.new('RGB', (width, height), (0, 0, 0))
-                    ix = int(pos)
-                    for (strip, tw, th, dy) in resolved:
-                        src_x = max(0, -ix);  dst_x = max(0, ix)
-                        vis_w = min(tw - src_x, width - dst_x)
+            while _time.time() - start < duration:
+                frame = Image.new('RGB', (width, height), (0, 0, 0))
+                for e in prepared:
+                    if e['movement'] in ('L2R', 'R2L'):
+                        ix = int(e['pos'])
+                        src_x = max(0, -ix); dst_x = max(0, ix)
+                        vis_w = min(e['tw'] - src_x, width - dst_x)
                         if vis_w > 0:
-                            frame.paste(strip.crop((src_x, 0, src_x + vis_w, th)), (dst_x, dy))
-                    try:
-                        with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
-                    except Exception:
-                        pass
-                    pos += direction * step_px
-                    if (direction < 0 and pos < loop_end) or (direction > 0 and pos > loop_end):
-                        pos = loop_start
-                    _time.sleep(1.0 / fps)
-
-            elif scroll_dir in ('T2B', 'B2T'):
-                # Resolve x positions (auto-center horizontally when < 0)
-                resolved = []
-                for (strip, tw, th, xp) in strips:
-                    dx = max(0, (width - tw) // 2) if xp < 0 else max(0, min(width - tw, xp))
-                    resolved.append((strip, tw, th, dx))
-                pos = float(height) if scroll_dir == 'B2T' else float(-max_th)
-                direction = -1.0 if scroll_dir == 'B2T' else 1.0
-                loop_start = float(height) if scroll_dir == 'B2T' else float(-max_th)
-                loop_end   = float(-max_th) if scroll_dir == 'B2T' else float(height)
-
-                while _time.time() - start < duration:
-                    frame = Image.new('RGB', (width, height), (0, 0, 0))
-                    iy = int(pos)
-                    for (strip, tw, th, dx) in resolved:
-                        src_y = max(0, -iy);  dst_y = max(0, iy)
-                        vis_h = min(th - src_y, height - dst_y)
+                            frame.paste(e['strip'].crop((src_x, 0, src_x + vis_w, e['th'])), (dst_x, e['dy']))
+                    elif e['movement'] in ('T2B', 'B2T'):
+                        iy = int(e['pos'])
+                        src_y = max(0, -iy); dst_y = max(0, iy)
+                        vis_h = min(e['th'] - src_y, height - dst_y)
                         if vis_h > 0:
-                            frame.paste(strip.crop((0, src_y, tw, src_y + vis_h)), (dx, dst_y))
-                    try:
-                        with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
-                    except Exception:
-                        pass
-                    pos += direction * step_px
-                    if (direction < 0 and pos < loop_end) or (direction > 0 and pos > loop_end):
-                        pos = loop_start
-                    _time.sleep(1.0 / fps)
+                            frame.paste(e['strip'].crop((0, src_y, e['tw'], src_y + vis_h)), (e['dx'], dst_y))
+                    else:
+                        frame.paste(e['strip'], (e['dx'], e['dy']))
+                try:
+                    with open(shm_path, 'r+b') as f: f.write(frame.tobytes())
+                except Exception:
+                    pass
+                for e in prepared:
+                    if e['movement'] in ('L2R', 'R2L', 'T2B', 'B2T'):
+                        e['pos'] += e['dir'] * e['step_px']
+                        if (e['dir'] < 0 and e['pos'] < e['loop_end']) or (e['dir'] > 0 and e['pos'] > e['loop_end']):
+                            e['pos'] = e['loop_start']
+                _time.sleep(1.0 / fps)
 
         _scroll_thread = threading.Thread(target=_animate, daemon=True)
         _scroll_thread.start()
         return True
     except Exception as e:
-        logging.error(f"scroll_via_shm failed: {e}")
+        logging.error(f"animate_lines_via_shm failed: {e}")
         return False
 
 
@@ -474,6 +575,239 @@ def get_fpp_playlists():
         logging.error(f"Error fetching FPP playlists: {e}")
         return []
 
+# ---------------------------------------------------------------------------
+# FSEQ preview helpers
+# ---------------------------------------------------------------------------
+
+def parse_fseq_header(filepath):
+    """Parse an FSEQ v2 file header. Returns a metadata dict or raises ValueError."""
+    with open(filepath, 'rb') as f:
+        raw = f.read(32)
+    if len(raw) < 32 or raw[0:4] != b'PSEQ':
+        raise ValueError("Not a valid FSEQ file (missing PSEQ magic)")
+    major_ver = raw[7]
+    if major_ver != 2:
+        raise ValueError(f"Unsupported FSEQ version {raw[7]}.{raw[6]}")
+
+    chan_data_offset  = struct.unpack_from('<H', raw, 4)[0]
+    channel_count     = struct.unpack_from('<I', raw, 10)[0]
+    frame_count       = struct.unpack_from('<I', raw, 14)[0]
+    step_time_ms      = raw[18]
+    compression_type  = raw[19] & 0x0F   # 0=none, 1=zlib, 2=zstd (per xLights: 1=zstd)
+    # Offset 20 and 21 are separate uint8 fields — NOT a single uint16
+    num_comp_blocks   = raw[20]           # uint8
+    num_sparse_ranges = raw[21]           # uint8
+
+    # ── Auto-detect zstd compression ─────────────────────────────────────────
+    # FSEQ v2.2 (minor_version >= 2) sometimes writes compression_type=0 in
+    # byte 19 even though the data is zstd-compressed.  Probe the actual data
+    # at chan_data_offset for the zstd frame magic (0xFD2FB528 little-endian).
+    _ZSTD_MAGIC = b'\x28\xB5\x2F\xFD'
+    with open(filepath, 'rb') as _f:
+        _f.seek(chan_data_offset)
+        _probe = _f.read(4)
+    effective_ctype = compression_type
+    if _probe == _ZSTD_MAGIC and compression_type == 0:
+        effective_ctype = 2   # override: treat as zstd
+        logging.info(
+            "FSEQ: header says uncompressed (byte 19 = 0) but zstd magic detected "
+            "at chan_data_offset — treating as zstd (FSEQ v2.2 quirk)"
+        )
+
+    # ── Compression block table ───────────────────────────────────────────────
+    # When compression is active (or auto-detected), scan from offset 32 for
+    # valid (firstFrame uint32, dataLen uint32) block entries.  FSEQ v2.2 may
+    # report num_comp_blocks incorrectly in byte 20; derive actual count by
+    # scanning until firstFrame >= frameCount or dataLen == 0.
+    comp_blocks = []
+    if effective_ctype in (1, 2):
+        with open(filepath, 'rb') as _f:
+            _f.seek(32)
+            _blk_raw = _f.read(chan_data_offset - 32)
+        _off = 0
+        while _off + 7 < len(_blk_raw):
+            ff = struct.unpack_from('<I', _blk_raw, _off)[0]
+            ds = struct.unpack_from('<I', _blk_raw, _off + 4)[0]
+            if ff >= frame_count or ds == 0:
+                break
+            comp_blocks.append({'first_frame': ff, 'data_size': ds})
+            _off += 8
+
+    # ── Sparse range table ────────────────────────────────────────────────────
+    # For standard v2.0 files: sparse ranges follow the comp block table at
+    # offset 32 + num_comp_blocks*8, each entry 6 bytes (uint24 + uint24).
+    # For auto-detected zstd (v2.2): the block table fills the entire header
+    # space; sparse ranges are absent or in a variable-length metadata section
+    # we don't parse here — discard to ensure direct channel offset mapping.
+    sparse_ranges = []
+    if effective_ctype == compression_type and num_sparse_ranges > 0:
+        # Standard v2.0: sparse ranges at fixed position after comp block table
+        sr_table_offset = 32 + num_comp_blocks * 8
+        with open(filepath, 'rb') as f:
+            f.seek(sr_table_offset)
+            sr_raw = f.read(num_sparse_ranges * 6)
+        for i in range(num_sparse_ranges):
+            start = sr_raw[i*6] | (sr_raw[i*6+1] << 8) | (sr_raw[i*6+2] << 16)
+            count = sr_raw[i*6+3] | (sr_raw[i*6+4] << 8) | (sr_raw[i*6+5] << 16)
+            sparse_ranges.append({'start': start, 'count': count})
+
+    fps = 1000.0 / step_time_ms if step_time_ms > 0 else 25.0
+    return {
+        'filepath':              filepath,
+        'chan_data_offset':      chan_data_offset,
+        'channel_count':         channel_count,
+        'frame_count':           frame_count,
+        'step_time_ms':          step_time_ms,
+        'fps':                   fps,
+        'duration_ms':           frame_count * step_time_ms,
+        'compression_type':      effective_ctype,
+        'raw_compression_type':  compression_type,
+        'num_comp_blocks':       num_comp_blocks,
+        'num_sparse_ranges':     num_sparse_ranges,
+        'comp_blocks':           comp_blocks,
+        'sparse_ranges':         sparse_ranges,
+    }
+
+
+def _sparse_ch_to_frame_byte(sparse_ranges, logical_ch):
+    """Map a 0-indexed logical channel number to its byte offset within a packed frame.
+
+    For dense FSEQs (no sparse ranges) the offset equals the logical channel number.
+    For sparse FSEQs the frame data only contains channels listed in the sparse range
+    table, packed together in range order.  Returns None if the channel falls in a gap.
+    """
+    if not sparse_ranges:
+        return logical_ch   # Dense FSEQ — direct 1:1 mapping
+
+    byte_offset = 0
+    for sr in sparse_ranges:
+        if logical_ch < sr['start']:
+            return None     # Channel is in a gap between ranges
+        if logical_ch < sr['start'] + sr['count']:
+            return byte_offset + (logical_ch - sr['start'])
+        byte_offset += sr['count']
+    return None             # Channel is after all ranges
+
+
+def read_fseq_frame(header, frame_idx, start_ch, ch_count):
+    """Return raw channel bytes for one frame's model slice.
+
+    Handles uncompressed (type 0), zlib (type 1), and zstd (type 2) FSEQs.
+    Correctly resolves sparse-range FSEQs by mapping the logical start channel
+    to its actual byte offset within each packed frame.
+    """
+    import zlib as _zlib
+    filepath      = header['filepath']
+    total_ch      = header['channel_count']
+    ctype         = header['compression_type']
+    sparse_ranges = header.get('sparse_ranges', [])
+
+    # --- Resolve logical channel → byte offset within a frame ---
+    frame_byte = _sparse_ch_to_frame_byte(sparse_ranges, start_ch)
+    if frame_byte is None:
+        # Channel not found in any sparse range.  Possible reasons:
+        #   • The FSEQ is model-specific (channels start at 0 in the file).
+        #   • The FPP start_channel is the show-level number but the FSEQ only
+        #     contains this model's channels.
+        # Try offset 0 as a fallback.
+        if ch_count <= total_ch:
+            frame_byte = 0
+            logging.warning(
+                f"FSEQ preview: start_ch {start_ch} not in sparse ranges — "
+                f"falling back to frame byte 0 (model-specific FSEQ?)"
+            )
+        else:
+            raise ValueError(
+                f"Model channel count {ch_count} exceeds FSEQ channel count {total_ch}"
+            )
+
+    if ctype == 0:
+        # Uncompressed: seek directly to frame + channel byte offset
+        offset = header['chan_data_offset'] + frame_idx * total_ch + frame_byte
+        with open(filepath, 'rb') as f:
+            f.seek(offset)
+            return f.read(ch_count)
+
+    elif ctype in (1, 2):
+        # zlib (1) or zstd (2) block compression — same block table layout
+        if ctype == 2 and not ZSTD_AVAILABLE:
+            raise ValueError(
+                "FSEQ uses zstd compression — run fpp_install.sh to install the "
+                "'zstandard' library, then restart the plugin."
+            )
+
+        blocks = header['comp_blocks']
+        if not blocks:
+            raise ValueError(f"{'zlib' if ctype==1 else 'zstd'} FSEQ has no compression block table")
+
+        # Find the block containing frame_idx
+        block_idx = len(blocks) - 1
+        for i in range(len(blocks) - 1):
+            if blocks[i + 1]['first_frame'] > frame_idx:
+                block_idx = i
+                break
+
+        block = blocks[block_idx]
+
+        # Byte offset of this block's compressed data in the file
+        data_offset = header['chan_data_offset']
+        for i in range(block_idx):
+            data_offset += blocks[i]['data_size']
+
+        with open(filepath, 'rb') as f:
+            f.seek(data_offset)
+            compressed = f.read(block['data_size'])
+
+        if ctype == 1:
+            decompressed = _zlib.decompress(compressed)
+        else:
+            dctx = _zstd_mod.ZstdDecompressor()
+            try:
+                decompressed = dctx.decompress(compressed)
+            except Exception:
+                # Fallback with an explicit size cap — allow up to 64 frames per
+                # block, which is far more than any real FSEQ uses (typically 1-4).
+                decompressed = dctx.decompress(
+                    compressed, max_output_size=total_ch * 64
+                )
+
+        local_frame  = frame_idx - block['first_frame']
+        frame_offset = local_frame * total_ch + frame_byte
+        return decompressed[frame_offset: frame_offset + ch_count]
+
+    else:
+        raise ValueError(f"FSEQ compression type {ctype} is not supported")
+
+
+def get_model_channel_info(model_name):
+    """Return (start_channel_1indexed, channel_count) for a named model from FPP's /api/models.
+    channel_count is 3*w*h for RGB, 4*w*h for RGBW, etc. Returns (None, None) on failure."""
+    try:
+        resp = requests.get(f"{FPP_HOST}/api/models", timeout=3)
+        if resp.status_code != 200:
+            return None, None
+        data = resp.json()
+        models = data if isinstance(data, list) else data.get('models', [])
+        for m in models:
+            name = m.get('Name') or m.get('name') or ''
+            if name.lower() == model_name.lower():
+                sc = (m.get('StartChannel') or m.get('startChannel')
+                      or m.get('start_channel'))
+                cc = (m.get('ChannelCount') or m.get('channelCount')
+                      or m.get('channel_count'))
+                return (int(sc) if sc is not None else None,
+                        int(cc) if cc is not None else None)
+        return None, None
+    except Exception as e:
+        logging.warning(f"Could not get channel info for '{model_name}': {e}")
+        return None, None
+
+# Keep old name as alias so nothing else breaks
+def get_model_start_channel(model_name):
+    sc, _ = get_model_channel_info(model_name)
+    return sc
+
+
 def get_fpp_sequences():
     """Get list of sequences from FPP"""
     try:
@@ -490,6 +824,25 @@ def get_fpp_sequences():
     except Exception as e:
         logging.error(f"Error fetching FPP sequences: {e}")
         return []
+
+def get_fpp_videos():
+    # Video/Play Media support disabled — only .fseq, images, and playlists accepted
+    return []
+
+
+def get_fpp_images():
+    """Get list of image files from FPP media/images directory."""
+    image_exts = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp'}
+    try:
+        if os.path.isdir(FPP_IMAGES_PATH):
+            return sorted(
+                f for f in os.listdir(FPP_IMAGES_PATH)
+                if os.path.splitext(f.lower())[1] in image_exts
+            )
+    except Exception as e:
+        logging.error(f"Error listing FPP images: {e}")
+    return []
+
 
 def get_fpp_models():
     """Get list of overlay models from FPP, including pixel dimensions when available.
@@ -541,21 +894,78 @@ def get_fpp_models():
         logging.error(f"Error fetching FPP models: {e}")
         return []
 
+_FONT_EXTENSIONS = ('.ttf', '.otf', '.pfb')
+
+def _enumerate_fonts():
+    """Enumerate installed fonts by walking the filesystem instead of calling
+    FPP's /api/overlays/fonts. That endpoint is unreliable: FPP's font scanner
+    (PixelOverlay.cpp findFonts()) checks for a dot in the entry name before
+    checking whether it's a directory, so any font subdirectory without a dot
+    in its name (e.g. fonts-freefont-ttf's freefont/) is skipped and the scan
+    never recurses into it — the endpoint then returns null. os.walk has no
+    such bug.
+
+    Returns a list of {'name', 'category', 'path'} dicts. Bundled fonts under
+    this plugin's fonts/<category>/ (e.g. fonts/christmas/) are tagged with
+    that category name; everything else found in the OS font directories is
+    tagged "System". Names are deduped — a bundled font also gets copied into
+    /usr/local/share/fonts by fpp_install.sh (so FPP's own scanner and
+    fc-match can find it), so without dedup it would show up twice.
+    """
+    fonts = []
+    claimed_names = set()
+
+    bundled_root = os.path.join(PLUGIN_DIR, 'fonts')
+    if os.path.isdir(bundled_root):
+        for category in sorted(os.listdir(bundled_root)):
+            cat_dir = os.path.join(bundled_root, category)
+            if not os.path.isdir(cat_dir):
+                continue
+            for fname in sorted(os.listdir(cat_dir)):
+                if fname.lower().endswith(_FONT_EXTENSIONS):
+                    name = os.path.splitext(fname)[0]
+                    fonts.append({'name': name, 'category': category.capitalize(),
+                                  'path': os.path.join(cat_dir, fname)})
+                    claimed_names.add(name)
+
+    search_dirs = [
+        '/usr/share/fonts/truetype',
+        '/usr/share/fonts/X11/Type1',
+        '/usr/local/share/fonts',
+        '/usr/share/fonts/opentype',
+        '/usr/share/fpp/fonts',
+        '/home/fpp/media/fonts',
+    ]
+    for search_dir in search_dirs:
+        if not os.path.isdir(search_dir):
+            continue
+        for dirpath, _dirs, filenames in os.walk(search_dir):
+            for fname in filenames:
+                if fname.lower().endswith(_FONT_EXTENSIONS):
+                    name = os.path.splitext(fname)[0]
+                    if name in claimed_names:
+                        continue
+                    claimed_names.add(name)
+                    fonts.append({'name': name, 'category': 'System',
+                                  'path': os.path.join(dirpath, fname)})
+
+    fonts.sort(key=lambda f: (f['category'] != 'System', f['category'].lower(), f['name'].lower()))
+    return fonts
+
 def get_fpp_fonts():
-    """Get list of supported fonts from FPP"""
-    try:
-        fpp_host = FPP_HOST
-        response = requests.get(f"{fpp_host}/api/overlays/fonts", timeout=3)
-        if response.status_code == 200:
-            fonts = response.json()
-            logging.info(f"Found {len(fonts)} fonts from FPP")
-            return fonts if isinstance(fonts, list) else []
-        
-        logging.warning(f"FPP fonts API returned status {response.status_code}")
-        return []
-    except Exception as e:
-        logging.error(f"Error fetching FPP fonts: {e}")
-        return []
+    """Font list for the config UI: name + category, grouped for <optgroup>
+    rendering. .ttf/.pfb names are derived the same way FPP does — filename
+    minus a fixed 4-char extension — so they match what FPP's native overlay
+    text API expects. .otf is also included (needed for some bundled fonts,
+    e.g. Christmas Garland) even though FPP's own scanner doesn't recognize it
+    (isTTF() checks .ttf only): PIL renders .otf fine, and PIL is the plugin's
+    primary rendering path, so those entries just won't resolve through the
+    rarely-used native-overlay-text fallback (PIL unavailable or overlay
+    dimensions unset).
+    """
+    fonts = _enumerate_fonts()
+    logging.info(f"Found {len(fonts)} fonts on disk")
+    return [{'name': f['name'], 'category': f['category']} for f in fonts]
 
 def test_fpp_connection():
     """Test connection to FPP"""
@@ -738,7 +1148,7 @@ def extract_name(message):
     if message:
         message = message.title()
     
-    max_len = config.get('max_message_length', 100)
+    max_len = config.get('max_message_length', 30)
     return message[:max_len] if message else "Guest"
 
 def is_valid_name(text):
@@ -1054,38 +1464,58 @@ def send_to_fpp(name):
         # Build per-line rendered items from message_lines config
         message_lines = config.get('message_lines', ['Merry Christmas', '{name}!', '', ''])
         line_positions_cfg = config.get('line_positions', [])
-        font_size_cfg  = config.get('text_font_size', 48)
-        line_h_px      = int(font_size_cfg * 1.2)  # approximate line height in model pixels
+        line_colors_cfg = config.get('line_colors', [])
+        line_movements_cfg = config.get('line_movements', [])
+        line_speeds_cfg = config.get('line_speeds', [])
+        line_fonts_cfg = config.get('line_fonts', [])
+        line_font_sizes_cfg = config.get('line_font_sizes', [])
 
-        # Collect non-empty rendered lines + their saved positions
-        rendered_lines = []  # [(rendered_text, px, py), ...]
+        global_text_color = config.get('text_color', '#FF0000')
+        if not global_text_color.startswith('#'):
+            global_text_color = '#' + global_text_color
+        global_scroll_speed = config.get('scroll_speed', 5)
+        global_font = config.get('text_font', 'FreeSans')
+        global_font_size = config.get('text_font_size', 48)
+
+        # Collect non-empty rendered lines + their saved positions/colors/movement/speed/font.
+        # A line with no override for a given setting falls back to the matching global default.
+        rendered_lines = []  # [(rendered_text, px, py, color_hex, movement, speed, font_name, font_size), ...]
         for i, tmpl_line in enumerate(message_lines):
             if not tmpl_line.strip():
                 continue
             rendered = tmpl_line.replace('{name}', name)
             pos = line_positions_cfg[i] if i < len(line_positions_cfg) else {'x': -1, 'y': -1}
-            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1)))
+            line_color = line_colors_cfg[i] if i < len(line_colors_cfg) and line_colors_cfg[i] else global_text_color
+            if not line_color.startswith('#'):
+                line_color = '#' + line_color
+            movement = line_movements_cfg[i] if i < len(line_movements_cfg) and line_movements_cfg[i] else 'Center'
+            speed = line_speeds_cfg[i] if i < len(line_speeds_cfg) and line_speeds_cfg[i] else global_scroll_speed
+            font_name = line_fonts_cfg[i] if i < len(line_fonts_cfg) and line_fonts_cfg[i] else global_font
+            font_size = line_font_sizes_cfg[i] if i < len(line_font_sizes_cfg) and line_font_sizes_cfg[i] else global_font_size
+            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1), line_color, movement, speed, font_name, font_size))
 
-        # Compute stacked Y defaults (group centered vertically, spaced by line_h_px)
+        # Compute stacked Y defaults (group centered vertically). Each line's own font size
+        # determines its own height in the stack now that lines can differ.
         mh_pre = config.get('overlay_model_height', 0)
-        non_empty_count = len(rendered_lines)
-        stack_start_y = max(0, (mh_pre - non_empty_count * line_h_px) // 2) if mh_pre > 0 else 0
+        line_heights = [int(item[7] * 1.2) for item in rendered_lines]
+        total_stack_height = sum(line_heights)
+        stack_start_y = max(0, (mh_pre - total_stack_height) // 2) if mh_pre > 0 else 0
 
-        # line_items for static PIL: replace y=-1 with stacked default
-        line_items = []
-        for idx, (rendered, px, py) in enumerate(rendered_lines):
-            resolved_y = stack_start_y + idx * line_h_px if py < 0 else py
-            line_items.append((rendered, px, resolved_y))
+        # Resolve each line's Y (stacked default when unset). X stays -1 (auto-centered by
+        # measured text width inside the render functions) unless explicitly positioned.
+        all_items = []  # [(text, x, resolved_y, color_hex, movement, speed, font_name, font_size), ...]
+        cumulative_y = stack_start_y
+        for idx, (rendered, px, py, lcolor, movement, speed, font_name, font_size) in enumerate(rendered_lines):
+            resolved_y = cumulative_y if py < 0 else py
+            all_items.append((rendered, px, resolved_y, lcolor, movement, speed, font_name, font_size))
+            cumulative_y += line_heights[idx]
 
-        # scroll_line_items for L2R/R2L: [(text, y_pos), ...]
-        scroll_lr_items = [(rendered, stack_start_y + idx * line_h_px if py < 0 else py)
-                           for idx, (rendered, px, py) in enumerate(rendered_lines)]
-        # scroll_line_items for T2B/B2T: [(text, x_pos), ...] — x=-1 means auto-center
-        scroll_tb_items = [(rendered, px)
-                           for (rendered, px, py) in rendered_lines]
+        # True if at least one line scrolls — decides whether the fast one-shot static
+        # render is enough, or the animated per-line renderer is needed.
+        any_moving = any(item[4] != 'Center' for item in all_items)
 
         # FPP API fallback: join lines with newline
-        display_message = '\n'.join(r for r, _, _ in rendered_lines) if rendered_lines else name
+        display_message = '\n'.join(item[0] for item in rendered_lines) if rendered_lines else name
 
         logging.info(f"🎄 ========== STARTING DISPLAY FOR: {name} ==========")
         logging.info(f"📺 FPP Host: {fpp_host}")
@@ -1094,7 +1524,7 @@ def send_to_fpp(name):
         logging.info(f"📝 Message Lines: {message_lines}")
         logging.info(f"📝 Display Message: {display_message}")
         
-        # Step 1: Start the name display playlist/sequence (background)
+        # Step 1: Start the name display playlist/sequence/video/image (background)
         if name_playlist:
             try:
                 logging.info(f"⏸️  STEP 1: Stopping any running playlist...")
@@ -1103,7 +1533,7 @@ def send_to_fpp(name):
                 # (foreground) will automatically suppress it and it auto-resumes after.
                 time.sleep(0.1)
 
-                logging.info(f"▶️  STEP 2: Starting name display playlist: {name_playlist}")
+                logging.info(f"▶️  STEP 2: Starting name display content: {name_playlist}")
 
                 import urllib.parse
                 if name_playlist.startswith('seq:'):
@@ -1113,6 +1543,11 @@ def send_to_fpp(name):
                     effect_url = f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Start')}/{urllib.parse.quote(seq_name)}/true/true"
                     start_response = requests.get(effect_url, timeout=3)
                     logging.info(f"   FSEQ Effect Start (names): {start_response.status_code} - {start_response.text}")
+
+                elif name_playlist.startswith('img:'):
+                    # Image background — will be composited with text in Step 2 below
+                    logging.info(f"   Image background: will render in overlay step")
+
                 else:
                     command = "Start Playlist"
                     encoded_playlist = urllib.parse.quote(name_playlist)
@@ -1121,25 +1556,26 @@ def send_to_fpp(name):
                     logging.info(f"   Start playlist response: {start_response.status_code}")
 
                 time.sleep(0.3)
-                
+
             except Exception as e:
                 logging.error(f"💥 ERROR starting name playlist: {e}")
-        
+        else:
+            # No names content configured — seq:/playlist waiting content composites
+            # correctly underneath the overlay and is left running.
+            pass
+
         # Step 2: Display text ON TOP of the sequence
         if overlay_model:
             try:
                 logging.info(f"📝 STEP 3: Displaying text on model: {overlay_model}")
 
-                text_position = config.get('text_position', 'Center')
-                text_color = config.get('text_color', '#FF0000')
+                text_position = config.get('text_position', 'Center')  # used only by the non-PIL fallback below
+                text_color = global_text_color
                 text_font = config.get('text_font', 'FreeSans')
                 font_size = config.get('text_font_size', 48)
                 scroll_speed = config.get('scroll_speed', 20)
 
                 import urllib.parse
-
-                if not text_color.startswith('#'):
-                    text_color = '#' + text_color
 
                 encoded_model = urllib.parse.quote(overlay_model)
 
@@ -1165,25 +1601,43 @@ def send_to_fpp(name):
                 mw = config.get('overlay_model_width', 0)
                 mh = config.get('overlay_model_height', 0)
                 logging.info(f"📐 Overlay: model={overlay_model} overlay_size={mw}x{mh} "
-                             f"lines={len(line_items)} mode={text_position} PIL={PIL_AVAILABLE}")
+                             f"lines={len(all_items)} moving={any_moving} PIL={PIL_AVAILABLE}")
 
                 shm_rendered = False
                 scroll_started = False
 
+                # For img: names content, composite text onto the image (State 2 = Opaque).
+                # When no Names content is configured, fall back to an img: Default Waiting
+                # content so the name displays over it instead of wiping it with plain text.
+                # Image backgrounds only work with the static (no per-line movement) path —
+                # scrolling text has never supported compositing onto an image background.
+                img_source = name_playlist if name_playlist else config.get('default_playlist', '')
+                img_bg_path = None
+                if img_source.startswith('img:'):
+                    img_bg_path = os.path.join(FPP_IMAGES_PATH, img_source[4:])
+                    if not os.path.exists(img_bg_path):
+                        logging.warning(f"⚠️ Image not found: {img_bg_path}")
+                        img_bg_path = None
+
                 if PIL_AVAILABLE and mw > 0 and mh > 0:
-                    if text_position == 'Center':
-                        shm_rendered = render_to_shm(
-                            line_items, overlay_model,
-                            mw, mh, text_font, font_size, text_color
-                        )
-                    elif text_position in ('L2R', 'R2L', 'T2B', 'B2T'):
+                    if not any_moving:
+                        line_items = [(t, x, y, c, fn, fs) for (t, x, y, c, _m, _s, fn, fs) in all_items]
+                        if img_bg_path:
+                            shm_rendered = render_image_to_shm(
+                                img_bg_path, overlay_model, mw, mh,
+                                line_items=line_items
+                            )
+                        else:
+                            shm_rendered = render_to_shm(
+                                line_items, overlay_model, mw, mh
+                            )
+                    else:
                         duration = config.get('display_duration', 30)
-                        items = scroll_lr_items if text_position in ('L2R', 'R2L') else scroll_tb_items
-                        scroll_started = scroll_via_shm(
-                            items, overlay_model,
-                            mw, mh, text_position,
-                            text_font, font_size, text_color,
-                            scroll_speed, duration
+                        if img_bg_path:
+                            logging.warning("⚠️ Image background does not support per-line movement — "
+                                            "animating over a black background instead.")
+                        scroll_started = animate_lines_via_shm(
+                            all_items, overlay_model, mw, mh, duration
                         )
                         if scroll_started:
                             time.sleep(0.05)  # let first frame land before enabling overlay
@@ -1210,8 +1664,11 @@ def send_to_fpp(name):
                 else:
                     logging.info(f"✅ PIL {'scroll' if scroll_started else 'static'} render active")
 
-                state_resp = requests.put(state_url, json={"State": 3}, timeout=3)
-                logging.info(f"   Overlay state=3: {state_resp.status_code}")
+                # State 2 (Opaque) for image background so it covers the display fully.
+                # State 3 (Transparent RGB) for normal/FSEQ background (black = transparent).
+                overlay_state = 2 if (img_bg_path and shm_rendered) else 3
+                state_resp = requests.put(state_url, json={"State": overlay_state}, timeout=3)
+                logging.info(f"   Overlay state={overlay_state}: {state_resp.status_code}")
 
             except Exception as e:
                 logging.error(f"💥 ERROR sending text command: {e}")
@@ -1226,6 +1683,12 @@ def send_to_fpp(name):
         import traceback
         logging.error(traceback.format_exc())
         return False
+def _start_video_looping(_fpp_host, _vid_name):
+    # Video/Play Media support disabled
+    logging.info("⚠️  _start_video_looping called but video support is disabled")
+    return False
+
+
 def start_default_playlist():
     """Start the configured default waiting playlist/sequence.
     For sequences (seq:), uses FSEQ Effect (loop=true, background=true) so it loops
@@ -1258,6 +1721,26 @@ def start_default_playlist():
 
             logging.error(f"❌ FSEQ Effect Start failed: {response.status_code} - {response.text}")
             return False
+
+        elif default_playlist.startswith('img:'):
+            # Static image — render to overlay model shared memory
+            img_name = default_playlist[4:]
+            img_path = os.path.join(FPP_IMAGES_PATH, img_name)
+            overlay_model = config.get('overlay_model_name', '')
+            mw = config.get('overlay_model_width', 0)
+            mh = config.get('overlay_model_height', 0)
+            if PIL_AVAILABLE and overlay_model and mw > 0 and mh > 0 and os.path.exists(img_path):
+                ok = render_image_to_shm(img_path, overlay_model, mw, mh)
+                if ok:
+                    encoded = urllib.parse.quote(overlay_model)
+                    state_url = f"{fpp_host}/api/overlays/model/{encoded}/state"
+                    requests.put(state_url, json={"State": 2}, timeout=3)  # Opaque
+                    logging.info(f"✅ Image background set: {img_name}")
+                    return True
+            logging.warning(f"⚠️  Image background failed: PIL={PIL_AVAILABLE} model={overlay_model} "
+                            f"dims={mw}x{mh} exists={os.path.exists(img_path) if img_path else False}")
+            return False
+
         else:
             command = "Start Playlist"
             command_url = f"{fpp_host}/api/command/{urllib.parse.quote(command)}/{urllib.parse.quote(default_playlist)}/true/true"
@@ -1309,16 +1792,37 @@ def return_to_default_playlist():
             return
 
         import urllib.parse
-        name_playlist = config.get('name_display_playlist', '')
+        name_playlist  = config.get('name_display_playlist', '')
+        default_content = config.get('default_playlist', '')
+
+        if not name_playlist:
+            # No names content. img: content was paused/replaced for overlay display —
+            # restart it now. seq:/playlist content was never stopped.
+            _default = config.get('default_playlist', '')
+            if _default.startswith('img:'):
+                start_default_playlist()
+                logging.info("ℹ️  No names playlist — restarted default img content after overlay")
+            else:
+                logging.info("ℹ️  No names playlist — waiting content unchanged, overlay cleared")
+            return
 
         if name_playlist.startswith('seq:'):
             # Stop the names FSEQ Effect — waiting FSEQ keeps running underneath
             seq_name = name_playlist[4:].removesuffix('.fseq')
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('FSEQ Effect Stop')}/{urllib.parse.quote(seq_name)}", timeout=3)
             logging.info(f"⏹️  FSEQ Effect Stop (names): {r.status_code} - {r.text}")
+
+        elif name_playlist.startswith('img:'):
+            # Image mode: overlay was used, nothing extra to stop.
+            # Re-apply default img content (it won't auto-resume)
+            if default_content.startswith('img:'):
+                start_default_playlist()
+
         else:
             r = requests.get(f"{fpp_host}/api/command/{urllib.parse.quote('Stop Now')}", timeout=3)
             logging.info(f"⏹️  Stop Now ({r.status_code})")
+            if default_content.startswith('img:'):
+                start_default_playlist()
 
     except Exception as e:
         logging.error(f"Error in return_to_default_playlist: {e}")
@@ -1366,14 +1870,32 @@ def display_worker():
             except Exception as e:
                 logging.error(f"💥 Error sending to FPP: {e}")
             
-            display_duration = config.get('display_duration', 30)
+            display_duration = int(config.get('display_duration', 30))
             logging.info(f"⏱️  Displaying for {display_duration} seconds...")
-            
+
             try:
-                time.sleep(display_duration)
+                name_playlist_chk = config.get('name_display_playlist', '')
+                overlay_model_chk = config.get('overlay_model_name', '')
+                if not name_playlist_chk and overlay_model_chk:
+                    # No names content — FPP can reset the overlay state while the waiting
+                    # content is active (e.g. playlist steps, effect transitions).
+                    # Re-enable State 3 every 2 s to keep the text on screen for the full duration.
+                    import urllib.parse as _ul
+                    _surl = f"{FPP_HOST}/api/overlays/model/{_ul.quote(overlay_model_chk)}/state"
+                    _end = time.time() + display_duration
+                    while time.time() < _end and not stop_display:
+                        try:
+                            requests.put(_surl, json={"State": 3}, timeout=2)
+                        except Exception:
+                            pass
+                        _rem = _end - time.time()
+                        if _rem > 0:
+                            time.sleep(min(2.0, _rem))
+                else:
+                    time.sleep(display_duration)
                 logging.info(f"⏱️  Display duration completed")
             except Exception as e:
-                logging.error(f"💥 Error during sleep: {e}")
+                logging.error(f"💥 Error during display: {e}")
             
             try:
                 logging.info(f"🔄 Returning to default playlist...")
@@ -1592,15 +2114,20 @@ def index():
             .view-btn:hover { background: #e68900; }
             .refresh-btn { background: #9C27B0; }
             .refresh-btn:hover { background: #7B1FA2; }
-            .checkbox-label { display: inline; margin-left: 5px; font-weight: normal; }
-            input[type="checkbox"] { width: auto; }
+            .checkbox-label { display: inline; margin-left: 10px; font-weight: normal; vertical-align: middle; }
+            .toggle-switch { position: relative; display: inline-block; width: 44px; height: 26px; flex-shrink: 0; vertical-align: middle; }
+            .toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+            .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #555; border-radius: 26px; transition: background .2s; }
+            .toggle-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+            .toggle-switch input:checked + .toggle-slider { background: #4CAF50; }
+            .toggle-switch input:checked + .toggle-slider:before { transform: translateX(18px); }
             .success { color: #4CAF50; }
             .error { color: #f44336; }
             .info { background: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #90caf9; color: #333; }
             .queue-info { background: #f3e5f5; padding: 15px; border-radius: 5px; margin: 20px 0; border: 1px solid #ce93d8; color: #333; }
             h3 { color: #4CAF50; margin-top: 20px; margin-bottom: 10px; }
             .help-text { font-size: 12px; color: #666; margin-top: 5px; }
-            select#text_font option { padding: 8px; font-size: 14px; }
+            select[id$="_font"] option { padding: 8px; font-size: 14px; }
             .columns { display: flex; gap: 20px; margin: 0; align-items: stretch; }
             .column { flex: 1; min-width: 0; display: flex; flex-direction: column; }
             .column .section { flex: 0 0 auto; }
@@ -1623,6 +2150,23 @@ def index():
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
             <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
+            <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
+                <button id="btn_twilio_start" onclick="twilioStart()" style="background:#2e7d32; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">▶ TwilioStart</button>
+                <button id="btn_twilio_stop" onclick="twilioStop()" style="background:#c62828; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">■ TwilioStop</button>
+            </div>
+        </div>
+
+        <!-- Plugin Live Banner -->
+        <div id="plugin_live_banner" style="display:none; background:#1b5e20; color:#fff; padding:10px 16px; border-radius:5px; margin-top:10px; font-size:14px; font-weight:bold; align-items:center; gap:10px;">
+            <span style="display:inline-block; width:12px; height:12px; background:#69f0ae; border-radius:50%; box-shadow:0 0 6px #69f0ae;"></span>
+            Plugin is Live
+        </div>
+
+        <!-- Plugin Not Live Banner -->
+        <div id="plugin_not_live_banner" style="display:none; background:#b71c1c; color:#fff; padding:10px 16px; border-radius:5px; margin-top:10px; font-size:14px; font-weight:bold; align-items:center; gap:10px;">
+            <span style="display:inline-block; width:12px; height:12px; background:#ff8a80; border-radius:50%; box-shadow:0 0 6px #ff8a80;"></span>
+            <span>Plugin is Not Live &mdash; Start Twilio to display incoming messages.<br>
+            <span style="font-weight:normal; font-size:12px;">Note: Viewers can still send messages, messaging rates will apply, but no messages will be displayed.</span></span>
         </div>
 
         <!-- Settings Tab -->
@@ -1634,7 +2178,7 @@ def index():
                     <div class="section">
                         <h2>Twilio Settings</h2>
                         <label>Enable Plugin:</label>
-                        <input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}>
+                        <label class="toggle-switch"><input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}><span class="toggle-slider"></span></label>
                         <label class="checkbox-label">Enable SMS polling</label>
 
                         <label>Twilio Account SID:</label>
@@ -1655,23 +2199,33 @@ def index():
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
 
-                        <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
-                        <select id="default_playlist">
-                            <option value="">-- Select a playlist --</option>
-                        </select>
-                        <p class="help-text">📺 This playlist or sequence loops while waiting for text messages</p>
+                        <div id="fpp_content_live_warning" style="display:none; background:#b71c1c; color:#fff; border-radius:5px; padding:8px 12px; margin-bottom:10px; font-size:13px;">
+                            🔴 <strong>Plugin is Live</strong> — run TwilioStop to edit
+                        </div>
+                        <div id="fpp_content_inputs">
+                            <label>Default "Waiting" Content: <span style="color:#f44336;font-size:12px;">* required</span></label>
+                            <select id="default_playlist">
+                                <option value="">-- Select content --</option>
+                            </select>
+                            <p class="help-text">📺 This content loops while waiting for text messages</p>
 
-                        <label>Name Display Content:</label>
-                        <select id="name_display_playlist">
-                            <option value="">-- None (No Playlist Change) --</option>
-                        </select>
-                        <p class="help-text">🎬 This playlist or sequence plays when displaying a name</p>
+                            <label>Name Display Content:</label>
+                            <select id="name_display_playlist">
+                                <option value="">-- None (Same as "Waiting" Content) --</option>
+                                {% set _np = config.get('name_display_playlist', '') %}
+                                {% if _np %}<option value="{{ _np }}" selected>{{ _np }}</option>{% endif %}
+                            </select>
+                            <p class="help-text">🎬 This content plays when displaying a name</p>
+                            <div id="name_display_none_warning" style="display:none; background:#3a2f00; border:1px solid #ffc107; color:#ffc107; border-radius:5px; padding:8px 12px; margin-top:6px; font-size:13px;">
+                                ⚠️ Left as None — names will appear directly over the Waiting content.
+                            </div>
 
-                        <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
-                        <select id="overlay_model_name">
-                            <option value="">-- None --</option>
-                        </select>
-                        <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
+                            <label>Overlay Model Name: <button type="button" onclick="refreshFPPLists(this)" style="font-size:11px;padding:2px 7px;margin-left:8px;cursor:pointer;">↻ Refresh Lists</button></label>
+                            <select id="overlay_model_name">
+                                <option value="">-- None --</option>
+                            </select>
+                            <p class="help-text">📝 The pixel overlay model for text (e.g., "Texting Matrix")</p>
+                        </div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">Message Settings</h2>
@@ -1679,14 +2233,10 @@ def index():
                         <label>Display Duration (seconds):</label>
                         <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
                         <p class="help-text">⏱️ Each message displays for this many seconds before moving to the next</p>
+                        <p class="help-text">💡 Recommended: set this to a multiple of your Names Display Content sequence's length, so it doesn't cut off mid-loop</p>
 
                         <label>Max Messages Per Phone (0 = unlimited):</label>
                         <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
-
-                        <div style="margin-top:10px;">
-                            <input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();">
-                            <label class="checkbox-label">✓ Allow Duplicate Names — same name can be submitted multiple times per day</label>
-                        </div>
 
                         <div id="max_length_section">
                             <label>Max Message Length:</label>
@@ -1699,42 +2249,300 @@ def index():
                     </div>
                 </div>
 
-                <!-- RIGHT COLUMN: Filters + Text Display -->
+                <!-- RIGHT COLUMN: Text Display -->
                 <div class="column">
                     <div class="section">
-                        <h2>Filters</h2>
+                        <h2>Text Display Options</h2>
 
+                        <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
+                        <style>
+                            .line-card { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:8px 8px 6px; margin-bottom:6px; }
+                            .line-row { display:flex; align-items:center; gap:6px; }
+                            .line-row input[type="text"] { margin-bottom:0; padding:6px; }
+                            .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
+                            .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
+                            .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
+                            .reset-line-btn:hover { background:#666; }
+                            .line-color-group { position:relative; display:flex; align-items:center; flex-shrink:0; }
+                            .line-color-swatch { width:24px; height:24px; padding:0; border:1px solid #666; border-radius:4px 0 0 4px; cursor:pointer; background:none; }
+                            .color-palette-btn { width:16px; height:24px; padding:0; border:1px solid #666; border-left:none; border-radius:0 4px 4px 0; background:#444; color:#ccc; font-size:9px; cursor:pointer; }
+                            .color-palette-btn:hover { background:#666; }
+                            .color-palette-popover { position:absolute; top:28px; right:0; z-index:50; background:#2a2a2a; border:1px solid #666; border-radius:5px; padding:8px; width:140px; box-shadow:0 4px 12px rgba(0,0,0,0.5); }
+                            .color-palette-swatches { display:flex; flex-wrap:wrap; gap:4px; }
+                            .color-palette-swatch { width:20px; height:20px; border:1px solid #666; border-radius:3px; padding:0; cursor:pointer; }
+                            .color-palette-save-btn { margin-top:6px; width:100%; font-size:11px; background:#444; color:#ccc; border:1px dashed #888; border-radius:3px; padding:4px; cursor:pointer; }
+                            .color-palette-empty { font-size:10px; color:#888; text-align:center; padding:4px 0; }
+                            .line-movement-row { margin-top:5px; padding-top:5px; border-top:1px solid #555; }
+                            .line-mini-label { font-weight:normal; font-size:12px; color:#aaa; flex-shrink:0; }
+                            .line-group-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+                            .line-group-controls select { width:auto; margin-bottom:0; padding:6px; flex:1; min-width:160px; }
+                            .line-speed-row { display:flex; align-items:center; gap:6px; }
+                            .line-speed-row label { margin:0; font-weight:normal; font-size:12px; color:#aaa; }
+                            .line-speed-row input { width:56px; margin-bottom:0; padding:6px; }
+                        </style>
+                        {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
+                        {% set lp = config.get('line_positions') or [] %}
+                        {% set lc = config.get('line_colors') or ['', '', '', ''] %}
+                        {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
+                        {% set ls = config.get('line_speeds') or [5, 5, 5, 5] %}
+                        {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
+                        {% set lfs = config.get('line_font_sizes') or [48, 48, 48, 48] %}
+                        <div id="message_lines_section">
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 1:</span>
+                                    <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_1_color" class="line-color-swatch" value="{{ lc[0] if lc|length > 0 and lc[0] else '#FF0000' }}" title="Line 1 color" onchange="onLineColorChange(0)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(0)" title="Saved colors">▾</button>
+                                        <div id="line_1_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_1_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_1_movement" onchange="onLineMovementChange(0)">
+                                            <option value="Center" {{ 'selected' if lm[0] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[0] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[0] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[0] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[0] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_1_font" onchange="onLineFontChange(0)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_1_font_size" min="12" max="200" value="{{ lfs[0] if lfs|length > 0 else 48 }}" onchange="onLineFontSizeChange(0)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 2:</span>
+                                    <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_2_color" class="line-color-swatch" value="{{ lc[1] if lc|length > 1 and lc[1] else '#FF0000' }}" title="Line 2 color" onchange="onLineColorChange(1)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(1)" title="Saved colors">▾</button>
+                                        <div id="line_2_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_2_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_2_movement" onchange="onLineMovementChange(1)">
+                                            <option value="Center" {{ 'selected' if lm[1] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[1] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[1] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[1] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[1] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_2_speed" min="1" max="10" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_2_font" onchange="onLineFontChange(1)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_2_font_size" min="12" max="200" value="{{ lfs[1] if lfs|length > 1 else 48 }}" onchange="onLineFontSizeChange(1)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 3:</span>
+                                    <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_3_color" class="line-color-swatch" value="{{ lc[2] if lc|length > 2 and lc[2] else '#FF0000' }}" title="Line 3 color" onchange="onLineColorChange(2)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(2)" title="Saved colors">▾</button>
+                                        <div id="line_3_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_3_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_3_movement" onchange="onLineMovementChange(2)">
+                                            <option value="Center" {{ 'selected' if lm[2] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[2] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[2] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[2] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[2] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_3_speed" min="1" max="10" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_3_font" onchange="onLineFontChange(2)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_3_font_size" min="12" max="200" value="{{ lfs[2] if lfs|length > 2 else 48 }}" onchange="onLineFontSizeChange(2)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 4:</span>
+                                    <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_4_color" class="line-color-swatch" value="{{ lc[3] if lc|length > 3 and lc[3] else '#FF0000' }}" title="Line 4 color" onchange="onLineColorChange(3)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(3)" title="Saved colors">▾</button>
+                                        <div id="line_4_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_4_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_4_movement" onchange="onLineMovementChange(3)">
+                                            <option value="Center" {{ 'selected' if lm[3] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[3] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[3] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[3] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[3] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
+                                            <label>Speed:</label>
+                                            <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_4_font" onchange="onLineFontChange(3)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                        <div class="line-speed-row">
+                                            <label>Size:</label>
+                                            <input type="number" id="line_4_font_size" min="12" max="200" value="{{ lfs[3] if lfs|length > 3 else 48 }}" onchange="onLineFontSizeChange(3)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="help-text">🎨 Click the ▾ next to a line's color to save or recall colors. Each card's Movement controls that line only.</p>
+
+                        <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
+                        <div id="canvas_section">
+                            <label>Position Preview:</label>
+                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Drag any line anywhere within the canvas to reposition it</p>
+                            <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
+                                <span id="pos_display" style="font-size:12px; color:#888;"></span>
+                            </div>
+
+                            <!-- Canvas background preview (FSEQ / video / image) -->
+                            <div style="margin-top:10px; padding:10px; background:#616161; border:1px solid #777; border-radius:4px;">
+                                <span style="font-size:13px; font-weight:bold; color:#eee;">Background Preview</span>
+                                <span id="fseq_scrub_hint" style="font-weight:normal; font-size:11px; color:#bbb; margin-left:6px;">Use scroll bar to move preview.</span>
+                                <div id="fseq_preview_controls" style="margin-top:8px;">
+                                    <div style="margin-bottom:6px;">
+                                        <span id="fseq_seq_label" style="font-size:12px; color:#ccc;">Sequence: —</span>
+                                    </div>
+                                    <div id="fseq_scrubber_row" style="display:none;">
+                                        <div style="display:flex; align-items:center; gap:8px;">
+                                            <span id="fseq_time_display" style="font-size:12px; color:#aaa; min-width:85px; white-space:nowrap;">0:00 / 0:00</span>
+                                            <input type="range" id="fseq_scrubber" min="0" max="100" value="0" step="1"
+                                                   style="flex:1;" oninput="fseqScrub(this.value)">
+                                            <button type="button" onclick="clearFseqPreview()" style="padding:4px 8px; font-size:11px; background:#555; color:#fff; border:none; border-radius:3px; cursor:pointer;">Clear</button>
+                                        </div>
+                                        <div id="fseq_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
+                                    </div>
+                                    <div id="fseq_load_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
+                        <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
+                        <script>
+                            window._linePositionsInit = {{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }};
+                            window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
+                            window._lineSpeedsInit = {{ config.get('line_speeds', [5, 5, 5, 5]) | tojson }};
+                            window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
+                            window._lineFontSizesInit = {{ config.get('line_font_sizes', [48, 48, 48, 48]) | tojson }};
+                            window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
+                        </script>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Filters — full width, spans both columns -->
+            <div class="section" style="margin-top:12px;">
+                <h2>Filters</h2>
+                <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap;">
+
+                    <!-- Sub-col 1: Profanity + Whitelist -->
+                    <div style="flex:1; min-width:220px;">
                         <div id="blacklist_section">
-                            <input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState()">
-                            <label class="checkbox-label">✓ Enable Profanity Filter</label><br>
-                            <button class="view-btn" onclick="location.href='/blacklist'" style="margin-top: 6px;">🚫 Manage Blacklist</button>
+                            <label class="toggle-switch"><input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                            <label class="checkbox-label">Enable Profanity Filter</label><br>
+                            <button class="view-btn" onclick="showBlacklistWarning()" style="margin-top:6px;">🚫 Manage Blacklist</button>
                         </div>
                         <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
-                            ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended.
+                            ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended. Re-enable it to filter names against the Blacklist, or enable the Whitelist instead.
                         </div>
                         <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
                             ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
                         </div>
 
-                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
+                        <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
 
-                        <input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState();">
-                        <label class="checkbox-label">✓ Enable Name Whitelist — only allow approved names</label><br>
-                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top: 6px;">📋 Manage Whitelist</button>
+                        <label class="toggle-switch"><input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                        <label class="checkbox-label">Enable Name Whitelist — only allow approved names</label><br>
+                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top:6px;">📋 Manage Whitelist</button>
+                    </div>
 
-                        <div id="format_rules_section" style="margin-top: 12px;">
-                            <h3 style="margin-bottom: 6px;">Name Format Rules</h3>
+                    <!-- Sub-col 2: Name Format Rules -->
+                    <div style="flex:1; min-width:220px;">
+                        <div id="format_rules_section">
+                            <h3 style="margin-bottom:6px;">Name Format Rules</h3>
                             <div id="format_rules_disabled_note" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-bottom:8px; font-size:13px;">
                                 ⚠️ Name format rules are disabled when the whitelist is active.
                             </div>
                             <div id="format_rules_inputs">
-                                <input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
-                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning();">
-                                <label class="checkbox-label">✓ One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
+                                <label class="toggle-switch"><input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
+                                <label class="checkbox-label">One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
 
-                                <input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
-                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning();">
-                                <label class="checkbox-label">✓ Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
+                                <label class="toggle-switch"><input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
+                                <label class="checkbox-label">Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
 
                                 <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
                                     ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
@@ -1742,183 +2550,82 @@ def index():
                             </div>
                             <p id="hyphen_note" class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
                         </div>
-
-                        <script>
-                        var _formatRulesInitialized = false;
-                        function updateFormatRules() {
-                            var whitelistOn = document.getElementById('use_whitelist').checked;
-                            var inputs = document.getElementById('format_rules_inputs');
-                            var note = document.getElementById('format_rules_disabled_note');
-                            inputs.style.opacity = whitelistOn ? '0.4' : '1';
-                            inputs.style.pointerEvents = whitelistOn ? 'none' : '';
-                            note.style.display = whitelistOn ? 'block' : 'none';
-                            if (whitelistOn) {
-                                document.getElementById('one_word_only').checked = false;
-                                document.getElementById('two_words_max').checked = false;
-                            } else if (_formatRulesInitialized) {
-                                // User just turned whitelist off — restore two words as default
-                                document.getElementById('two_words_max').checked = true;
-                            }
-                            _formatRulesInitialized = true;
-                            checkFormatWarning();
-                        }
-                        function checkFormatWarning() {
-                            var whitelistOn = document.getElementById('use_whitelist').checked;
-                            var oneWord = document.getElementById('one_word_only').checked;
-                            var twoWords = document.getElementById('two_words_max').checked;
-                            var warn = !whitelistOn && !oneWord && !twoWords;
-                            var rulesActive = !whitelistOn && (oneWord || twoWords);
-                            document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
-                            document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
-                        }
-                        function checkDuplicateState() {
-                            var allowDupes = document.getElementById('allow_duplicate_names').checked;
-                            var row = document.getElementById('row_duplicate');
-                            var cb = document.getElementById('sms_response_duplicate');
-                            var warn = document.getElementById('duplicate_disabled_warning');
-                            if (allowDupes) {
-                                row.classList.add('locked');
-                                row.classList.remove('enabled');  // grey out textarea
-                                cb.checked = false;
-                            } else {
-                                row.classList.remove('locked');
-                                toggleResp('duplicate');  // restore enabled state based on checkbox
-                            }
-                            if (warn) warn.style.display = allowDupes ? '' : 'none';
-                        }
-
-                        function checkFiltersState() {
-                            var whitelistOn = document.getElementById('use_whitelist').checked;
-                            var profanityOn = document.getElementById('profanity_filter').checked;
-                            var section = document.getElementById('blacklist_section');
-
-                            // Grey out entire blacklist section when whitelist is active
-                            section.style.opacity = whitelistOn ? '0.4' : '1';
-                            section.style.pointerEvents = whitelistOn ? 'none' : '';
-
-                            // Grey out max length section when whitelist is active
-                            var maxLenSection = document.getElementById('max_length_section');
-                            maxLenSection.style.opacity = whitelistOn ? '0.4' : '1';
-                            maxLenSection.style.pointerEvents = whitelistOn ? 'none' : '';
-                            document.getElementById('max_length_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
-
-                            // Warnings
-                            document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
-                            document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
-                        }
-                        updateFormatRules();
-                        checkFiltersState();
-                        checkDuplicateState();
-                        </script>
-
-                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-
-                        <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
-                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top: 4px;">🚫 View Blocklist</button>
-
-                        <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
-                        <h2 style="margin-top: 0;">Text Display Options</h2>
-
-                        <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
-                        <style>
-                            .line-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
-                            .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
-                            .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
-                            .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
-                            .reset-line-btn:hover { background:#666; }
-                        </style>
-                        {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
-                        {% set lp = config.get('line_positions') or [] %}
-                        <div id="message_lines_section">
-                            <div class="line-row">
-                                <span class="line-label">Line 1:</span>
-                                <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
-                                <span id="line_1_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-row">
-                                <span class="line-label">Line 2:</span>
-                                <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
-                                <span id="line_2_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-row">
-                                <span class="line-label">Line 3:</span>
-                                <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
-                                <span id="line_3_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
-                            </div>
-                            <div class="line-row">
-                                <span class="line-label">Line 4:</span>
-                                <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
-                                <span id="line_4_pos" class="pos-badge">auto</span>
-                                <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
-                            </div>
-                        </div>
-
-                        <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
-                        <div id="canvas_section">
-                            <label>Position Preview: <span id="canvas_hint" style="font-weight:normal; font-size:12px; color:#888;">click a line to select, drag to reposition</span></label>
-                            <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
-                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
-                                <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
-                                <span id="pos_display" style="font-size:12px; color:#888;"></span>
-                            </div>
-                            <p class="help-text" id="canvas_help">In static mode, click a line on the preview then drag it anywhere. In scroll mode, all lines render as a single scrolling block.</p>
-                        </div>
-
-                        <label>Text Movement:</label>
-                        <select id="text_position" onchange="updateScrollSpeedVisibility()">
-                            <option value="Center" {{ 'selected' if config.get('text_position') == 'Center' else '' }}>Static</option>
-                            <option value="L2R" {{ 'selected' if config.get('text_position') == 'L2R' else '' }}>Scroll Left to Right</option>
-                            <option value="R2L" {{ 'selected' if config.get('text_position') == 'R2L' else '' }}>Scroll Right to Left</option>
-                            <option value="T2B" {{ 'selected' if config.get('text_position') == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                            <option value="B2T" {{ 'selected' if config.get('text_position') == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                        </select>
-
-                        <div id="scroll_speed_row">
-                            <label>Scroll Speed:</label>
-                            <input type="number" id="scroll_speed" value="{{ config.get('scroll_speed', 5) }}" min="1" max="10"
-                                   oninput="this.value = Math.min(10, Math.max(1, parseInt(this.value)||1))">
-                            <p class="help-text">⚡ 1 = slowest, 10 = fastest</p>
-                        </div>
-
-                        <label>Text Color:</label>
-                        <div style="display: flex; align-items: center; gap: 10px;">
-                            <input type="color" id="text_color" value="{{ config.get('text_color', '#FF0000') }}"
-                                   style="width: 60px; height: 40px; padding: 2px; cursor: pointer;">
-                            <input type="text" id="text_color_hex" value="{{ config.get('text_color', '#FF0000') }}"
-                                   placeholder="#FF0000" style="width: 100px;"
-                                   onchange="document.getElementById('text_color').value = this.value">
-                        </div>
-                        <script>
-                            document.getElementById('text_color').addEventListener('change', function() {
-                                document.getElementById('text_color_hex').value = this.value;
-                                document.getElementById('color_preview').style.background = this.value;
-                            });
-                            document.getElementById('text_color_hex').addEventListener('input', function() {
-                                if (/^#[0-9A-F]{6}$/i.test(this.value)) {
-                                    document.getElementById('text_color').value = this.value;
-                                    document.getElementById('color_preview').style.background = this.value;
-                                }
-                            });
-                        </script>
-
-                        <label>Font:</label>
-                        <select id="text_font">
-                            <option value="">Loading fonts...</option>
-                        </select>
-
-                        <label>Font Size:</label>
-                        <input type="number" id="text_font_size" value="{{ config.get('text_font_size', 48) }}" min="12" max="200">
-
-                        <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
-                        <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
-                        <script>window._linePositionsInit = {{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }};</script>
                     </div>
-                </div>
 
+                    <!-- Sub-col 3: Phone Blocklist + Duplicate Names -->
+                    <div style="flex:0 0 220px;">
+                        <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
+                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top:4px; display:block;">🚫 View Blocklist</button>
+
+                        <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
+
+                        <label class="toggle-switch"><input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();"><span class="toggle-slider"></span></label>
+                        <label class="checkbox-label">Allow Duplicate Names — same phone number can submit the same name multiple times per day</label>
+                    </div>
+
+                </div>
             </div>
+            <script>
+                var _formatRulesInitialized = false;
+                function updateFormatRules() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var inputs = document.getElementById('format_rules_inputs');
+                    var note = document.getElementById('format_rules_disabled_note');
+                    inputs.style.opacity = whitelistOn ? '0.4' : '1';
+                    inputs.style.pointerEvents = whitelistOn ? 'none' : '';
+                    note.style.display = whitelistOn ? 'block' : 'none';
+                    if (whitelistOn) {
+                        document.getElementById('one_word_only').checked = false;
+                        document.getElementById('two_words_max').checked = false;
+                    } else if (_formatRulesInitialized) {
+                        document.getElementById('two_words_max').checked = true;
+                    }
+                    _formatRulesInitialized = true;
+                    checkFormatWarning();
+                }
+                function checkFormatWarning() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var oneWord = document.getElementById('one_word_only').checked;
+                    var twoWords = document.getElementById('two_words_max').checked;
+                    var warn = !whitelistOn && !oneWord && !twoWords;
+                    var rulesActive = !whitelistOn && (oneWord || twoWords);
+                    document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
+                    document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
+                }
+                function checkDuplicateState() {
+                    var allowDupes = document.getElementById('allow_duplicate_names').checked;
+                    var row = document.getElementById('row_duplicate');
+                    var cb = document.getElementById('sms_response_duplicate');
+                    var warn = document.getElementById('duplicate_disabled_warning');
+                    if (!row) return;
+                    if (allowDupes) {
+                        row.classList.add('locked');
+                        row.classList.remove('enabled');
+                        if (cb) cb.checked = false;
+                    } else {
+                        row.classList.remove('locked');
+                        toggleResp('duplicate');
+                    }
+                    if (warn) warn.style.display = allowDupes ? '' : 'none';
+                }
+                function checkFiltersState() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var profanityOn = document.getElementById('profanity_filter').checked;
+                    var section = document.getElementById('blacklist_section');
+                    section.style.opacity = whitelistOn ? '0.4' : '1';
+                    section.style.pointerEvents = whitelistOn ? 'none' : '';
+                    var maxLenSection = document.getElementById('max_length_section');
+                    maxLenSection.style.opacity = whitelistOn ? '0.4' : '1';
+                    maxLenSection.style.pointerEvents = whitelistOn ? 'none' : '';
+                    document.getElementById('max_length_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
+                    document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
+                    document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
+                }
+                updateFormatRules();
+                checkFiltersState();
+                checkDuplicateState();
+            </script>
+
         </div>
 
         <!-- SMS Responses Tab -->
@@ -1963,8 +2670,8 @@ def index():
 
                 <div id="row_show_not_live" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_show_not_live" {{ 'checked' if config.get('sms_response_show_not_live', False) else '' }} onchange="toggleResp('show_not_live')">
-                        <label for="sms_response_show_not_live">🔴 Show Not Live — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_show_not_live" {{ 'checked' if config.get('sms_response_show_not_live', False) else '' }} onchange="toggleResp('show_not_live')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_show_not_live" style="margin-left:10px;vertical-align:middle;">🔴 Show Not Live — Send Response</label>
                     </div>
                     <p class="help-text" style="margin:4px 0 6px;">Sent to anyone who texts while the show is not active (TwilioStop has been called).</p>
                     <textarea id="response_show_not_live" rows="2">{{ config.get('response_show_not_live', "Ho, Ho, Ho, It looks like our show isn't running now. Try again later.") }}</textarea>
@@ -1972,26 +2679,26 @@ def index():
 
                 <div id="row_blocked" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_blocked" {{ 'checked' if config.get('sms_response_blocked', False) else '' }} onchange="toggleResp('blocked')">
-                        <label for="sms_response_blocked">🚫 Blocked Number — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_blocked" {{ 'checked' if config.get('sms_response_blocked', False) else '' }} onchange="toggleResp('blocked')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_blocked" style="margin-left:10px;vertical-align:middle;">🚫 Blocked Number — Send Response</label>
                     </div>
                     <textarea id="response_blocked" rows="2">{{ config.get('response_blocked', 'You have been blocked from sending messages.') }}</textarea>
                 </div>
 
                 <div id="row_profanity" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_profanity" {{ 'checked' if config.get('sms_response_profanity', False) else '' }} onchange="toggleResp('profanity')">
-                        <label for="sms_response_profanity">🤬 Profanity Detected — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_profanity" {{ 'checked' if config.get('sms_response_profanity', False) else '' }} onchange="toggleResp('profanity')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_profanity" style="margin-left:10px;vertical-align:middle;">🤬 Profanity Detected — Send Response</label>
                     </div>
                     <textarea id="response_profanity" rows="2">{{ config.get('response_profanity', 'Sorry, your message contains inappropriate content and cannot be displayed.') }}</textarea>
                 </div>
 
                 <div id="row_duplicate" class="resp-row{% if config.get('allow_duplicate_names', False) %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_duplicate"
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_duplicate"
                                {{ 'checked' if config.get('sms_response_duplicate', False) and not config.get('allow_duplicate_names', False) else '' }}
-                               onchange="toggleResp('duplicate')">
-                        <label for="sms_response_duplicate">🔄 Duplicate Name — Send Response</label>
+                               onchange="toggleResp('duplicate')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_duplicate" style="margin-left:10px;vertical-align:middle;">🔄 Duplicate Name — Send Response</label>
                     </div>
                     <p id="duplicate_disabled_warning" class="resp-locked-note" style="{{ '' if config.get('allow_duplicate_names', False) else 'display:none;' }}">⚠️ <strong>Duplicate response is disabled</strong> — Allow Duplicate Names is on, so this response will never send.</p>
                     <textarea id="response_duplicate" rows="2">{{ config.get('response_duplicate', "You've already sent this name today!") }}</textarea>
@@ -1999,11 +2706,11 @@ def index():
 
                 <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_invalid_format"
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_invalid_format"
                                {{ 'checked' if config.get('sms_response_invalid_format', False) and not config.get('use_whitelist', False) else '' }}
                                {{ 'disabled' if config.get('use_whitelist', False) else '' }}
-                               onchange="toggleResp('invalid_format')">
-                        <label for="sms_response_invalid_format">❌ Invalid Format — Send Response</label>
+                               onchange="toggleResp('invalid_format')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_invalid_format" style="margin-left:10px;vertical-align:middle;">❌ Invalid Format — Send Response</label>
                     </div>
                     {% if config.get('use_whitelist', False) %}
                     <p class="resp-locked-note">⚠️ Invalid Format responses are disabled when the whitelist is active — all names are validated against the whitelist instead of format rules.</p>
@@ -2013,24 +2720,24 @@ def index():
 
                 <div id="row_rate_limited" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_rate_limited" {{ 'checked' if config.get('sms_response_rate_limited', False) else '' }} onchange="toggleResp('rate_limited')">
-                        <label for="sms_response_rate_limited">⛔ Rate Limited — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_rate_limited" {{ 'checked' if config.get('sms_response_rate_limited', False) else '' }} onchange="toggleResp('rate_limited')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_rate_limited" style="margin-left:10px;vertical-align:middle;">⛔ Rate Limited — Send Response</label>
                     </div>
                     <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
                 </div>
 
                 <div id="row_not_whitelisted" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_not_whitelisted" {{ 'checked' if config.get('sms_response_not_whitelisted', False) else '' }} onchange="toggleResp('not_whitelisted')">
-                        <label for="sms_response_not_whitelisted">📋 Not on Whitelist — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_not_whitelisted" {{ 'checked' if config.get('sms_response_not_whitelisted', False) else '' }} onchange="toggleResp('not_whitelisted')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_not_whitelisted" style="margin-left:10px;vertical-align:middle;">📋 Not on Whitelist — Send Response</label>
                     </div>
                     <textarea id="response_not_whitelisted" rows="2">{{ config.get('response_not_whitelisted', 'Sorry, that name is not on our approved list.') }}</textarea>
                 </div>
 
                 <div id="row_success" class="resp-row">
                     <div class="resp-toggle">
-                        <input type="checkbox" id="sms_response_success" {{ 'checked' if config.get('sms_response_success', False) else '' }} onchange="toggleResp('success')">
-                        <label for="sms_response_success">✅ Success — Send Response</label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_success" {{ 'checked' if config.get('sms_response_success', False) else '' }} onchange="toggleResp('success')"><span class="toggle-slider"></span></label>
+                        <label for="sms_response_success" style="margin-left:10px;vertical-align:middle;">✅ Success — Send Response</label>
                     </div>
                     <textarea id="response_success" rows="2">{{ config.get('response_success', 'Thanks! Your name will appear on our display soon! 🎄') }}</textarea>
                 </div>
@@ -2054,7 +2761,7 @@ def index():
                     </p>
 
                     <label>Test Name:</label>
-                    <input type="text" id="test_name" placeholder="Enter a name to test (e.g., John or Mary Smith)">
+                    <input type="text" id="test_name" placeholder="Enter a name to test">
 
                     <button class="test-btn" onclick="submitTestMessage()">🧪 Submit Test Message</button>
 
@@ -2068,7 +2775,7 @@ def index():
                     ⚠️ Test sending SMS responses to a phone number. Requires Twilio credentials. </p>
 
                 <label>Phone Number:</label>
-                <input type="text" id="test_sms_phone" placeholder="+18005551234">
+                <input type="text" id="test_sms_phone" placeholder="Number to Text">
 
                 <label>Message Type:</label>
                 <select id="test_sms_type">
@@ -2089,39 +2796,109 @@ def index():
         </div>
 
         <script>
+            function twilioStart() {
+                var btn = document.getElementById('btn_twilio_start');
+                btn.disabled = true; btn.textContent = '...';
+                fetch('/api/activate', {method:'POST'})
+                .then(r => r.json())
+                .then(function(d) {
+                    if (d.success === false) { alert('TwilioStart failed: ' + (d.error || 'Unknown error')); }
+                    updateLiveStatus();
+                })
+                .catch(function() { alert('TwilioStart request failed.'); })
+                .finally(function() { btn.disabled = false; btn.textContent = '▶ TwilioStart'; });
+            }
+
+            function twilioStop() {
+                var btn = document.getElementById('btn_twilio_stop');
+                btn.disabled = true; btn.textContent = '...';
+                fetch('/api/deactivate', {method:'POST'})
+                .then(r => r.json())
+                .then(function() { updateLiveStatus(); })
+                .catch(function() { alert('TwilioStop request failed.'); })
+                .finally(function() { btn.disabled = false; btn.textContent = '■ TwilioStop'; });
+            }
+
             function updateLiveStatus() {
                 fetch('/api/queue/status').then(r => r.json()).then(data => {
                     const live = data.show_live === true;
-                    const banner = document.getElementById('show_not_live_banner');
+
+                    // Testing tab banner (show is NOT live warning)
+                    const notLiveBanner = document.getElementById('show_not_live_banner');
                     const form = document.getElementById('test_form_inner');
-                    if (banner) banner.style.display = live ? 'none' : 'block';
+                    if (notLiveBanner) notLiveBanner.style.display = live ? 'none' : 'block';
                     if (form) {
                         form.style.opacity = live ? '1' : '0.4';
                         form.style.pointerEvents = live ? '' : 'none';
                     }
+
+                    // Settings tab: "Plugin is Live" / "Plugin is Not Live" banner at top
+                    const liveBanner = document.getElementById('plugin_live_banner');
+                    const notLiveTopBanner = document.getElementById('plugin_not_live_banner');
+                    if (liveBanner) liveBanner.style.display = live ? 'flex' : 'none';
+                    if (notLiveTopBanner) notLiveTopBanner.style.display = live ? 'none' : 'flex';
+
+                    // Lock content dropdowns when live
+                    const liveWarning = document.getElementById('fpp_content_live_warning');
+                    const contentInputs = document.getElementById('fpp_content_inputs');
+                    if (liveWarning) liveWarning.style.display = live ? 'block' : 'none';
+                    if (contentInputs) {
+                        contentInputs.style.opacity = live ? '0.4' : '';
+                        contentInputs.style.pointerEvents = live ? 'none' : '';
+                    }
                 }).catch(() => {});
             }
 
-            function updateScrollSpeedVisibility() {
-                var pos = document.getElementById('text_position').value;
-                var isStatic = (pos === 'Center');
-                var row = document.getElementById('scroll_speed_row');
-                if (row) row.style.display = isStatic ? 'none' : '';
+            // Resolves a line's movement ('Center'|'L2R'|'R2L'|'T2B'|'B2T'), defaulting to Center
+            function getLineMovement(i) {
+                return (window._lineMovements && window._lineMovements[i]) || 'Center';
+            }
 
-                // Update canvas hint text based on mode
-                var hint = document.getElementById('canvas_hint');
-                var help = document.getElementById('canvas_help');
-                if (pos === 'L2R' || pos === 'R2L') {
-                    if (hint) hint.textContent = 'drag each line up/down to set its vertical position';
-                    if (help) help.textContent = 'Each line scrolls horizontally at its own Y position. Click a line then drag up/down to reposition it.';
-                } else if (pos === 'T2B' || pos === 'B2T') {
-                    if (hint) hint.textContent = 'drag each line left/right to set its horizontal position';
-                    if (help) help.textContent = 'Each line scrolls vertically at its own X position. Click a line then drag left/right to reposition it.';
-                } else {
-                    if (hint) hint.textContent = 'click a line to select, drag to reposition';
-                    if (help) help.textContent = 'Click a line on the preview then drag it anywhere on the canvas.';
-                }
+            // Shows/hides a single line's own Speed input based on that line's movement
+            function updateLineSpeedRowVisibility(i) {
+                var row = document.getElementById('line_' + (i + 1) + '_speed_row');
+                if (row) row.style.display = (getLineMovement(i) === 'Center') ? 'none' : '';
+            }
+
+            // Per-line Movement select
+            function onLineMovementChange(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_movement');
+                if (!el) return;
+                window._lineMovements = window._lineMovements || ['Center','Center','Center','Center'];
+                window._lineMovements[i] = el.value;
+                updateLineSpeedRowVisibility(i);
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Speed input
+            function onLineSpeedChange(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_speed');
+                if (!el) return;
+                var v = Math.min(10, Math.max(1, parseInt(el.value) || 1));
+                el.value = v;
+                window._lineSpeeds = window._lineSpeeds || [5,5,5,5];
+                window._lineSpeeds[i] = v;
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Font select
+            function onLineFontChange(i) {
+                // Can't call getLineFont(i) here — it's local to initCanvasPreview()'s
+                // closure, not visible in this scope. Read the select directly instead,
+                // same as onLineMovementChange/onLineSpeedChange do for their inputs.
+                var el = document.getElementById('line_' + (i + 1) + '_font');
+                var name = el ? el.value : null;
+                ensureFontLoaded(name).then(function() {
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                });
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Font Size input
+            function onLineFontSizeChange(i) {
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
             }
 
             function updateModelAspect(width, height) {
@@ -2156,6 +2933,19 @@ def index():
                 while (initLP.length < 4) initLP.push({x:-1,y:-1});
                 window._linePositions = initLP;
 
+                // Load per-line movement + speed from config
+                var initLM = (window._lineMovementsInit && Array.isArray(window._lineMovementsInit))
+                    ? window._lineMovementsInit.slice()
+                    : ['Center', 'Center', 'Center', 'Center'];
+                while (initLM.length < 4) initLM.push('Center');
+                window._lineMovements = initLM;
+
+                var initLS = (window._lineSpeedsInit && Array.isArray(window._lineSpeedsInit))
+                    ? window._lineSpeedsInit.slice()
+                    : [5, 5, 5, 5];
+                while (initLS.length < 4) initLS.push(5);
+                window._lineSpeeds = initLS;
+
                 var selectedLine = -1;
                 var hoveredLine  = -1;
                 var lineRects    = [null, null, null, null]; // canvas-pixel rects, filled by render
@@ -2167,23 +2957,32 @@ def index():
                     return el ? el.value.replace('{name}', 'Santa') : '';
                 }
 
-                // Returns array of indices (0-3) for non-empty lines
-                function getNonEmptyIdx() {
-                    var r = [];
-                    for (var i = 0; i < 4; i++) { if (getLineText(i)) r.push(i); }
-                    return r;
+                // Reads this line's own color directly from its color input
+                function getLineColor(i) {
+                    var el = document.getElementById('line_' + (i + 1) + '_color');
+                    return (el && el.value) || '#FF0000';
+                }
+
+                // Reads this line's own font/size directly from its font inputs
+                function getLineFont(i) {
+                    var el = document.getElementById('line_' + (i + 1) + '_font');
+                    return (el && el.value) || 'sans-serif';
+                }
+                function getLineFontSize(i) {
+                    var el = document.getElementById('line_' + (i + 1) + '_font_size');
+                    return (el && parseInt(el.value)) || 48;
                 }
 
                 function updateBadges() {
-                    var pos = document.getElementById('text_position').value;
                     for (var i = 0; i < 4; i++) {
                         var badge = document.getElementById('line_' + (i + 1) + '_pos');
                         if (!badge) continue;
                         var lp = window._linePositions[i];
+                        var movement = getLineMovement(i);
                         var txt;
-                        if (pos === 'L2R' || pos === 'R2L') {
+                        if (movement === 'L2R' || movement === 'R2L') {
                             txt = lp.y < 0 ? 'auto' : ('Y:' + lp.y);
-                        } else if (pos === 'T2B' || pos === 'B2T') {
+                        } else if (movement === 'T2B' || movement === 'B2T') {
                             txt = lp.x < 0 ? 'auto' : ('X:' + lp.x);
                         } else {
                             txt = (lp.x < 0 && lp.y < 0) ? 'auto' : ('X:' + lp.x + ' Y:' + lp.y);
@@ -2210,116 +3009,97 @@ def index():
                 function renderCanvasPreview() {
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
-                    var pos = document.getElementById('text_position').value;
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
-                    var fontSize   = parseInt(document.getElementById('text_font_size').value) || 48;
-                    var color      = document.getElementById('text_color').value || '#ff0000';
-                    var scaledFont = Math.round(fontSize * canvas.width / mw);
-                    var lineH      = Math.round(scaledFont * 1.2);
-                    ctx.font = 'bold ' + scaledFont + 'px sans-serif';
+                    if (window._fseqBgImage) {
+                        ctx.imageSmoothingEnabled = false;
+                        ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
+                        ctx.imageSmoothingEnabled = true;
+                    }
+                    var posLabel = '';
                     ctx.textBaseline = 'top';
 
                     lineRects = [null, null, null, null];
 
-                    var nonEmptyIdx = getNonEmptyIdx();
-                    var nLines = nonEmptyIdx.length || 1;
-                    // Stacked-group Y: center the group, space lines by lineH
-                    var stackStartY = (canvas.height - nLines * lineH) / 2;
+                    // Each line can now have its own font size, so precompute each non-empty
+                    // line's scaled size/height before stacking (lines no longer share one height).
+                    var scaledSizes = [0, 0, 0, 0], lineHeights = [0, 0, 0, 0];
+                    var totalStackHeight = 0;
+                    for (var pi = 0; pi < 4; pi++) {
+                        if (!getLineText(pi)) continue;
+                        var sz = Math.round(getLineFontSize(pi) * canvas.width / mw);
+                        scaledSizes[pi] = sz;
+                        lineHeights[pi] = Math.round(sz * 1.2);
+                        totalStackHeight += lineHeights[pi];
+                    }
+                    var stackStartY = (canvas.height - totalStackHeight) / 2;
 
-                    var posLabel = 'Click a line to select, then drag';
+                    var cumulativeY = stackStartY;
+                    for (var i = 0; i < 4; i++) {
+                        var lineText = getLineText(i);
+                        if (!lineText) { lineRects[i] = null; continue; }
+                        var movement = getLineMovement(i);
+                        var lp  = window._linePositions[i];
+                        var fontName   = getLineFont(i);
+                        var scaledFont = scaledSizes[i];
+                        var lineH      = lineHeights[i];
+                        var arrowFont  = 'bold ' + Math.max(8, Math.round(scaledFont * 0.4)) + 'px sans-serif';
+                        var thisStackY = cumulativeY;
+                        ctx.font = scaledFont + 'px "' + fontName + '", sans-serif';
+                        var lw2 = ctx.measureText(lineText).width;
+                        var lh2 = scaledFont;
+                        var drawX, drawY;
 
-                    if (pos === 'L2R' || pos === 'R2L') {
-                        // Per-line Y control; text scrolls full width at each line's Y
-                        ctx.save();
-                        ctx.fillStyle = 'rgba(255,255,255,0.2)';
-                        ctx.font = 'bold ' + Math.max(8, Math.round(scaledFont * 0.5)) + 'px sans-serif';
-                        ctx.textBaseline = 'top';
-                        var arrowTxt = pos === 'L2R' ? '→' : '←';
-                        var arrowX = pos === 'L2R' ? 4 : canvas.width - ctx.measureText(arrowTxt).width - 4;
-                        ctx.fillText(arrowTxt, arrowX, 4);
-                        ctx.restore();
-                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
-
-                        var stackIdx = 0;
-                        for (var i = 0; i < 4; i++) {
-                            var lineText = getLineText(i);
-                            if (!lineText) { lineRects[i] = null; continue; }
-                            var lp  = window._linePositions[i];
-                            var lw2 = ctx.measureText(lineText).width;
-                            var lh2 = scaledFont;
-                            var drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                        if (movement === 'L2R' || movement === 'R2L') {
+                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
                             drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
-                            var drawX = (canvas.width - lw2) / 2;
-                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
-                            // Dashed guide line at this Y
+                            drawX = (canvas.width - lw2) / 2;
                             ctx.save();
                             ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
                             ctx.beginPath(); ctx.moveTo(0, drawY + lh2/2); ctx.lineTo(canvas.width, drawY + lh2/2); ctx.stroke();
                             ctx.restore();
-                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
-                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.font = arrowFont; ctx.textBaseline = 'top';
+                            var arrowTxt = movement === 'L2R' ? '→' : '←';
+                            var arrowX = movement === 'L2R' ? 2 : canvas.width - ctx.measureText(arrowTxt).width - 2;
+                            ctx.fillText(arrowTxt, arrowX, drawY);
+                            ctx.restore();
                             if (i === selectedLine)
                                 posLabel = 'Line ' + (i+1) + ' Y: ' + (lp.y < 0 ? 'auto' : lp.y) + ' — drag up/down';
-                            stackIdx++;
-                        }
 
-                    } else if (pos === 'T2B' || pos === 'B2T') {
-                        // Per-line X control; text scrolls full height at each line's X
-                        ctx.save();
-                        ctx.fillStyle = 'rgba(255,255,255,0.2)';
-                        ctx.font = 'bold ' + Math.max(8, Math.round(scaledFont * 0.5)) + 'px sans-serif';
-                        ctx.textBaseline = 'top';
-                        var sarrow = pos === 'T2B' ? '↓' : '↑';
-                        ctx.fillText(sarrow, canvas.width / 2 - ctx.measureText(sarrow).width / 2, 4);
-                        ctx.restore();
-                        ctx.font = 'bold ' + scaledFont + 'px sans-serif'; ctx.textBaseline = 'top';
-
-                        var stackIdx = 0;
-                        for (var i = 0; i < 4; i++) {
-                            var lineText = getLineText(i);
-                            if (!lineText) { lineRects[i] = null; continue; }
-                            var lp  = window._linePositions[i];
-                            var lw2 = ctx.measureText(lineText).width;
-                            var lh2 = scaledFont;
-                            var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                        } else if (movement === 'T2B' || movement === 'B2T') {
+                            drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
                             drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
-                            var drawY = (canvas.height - lh2) / 2;
-                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
-                            // Dashed guide at this X
+                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
+                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
                             ctx.save();
                             ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
                             ctx.beginPath(); ctx.moveTo(drawX + lw2/2, 0); ctx.lineTo(drawX + lw2/2, canvas.height); ctx.stroke();
                             ctx.restore();
-                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
-                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.font = arrowFont; ctx.textBaseline = 'top';
+                            var sarrow = movement === 'T2B' ? '↓' : '↑';
+                            ctx.fillText(sarrow, drawX + lw2/2 - ctx.measureText(sarrow).width/2, 2);
+                            ctx.restore();
                             if (i === selectedLine)
                                 posLabel = 'Line ' + (i+1) + ' X: ' + (lp.x < 0 ? 'auto' : lp.x) + ' — drag left/right';
-                            stackIdx++;
-                        }
 
-                    } else {
-                        // Static mode: each line at its own X,Y with stacked Y default
-                        var stackIdx = 0;
-                        for (var i = 0; i < 4; i++) {
-                            var lineText = getLineText(i);
-                            if (!lineText) { lineRects[i] = null; continue; }
-                            var lp  = window._linePositions[i];
-                            var lw2 = ctx.measureText(lineText).width;
-                            var lh2 = scaledFont;
-                            var drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
-                            var drawY = lp.y < 0 ? stackStartY + stackIdx * lineH : lp.y * canvas.height / mh;
+                        } else {
+                            drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
+                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
                             drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
                             drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
-                            lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
-                            drawLineDecoration(drawX, drawY, lw2, lh2, i);
-                            ctx.fillStyle = color; ctx.fillText(lineText, drawX, drawY);
                             if (i === selectedLine)
                                 posLabel = (lp.x < 0 && lp.y < 0)
                                     ? 'Line ' + (i+1) + ': auto-stacked'
                                     : 'Line ' + (i+1) + ':  X:' + lp.x + '  Y:' + lp.y;
-                            stackIdx++;
                         }
+
+                        ctx.font = scaledFont + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
+                        lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
+                        drawLineDecoration(drawX, drawY, lw2, lh2, i);
+                        ctx.fillStyle = getLineColor(i); ctx.fillText(lineText, drawX, drawY);
+                        cumulativeY += lineH;
                     }
 
                     var posEl = document.getElementById('pos_display');
@@ -2354,7 +3134,6 @@ def index():
                 }
 
                 canvas.addEventListener('mousedown', function(e) {
-                    var pos = document.getElementById('text_position').value;
                     var c = canvasXY(e);
                     var hit = hitTestLine(c.cx, c.cy);
                     selectedLine = hit;
@@ -2367,7 +3146,7 @@ def index():
                         // For L2R/R2L: anchor Y offset; for T2B/B2T: anchor X; static: both
                         dragOffX = c.cx - (lp.x < 0 ? r.x : lp.x * canvas.width  / mw2);
                         dragOffY = c.cy - (lp.y < 0 ? r.y : lp.y * canvas.height / mh2);
-                        canvas.style.cursor = dragCursor(pos);
+                        canvas.style.cursor = dragCursor(getLineMovement(hit));
                     }
                     renderCanvasPreview();
                     e.preventDefault();
@@ -2376,16 +3155,16 @@ def index():
                 canvas.addEventListener('mousemove', function(e) {
                     var mw2 = window._canvasModelW || 640;
                     var mh2 = window._canvasModelH || 360;
-                    var pos = document.getElementById('text_position').value;
                     var c   = canvasXY(e);
                     if (dragging && selectedLine >= 0) {
                         var r  = lineRects[selectedLine] || {w: 20, h: 20};
                         var lp = window._linePositions[selectedLine];
+                        var movement = getLineMovement(selectedLine);
                         var newX = Math.round(Math.max(0, Math.min(canvas.width  - r.w, c.cx - dragOffX)) * mw2 / canvas.width);
                         var newY = Math.round(Math.max(0, Math.min(canvas.height - r.h, c.cy - dragOffY)) * mh2 / canvas.height);
-                        if (pos === 'L2R' || pos === 'R2L') {
+                        if (movement === 'L2R' || movement === 'R2L') {
                             window._linePositions[selectedLine] = {x: lp.x, y: newY};
-                        } else if (pos === 'T2B' || pos === 'B2T') {
+                        } else if (movement === 'T2B' || movement === 'B2T') {
                             window._linePositions[selectedLine] = {x: newX, y: lp.y};
                         } else {
                             window._linePositions[selectedLine] = {x: newX, y: newY};
@@ -2394,7 +3173,7 @@ def index():
                     } else if (!dragging) {
                         var prev = hoveredLine;
                         hoveredLine = hitTestLine(c.cx, c.cy);
-                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(pos) : 'default';
+                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(getLineMovement(hoveredLine)) : 'default';
                         if (hoveredLine !== prev) renderCanvasPreview();
                     }
                 });
@@ -2402,8 +3181,7 @@ def index():
                 window.addEventListener('mouseup', function() {
                     if (dragging) {
                         dragging = false;
-                        var pos = document.getElementById('text_position').value;
-                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(pos) : 'default';
+                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(getLineMovement(hoveredLine)) : 'default';
                         saveConfig();
                     }
                 });
@@ -2419,7 +3197,7 @@ def index():
                     var arrows = {ArrowLeft:1, ArrowRight:1, ArrowUp:1, ArrowDown:1};
                     if (!arrows[e.key]) return;
                     e.preventDefault();
-                    var pos  = document.getElementById('text_position').value;
+                    var movement = getLineMovement(selectedLine);
                     var mw2  = window._canvasModelW || 640;
                     var mh2  = window._canvasModelH || 360;
                     var lp   = window._linePositions[selectedLine];
@@ -2432,11 +3210,11 @@ def index():
                     if (curY < 0 && r) curY = Math.round(r.y * mh2 / canvas.height);
                     if (curX < 0) curX = Math.round(mw2 / 2);
                     if (curY < 0) curY = Math.round(mh2 / 2);
-                    if (pos === 'L2R' || pos === 'R2L') {
+                    if (movement === 'L2R' || movement === 'R2L') {
                         if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
                         if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
                         window._linePositions[selectedLine] = {x: lp.x, y: curY};
-                    } else if (pos === 'T2B' || pos === 'B2T') {
+                    } else if (movement === 'T2B' || movement === 'B2T') {
                         if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
                         if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
                         window._linePositions[selectedLine] = {x: curX, y: lp.y};
@@ -2462,31 +3240,260 @@ def index():
                     renderCanvasPreview(); saveConfig();
                 };
 
-                // Re-render on text / color / font-size changes
+                // Re-render on text / color / font / font-size changes
                 for (var li = 1; li <= 4; li++) {
                     (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li));
+                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_color'));
+                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_font_size'));
                 }
-                document.getElementById('text_color').addEventListener('change',     renderCanvasPreview);
-                document.getElementById('text_font_size').addEventListener('change', renderCanvasPreview);
 
                 updateBadges();
                 renderCanvasPreview();
             }
 
+            // ---------------------------------------------------------------------------
+            // Canvas background preview — supports FSEQ (.fseq), video (vid:), image (img:)
+            // ---------------------------------------------------------------------------
+            (function() {
+                var _fseqMeta   = null;
+                var _fseqSeq    = null;   // clean FSEQ name: no seq: prefix, no .fseq suffix
+                var _contentType = null;  // 'seq', 'vid', or 'img'
+                var _contentFile = null;  // filename (vid:/img:) or clean seq name (seq:)
+                window._fseqBgImage = null;
+
+                function fmtTime(ms) {
+                    var s = Math.floor(ms / 1000);
+                    var m = Math.floor(s / 60);
+                    s = s % 60;
+                    return m + ':' + (s < 10 ? '0' : '') + s;
+                }
+
+                // Returns {type, file} for the configured Names Display content, or null.
+                function getConfiguredContent() {
+                    var dp = document.getElementById('name_display_playlist');
+                    var defaultDp = document.getElementById('default_playlist');
+                    // Fall back to waiting content when names content is "None"
+                    var val = (dp && dp.value) ? dp.value : (defaultDp ? defaultDp.value : '');
+                    if (!val) return null;
+                    if (val.startsWith('seq:')) {
+                        return { type: 'seq', file: val.replace(/^seq:/, '').replace(/\.fseq$/, '') };
+                    }
+                    if (val.startsWith('vid:')) {
+                        return { type: 'vid', file: val.replace(/^vid:/, '') };
+                    }
+                    if (val.startsWith('img:')) {
+                        return { type: 'img', file: val.replace(/^img:/, '') };
+                    }
+                    return null;  // plain playlist — no canvas preview
+                }
+
+                window.toggleFseqPreview = function() {
+                    var ct = getConfiguredContent();
+                    var label = document.getElementById('fseq_seq_label');
+                    if (!ct) {
+                        label.textContent = '\u26a0 Select a .fseq, video, or image as Waiting or Names content for background preview.';
+                        label.style.color = '#ff9800';
+                        return;
+                    }
+                    var icon = ct.type === 'seq' ? '🎬 ' : ct.type === 'vid' ? '🎥 ' : '🖼️ ';
+                    label.textContent = icon + ct.file;
+                    label.style.color = '#ccc';
+                    loadBgPreview();
+                };
+
+                function _clearState() {
+                    window._fseqBgImage = null;
+                    _fseqMeta = null;
+                    _fseqSeq  = null;
+                    _contentType = null;
+                    _contentFile = null;
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                }
+
+                function loadBgPreview() {
+                    var ct = getConfiguredContent();
+                    if (!ct) return;
+                    _contentType = ct.type;
+                    _contentFile = ct.file;
+                    _fseqSeq     = (ct.type === 'seq') ? ct.file : null;
+
+                    var loadEl = document.getElementById('fseq_load_status');
+                    var scrubHint = document.getElementById('fseq_scrub_hint');
+                    loadEl.textContent = 'Loading\u2026';
+                    loadEl.style.color = '#aaa';
+                    if (scrubHint) scrubHint.style.display = (ct.type === 'img') ? 'none' : '';
+
+                    if (ct.type === 'seq') {
+                        // ---- FSEQ: fetch info then show scrubber ----
+                        var model = document.getElementById('overlay_model_name').value || '';
+                        fetch('/api/fseq/info?sequence=' + encodeURIComponent(ct.file)
+                                              + '&model=' + encodeURIComponent(model))
+                            .then(function(r) { return r.json(); })
+                            .then(function(data) {
+                                if (data.error) {
+                                    loadEl.textContent = '\u2717 ' + data.error;
+                                    loadEl.style.color = '#f44336';
+                                    return;
+                                }
+                                _fseqMeta = data;
+                                if (data.detected_start_channel) {
+                                    loadEl.textContent = '';
+                                } else {
+                                    loadEl.textContent = '\u26a0 Overlay model not found \u2014 verify model name in settings';
+                                    loadEl.style.color = '#ff9800';
+                                }
+                                var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
+                                var scrubber = document.getElementById('fseq_scrubber');
+                                scrubber.max = totalSec;
+                                scrubber.value = 0;
+                                document.getElementById('fseq_scrubber_row').style.display = '';
+                                document.getElementById('fseq_time_display').textContent =
+                                    '0:00 / ' + fmtTime(data.duration_ms);
+                                doFseqFetch(0);
+                            })
+                            .catch(function(e) {
+                                loadEl.textContent = '\u2717 ' + e;
+                                loadEl.style.color = '#f44336';
+                            });
+
+                    } else if (ct.type === 'vid') {
+                        // ---- Video: show scrubber (time in seconds), fetch frames ----
+                        loadEl.textContent = '';
+                        var scrubber = document.getElementById('fseq_scrubber');
+                        scrubber.max = 300;  // assume up to 5 min; user can scrub
+                        scrubber.value = 0;
+                        document.getElementById('fseq_scrubber_row').style.display = '';
+                        document.getElementById('fseq_time_display').textContent = '0:00';
+                        document.getElementById('fseq_status').textContent =
+                            'Scrub to preview different parts of the video';
+                        doMediaFetch(0);
+
+                    } else {
+                        // ---- Image: load once, no scrubber ----
+                        loadEl.textContent = '';
+                        document.getElementById('fseq_scrubber_row').style.display = 'none';
+                        doMediaFetch(0);
+                    }
+                }
+
+                // Alias so old callers still work
+                window.loadFseqPreview = loadBgPreview;
+
+                var _scrubTimer = null;
+                var _pendingImg  = null;
+
+                function doFseqFetch(seconds) {
+                    if (!_fseqMeta || !_fseqSeq) return;
+                    var sec      = parseInt(seconds);
+                    var frameIdx = Math.min(
+                        Math.round(sec * _fseqMeta.fps),
+                        _fseqMeta.frame_count - 1
+                    );
+                    var mw    = document.getElementById('overlay_model_width').value  || 0;
+                    var mh    = document.getElementById('overlay_model_height').value || 0;
+                    var model = document.getElementById('overlay_model_name').value   || '';
+
+                    var url = '/api/fseq/frame'
+                        + '?sequence=' + encodeURIComponent(_fseqSeq)
+                        + '&frame='    + frameIdx
+                        + '&model='    + encodeURIComponent(model)
+                        + '&width='    + mw
+                        + '&height='   + mh;
+                    if (_fseqMeta.detected_start_channel) {
+                        url += '&start_channel=' + _fseqMeta.detected_start_channel;
+                    }
+                    if (_fseqMeta.detected_channel_count) {
+                        url += '&channel_count=' + _fseqMeta.detected_channel_count;
+                    }
+                    _loadImageUrl(url);
+                }
+
+                function doMediaFetch(seconds) {
+                    if (!_contentType || !_contentFile || _contentType === 'seq') return;
+                    var mw = document.getElementById('overlay_model_width').value  || 0;
+                    var mh = document.getElementById('overlay_model_height').value || 0;
+                    var url = '/api/media/preview'
+                        + '?type='   + _contentType
+                        + '&file='   + encodeURIComponent(_contentFile)
+                        + '&time='   + Math.floor(seconds)
+                        + '&width='  + mw
+                        + '&height=' + mh;
+                    _loadImageUrl(url);
+                }
+
+                function _loadImageUrl(url) {
+                    var statusEl = document.getElementById('fseq_status');
+                    if (_pendingImg) { _pendingImg.onload = null; _pendingImg.onerror = null; _pendingImg.src = ''; }
+                    var img = new Image();
+                    _pendingImg = img;
+                    img.onload = function() {
+                        if (img !== _pendingImg) return;
+                        window._fseqBgImage = img;
+                        statusEl.textContent = '';
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                    };
+                    img.onerror = function() {
+                        if (img !== _pendingImg) return;
+                        fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+                            statusEl.textContent = '\u2717 ' + (d.error || 'Failed to load frame');
+                            statusEl.style.color = '#f44336';
+                        }).catch(function() {
+                            statusEl.textContent = '\u2717 Failed to load preview';
+                            statusEl.style.color = '#f44336';
+                        });
+                    };
+                    img.src = url;
+                }
+
+                window.fseqScrub = function(seconds) {
+                    var loadEl = document.getElementById('fseq_load_status');
+                    if (_contentType === 'seq') {
+                        if (!_fseqMeta) return;
+                        document.getElementById('fseq_time_display').textContent =
+                            fmtTime(parseInt(seconds) * 1000) + ' / ' + fmtTime(_fseqMeta.duration_ms);
+                        clearTimeout(_scrubTimer);
+                        _scrubTimer = setTimeout(function() { doFseqFetch(seconds); }, 150);
+                    } else if (_contentType === 'vid') {
+                        document.getElementById('fseq_time_display').textContent = fmtTime(parseInt(seconds) * 1000);
+                        clearTimeout(_scrubTimer);
+                        _scrubTimer = setTimeout(function() { doMediaFetch(seconds); }, 150);
+                    }
+                    // img: no scrubbing
+                };
+
+                window.clearFseqPreview = function() {
+                    _clearState();
+                    document.getElementById('fseq_scrubber_row').style.display = 'none';
+                    document.getElementById('fseq_status').textContent = '';
+                    document.getElementById('fseq_load_status').textContent = '';
+                };
+            })();
+
+            function updateNameDisplayWarning() {
+                var el = document.getElementById('name_display_playlist');
+                var warn = document.getElementById('name_display_none_warning');
+                if (el && warn) warn.style.display = el.value ? 'none' : 'block';
+            }
+
             // All DOM elements are above this script block — call init functions directly.
             try { initCanvasPreview(); } catch(e) { console.error('Canvas init error:', e); }
+            // Load preview immediately using server-rendered dropdown value, then again after FPP data populates
+            if (window.toggleFseqPreview) window.toggleFseqPreview();
+            updateNameDisplayWarning();
+            loadFonts();
             loadFPPData();
             initRespRows();
             setupAutoSave();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
-            updateScrollSpeedVisibility();
+            for (var _li = 0; _li < 4; _li++) updateLineSpeedRowVisibility(_li);
             initValignButtons();
             (function() {
                 var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
                 var h = parseInt(document.getElementById('overlay_model_height').value) || 0;
                 if (w > 0 && h > 0) updateModelAspect(w, h);
             })();
+            initCustomColors();
 
             function showTab(tabName, btn) {
                 document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -2506,10 +3513,67 @@ def index():
                     .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '↻ Refresh Lists'; } });
             }
 
+            // Loads the actual font file into the browser via the CSS Font Loading API
+            // so canvas ctx.font can render it for real. Without this, the preview
+            // canvas silently falls back to generic sans-serif for every font, since
+            // the browser never has any of these files installed as system fonts.
+            window._loadedFonts = window._loadedFonts || {};
+            function ensureFontLoaded(name) {
+                if (!name || window._loadedFonts[name]) return window._loadedFonts[name] || Promise.resolve();
+                var ff = new FontFace(name, 'url("/api/fonts/file/' + encodeURIComponent(name) + '")');
+                var p = ff.load().then(function(loaded) {
+                    document.fonts.add(loaded);
+                }).catch(function(err) {
+                    console.warn('Font preview load failed for "' + name + '":', err);
+                });
+                window._loadedFonts[name] = p;
+                return p;
+            }
+
+            function loadFonts() {
+                var currentFonts = (window._lineFontsInit && Array.isArray(window._lineFontsInit))
+                    ? window._lineFontsInit : ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'];
+                fetch('/api/fpp/fonts')
+                .then(r => r.json())
+                .then(function(fonts) {
+                    for (var i = 1; i <= 4; i++) {
+                        var sel = document.getElementById('line_' + i + '_font');
+                        if (!sel) continue;
+                        var current = currentFonts[i - 1] || 'FreeSans';
+                        if (fonts && fonts.length > 0) {
+                            sel.innerHTML = '<option value="">-- Select Font --</option>';
+                            var groups = {};
+                            fonts.forEach(function(font) {
+                                var cat = font.category || 'System';
+                                if (!groups[cat]) {
+                                    groups[cat] = document.createElement('optgroup');
+                                    groups[cat].label = cat;
+                                    sel.appendChild(groups[cat]);
+                                }
+                                groups[cat].appendChild(new Option(font.name, font.name, false, font.name === current));
+                            });
+                        } else {
+                            sel.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                        }
+                    }
+                    return Promise.all(currentFonts.map(ensureFontLoaded));
+                })
+                .then(function() {
+                    if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
+                })
+                .catch(function() {
+                    for (var i = 1; i <= 4; i++) {
+                        var sel = document.getElementById('line_' + i + '_font');
+                        if (sel) sel.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
+                    }
+                });
+            }
+
             function loadFPPData() {
                 fetch('/api/fpp/data')
                 .then(r => r.json())
                 .then(data => {
+                    if (data.error) console.warn('FPP data partial error:', data.error);
                     const defaultSelect = document.getElementById('default_playlist');
                     const nameSelect = document.getElementById('name_display_playlist');
                     const currentDefault = "{{ config.get('default_playlist', '') }}";
@@ -2545,6 +3609,36 @@ def index():
                         nameSelect.add(sg2);
                     }
 
+                    if (data.videos && data.videos.length > 0) {
+                        const vg1 = document.createElement('optgroup');
+                        vg1.label = '🎥 Videos';
+                        const vg2 = document.createElement('optgroup');
+                        vg2.label = '🎥 Videos';
+                        data.videos.forEach(vid => {
+                            const val = 'vid:' + vid;
+                            vg1.appendChild(new Option(vid, val, false, val === currentDefault));
+                            vg2.appendChild(new Option(vid, val, false, val === currentName));
+                        });
+                        defaultSelect.add(vg1);
+                        nameSelect.add(vg2);
+                    }
+
+                    if (data.images && data.images.length > 0) {
+                        const ig1 = document.createElement('optgroup');
+                        ig1.label = '🖼️ Images';
+                        const ig2 = document.createElement('optgroup');
+                        ig2.label = '🖼️ Images';
+                        data.images.forEach(img => {
+                            const val = 'img:' + img;
+                            ig1.appendChild(new Option(img, val, false, val === currentDefault));
+                            ig2.appendChild(new Option(img, val, false, val === currentName));
+                        });
+                        defaultSelect.add(ig1);
+                        nameSelect.add(ig2);
+                    }
+
+                    window._fppSeqList = data.sequences || [];
+
                     const modelSelect = document.getElementById('overlay_model_name');
                     const currentModel = "{{ config.get('overlay_model_name', 'Texting Matrix') }}";
                     modelSelect.innerHTML = '<option value="">-- None --</option>';
@@ -2577,21 +3671,14 @@ def index():
                         saveConfig();
                     });
 
-                    const fontSelect = document.getElementById('text_font');
-                    const currentFont = "{{ config.get('text_font', 'FreeSans') }}";
-                    fontSelect.innerHTML = '<option value="">-- Select Font --</option>';
-
-                    if (data.fonts && data.fonts.length > 0) {
-                        data.fonts.forEach(font => {
-                            const opt = new Option(font, font, false, font === currentFont);
-                            opt.style.fontFamily = font + ', sans-serif';
-                            fontSelect.add(opt);
-                        });
-                    } else {
-                        fontSelect.innerHTML = '<option value="FreeSans">FreeSans (default)</option>';
-                    }
+                    // Load background preview now that dropdowns are populated
+                    try { if (window.toggleFseqPreview) window.toggleFseqPreview(); } catch(e) { console.error('Preview error:', e); }
+                    updateNameDisplayWarning();
                 })
-                .catch(function(e) { console.error('FPP data load failed:', e); });
+                .catch(function(e) {
+                    console.error('FPP data load failed:', e);
+                    try { if (window.toggleFseqPreview) window.toggleFseqPreview(); } catch(e2) {}
+                });
             }
 
 
@@ -2621,11 +3708,14 @@ var _saveTimer = null;
                     default_playlist: document.getElementById('default_playlist').value,
                     name_display_playlist: document.getElementById('name_display_playlist').value,
                     overlay_model_name: document.getElementById('overlay_model_name').value,
-                    text_color: document.getElementById('text_color_hex').value,
-                    text_font: document.getElementById('text_font').value,
-                    text_font_size: parseInt(document.getElementById('text_font_size').value),
-                    scroll_speed: parseInt(document.getElementById('scroll_speed').value),
-                    text_position: document.getElementById('text_position').value,
+                    line_fonts: [0, 1, 2, 3].map(function(i) {
+                        var el = document.getElementById('line_' + (i + 1) + '_font');
+                        return el && el.value ? el.value : 'FreeSans';
+                    }),
+                    line_font_sizes: [0, 1, 2, 3].map(function(i) {
+                        var el = document.getElementById('line_' + (i + 1) + '_font_size');
+                        return el ? (parseInt(el.value) || 48) : 48;
+                    }),
                     overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
                     overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
                     message_lines: [
@@ -2635,6 +3725,13 @@ var _saveTimer = null;
                         document.getElementById('line_4').value,
                     ],
                     line_positions: window._linePositions || [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}],
+                    line_colors: [0, 1, 2, 3].map(function(i) {
+                        var el = document.getElementById('line_' + (i + 1) + '_color');
+                        return el ? el.value.toUpperCase() : '#FF0000';
+                    }),
+                    line_movements: window._lineMovements || ['Center','Center','Center','Center'],
+                    line_speeds: window._lineSpeeds || [5,5,5,5],
+                    custom_colors: window._customColors || [],
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
                     sms_response_success: document.getElementById('sms_response_success').checked,
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
@@ -2683,9 +3780,8 @@ var _saveTimer = null;
                 });
 
                 // Checkboxes, selects, color picker — save immediately on change
-                ['profanity_filter','use_whitelist','allow_duplicate_names','text_color',
+                ['profanity_filter','use_whitelist','allow_duplicate_names',
                  'default_playlist','name_display_playlist','overlay_model_name',
-                 'text_font','text_position','scroll_speed',
                  'one_word_only','two_words_max',
                  'sms_response_success','sms_response_profanity','sms_response_rate_limited',
                  'sms_response_duplicate','sms_response_invalid_format',
@@ -2694,10 +3790,19 @@ var _saveTimer = null;
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('change', saveConfig);
                 });
+                // Reload background preview when Names Display content, Default Waiting
+                // content (used as the fallback when Names content is None), or model changes
+                ['name_display_playlist', 'default_playlist', 'overlay_model_name'].forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (el) el.addEventListener('change', function() {
+                        if (window.toggleFseqPreview) window.toggleFseqPreview();
+                        updateNameDisplayWarning();
+                    });
+                });
+
                 // Text, number inputs — save when user clicks away
                 ['account_sid','auth_token','phone_number',
                  'poll_interval','display_duration','max_messages','max_length',
-                 'text_color_hex','text_font_size',
                  'line_1','line_2','line_3','line_4',
                  'response_success','response_profanity','response_rate_limited',
                  'response_duplicate','response_invalid_format',
@@ -2785,7 +3890,117 @@ var _saveTimer = null;
                     }
                 });
             }
+
+            // ===== Color Picker =====
+            function initCustomColors() {
+                window._customColors = (window._customColorsInit && Array.isArray(window._customColorsInit))
+                    ? window._customColorsInit.slice() : [];
+            }
+
+            // Per-line color swatch (next to each line's reset-to-center button)
+            function onLineColorChange(i) {
+                if (typeof renderCanvasPreview === 'function') renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // ===== Per-line saved-color palette popover =====
+            // Lets you save the current swatch color, or recall a previously-saved one,
+            // right where you pick a line's color — there's no separate global picker.
+            function toggleColorPalette(i) {
+                var pop = document.getElementById('line_' + (i + 1) + '_palette_popover');
+                if (!pop) return;
+                var opening = pop.style.display === 'none' || !pop.style.display;
+                document.querySelectorAll('.color-palette-popover').forEach(function(p) { p.style.display = 'none'; });
+                if (opening) {
+                    renderColorPalettePopover(i);
+                    pop.style.display = 'block';
+                }
+            }
+            document.addEventListener('click', function(e) {
+                if (e.target.closest && e.target.closest('.line-color-group')) return;
+                document.querySelectorAll('.color-palette-popover').forEach(function(p) { p.style.display = 'none'; });
+            });
+            function renderColorPalettePopover(i) {
+                var pop = document.getElementById('line_' + (i + 1) + '_palette_popover');
+                if (!pop) return;
+                pop.innerHTML = '';
+                var swatches = document.createElement('div');
+                swatches.className = 'color-palette-swatches';
+                var colors = window._customColors || [];
+                if (colors.length === 0) {
+                    var empty = document.createElement('div');
+                    empty.className = 'color-palette-empty';
+                    empty.textContent = 'No saved colors yet';
+                    swatches.appendChild(empty);
+                } else {
+                    colors.forEach(function(hex) {
+                        var sw = document.createElement('button');
+                        sw.type = 'button';
+                        sw.className = 'color-palette-swatch';
+                        sw.title = hex + ' (right-click to remove)';
+                        sw.style.background = hex;
+                        sw.onclick = function() { applyLineColor(i, hex); };
+                        sw.oncontextmenu = function(e) { e.preventDefault(); removeCustomColor(i, hex); };
+                        swatches.appendChild(sw);
+                    });
+                }
+                pop.appendChild(swatches);
+                var saveBtn = document.createElement('button');
+                saveBtn.type = 'button';
+                saveBtn.className = 'color-palette-save-btn';
+                saveBtn.textContent = '+ Save current color';
+                saveBtn.onclick = function() { saveCustomColor(i); };
+                pop.appendChild(saveBtn);
+            }
+            function applyLineColor(i, hex) {
+                var el = document.getElementById('line_' + (i + 1) + '_color');
+                if (!el) return;
+                el.value = hex;
+                onLineColorChange(i);
+                var pop = document.getElementById('line_' + (i + 1) + '_palette_popover');
+                if (pop) pop.style.display = 'none';
+            }
+            function saveCustomColor(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_color');
+                var hex = el ? el.value.toUpperCase() : '';
+                if (!/^#[0-9A-F]{6}$/.test(hex)) return;
+                window._customColors = window._customColors || [];
+                if (window._customColors.indexOf(hex) === -1) {
+                    window._customColors.push(hex);
+                    if (window._customColors.length > 20) window._customColors.shift();
+                    renderColorPalettePopover(i);
+                    if (typeof saveConfig === 'function') saveConfig();
+                }
+            }
+            function removeCustomColor(i, hex) {
+                window._customColors = (window._customColors || []).filter(function(c) { return c !== hex; });
+                renderColorPalettePopover(i);
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Blacklist content-warning modal
+            function showBlacklistWarning() {
+                document.getElementById('blacklist-warning-modal').style.display = 'flex';
+            }
+            function hideBlacklistWarning() {
+                document.getElementById('blacklist-warning-modal').style.display = 'none';
+            }
+            function proceedToBlacklist() {
+                location.href = '/blacklist';
+            }
         </script>
+
+        <!-- Blacklist content-warning modal -->
+        <div id="blacklist-warning-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+            <div style="background:#2a2a2a; color:#eee; border-radius:8px; padding:24px; max-width:420px; width:90%; box-shadow:0 4px 20px rgba(0,0,0,0.5);">
+                <h3 style="margin-top:0; color:#ffc107;">⚠️ Warning</h3>
+                <p style="margin-bottom:20px;">Blacklist contains profanity, and sexual related messaging. Viewer discretion is advised.</p>
+                <div style="display:flex; gap:10px; justify-content:flex-end;">
+                    <button onclick="hideBlacklistWarning()" style="background:#555; color:#fff; padding:10px 18px; border:none; border-radius:5px; cursor:pointer;">Return</button>
+                    <button onclick="proceedToBlacklist()" style="background:#f44336; color:#fff; padding:10px 18px; border:none; border-radius:5px; cursor:pointer;">Proceed</button>
+                </div>
+            </div>
+        </div>
     </body>
     </html>
     """
@@ -2821,6 +4036,33 @@ def update_config():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
+@app.route('/api/fpp/fonts')
+def fpp_fonts_endpoint():
+    try:
+        return jsonify(get_fpp_fonts())
+    except Exception:
+        return jsonify([])
+
+@app.route('/api/fonts/file/<name>')
+def serve_font_file(name):
+    """Serve raw font bytes so the browser can @font-face them for the config
+    page's canvas preview — otherwise the preview silently falls back to a
+    generic sans-serif for every font, since the browser never has the actual
+    file. Only serves fonts found by _enumerate_fonts(); name is matched
+    against that list, never used to build a filesystem path directly."""
+    try:
+        for f in _enumerate_fonts():
+            if f['name'] == name:
+                ext = os.path.splitext(f['path'])[1].lower()
+                mimetype = {'.ttf': 'font/ttf', '.otf': 'font/otf'}.get(ext, 'application/octet-stream')
+                with open(f['path'], 'rb') as fh:
+                    data = fh.read()
+                return Response(data, mimetype=mimetype)
+        return Response(status=404)
+    except Exception as e:
+        logging.error(f"Error serving font file '{name}': {e}")
+        return Response(status=500)
+
 @app.route('/api/fpp/data')
 def get_fpp_data():
     global _fpp_data_cache, _fpp_data_cache_time
@@ -2829,18 +4071,25 @@ def get_fpp_data():
         if _fpp_data_cache and (time.time() - _fpp_data_cache_time) < _FPP_DATA_CACHE_TTL:
             return jsonify(_fpp_data_cache)
 
-        # Fetch all 4 in parallel instead of sequentially
+        # Fetch all in parallel instead of sequentially
         results = {}
         tasks = {
             'playlists': get_fpp_playlists,
             'sequences': get_fpp_sequences,
             'models':    get_fpp_models,
             'fonts':     get_fpp_fonts,
+            'videos':    get_fpp_videos,
+            'images':    get_fpp_images,
         }
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             futures = {executor.submit(fn): key for key, fn in tasks.items()}
             for future in as_completed(futures):
-                results[futures[future]] = future.result()
+                key = futures[future]
+                try:
+                    results[key] = future.result()
+                except Exception as e:
+                    logging.error(f"FPP data task '{key}' failed: {e}")
+                    results[key] = []
 
         _fpp_data_cache = results
         _fpp_data_cache_time = time.time()
@@ -2862,6 +4111,267 @@ def test_fpp_api():
         return jsonify({"success": success, "status": status})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/fseq/debug')
+def fseq_debug():
+    """Diagnostic endpoint — returns JSON describing exactly how the FSEQ frame would be read.
+    ?sequence=name&model=ModelName   (same params as /api/fseq/frame)
+    Helps diagnose channel-offset and bpp issues without needing SSH."""
+    seq        = request.args.get('sequence', '').strip()
+    model_name = request.args.get('model', config.get('overlay_model_name', '')).strip()
+
+    if not seq:
+        return jsonify({'error': 'No sequence specified'}), 400
+
+    name     = seq.removeprefix('seq:').removesuffix('.fseq')
+    filepath = os.path.join(FSEQ_SEQUENCE_PATH, name + '.fseq')
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
+
+    result = {
+        'sequence':      name,
+        'model':         model_name,
+        'zstd_available': ZSTD_AVAILABLE,
+        'pil_available':  PIL_AVAILABLE,
+    }
+
+    try:
+        hdr = parse_fseq_header(filepath)
+        comp_names = {0: 'uncompressed', 1: 'zlib', 2: 'zstd'}
+        result['fseq'] = {
+            'channel_count':     hdr['channel_count'],
+            'frame_count':       hdr['frame_count'],
+            'fps':               round(hdr['fps'], 2),
+            'step_time_ms':      hdr['step_time_ms'],
+            'compression_type':  hdr['compression_type'],
+            'compression_name':  comp_names.get(hdr['compression_type'], 'unknown'),
+            'chan_data_offset':   hdr['chan_data_offset'],
+            'num_comp_blocks':   len(hdr['comp_blocks']),
+            'num_sparse_ranges': hdr['num_sparse_ranges'],
+            'sparse_ranges':     hdr['sparse_ranges'],
+            'sparse_sum':        sum(sr['count'] for sr in hdr['sparse_ranges']),
+        }
+    except Exception as e:
+        result['fseq_error'] = str(e)
+        return jsonify(result)
+
+    sc, cc = get_model_channel_info(model_name) if model_name else (None, None)
+    mw = int(request.args.get('width',  config.get('overlay_model_width',  0)))
+    mh = int(request.args.get('height', config.get('overlay_model_height', 0)))
+    num_pixels = mw * mh if mw > 0 and mh > 0 else 0
+    ch_count   = cc if cc else (num_pixels * 3 if num_pixels else None)
+    bpp        = (ch_count // num_pixels) if (num_pixels and ch_count) else None
+    start_ch   = (sc - 1) if sc else 0   # 0-indexed
+
+    resolved_frame_byte = _sparse_ch_to_frame_byte(hdr['sparse_ranges'], start_ch)
+    result['model_info'] = {
+        'start_channel_1idx':   sc,
+        'channel_count':        cc,
+        'width':                mw,
+        'height':               mh,
+        'num_pixels':           num_pixels,
+        'effective_ch_count':   ch_count,
+        'effective_bpp':        bpp,
+        'start_ch_0idx':        start_ch,
+        'resolved_frame_byte':  resolved_frame_byte,  # None = not in sparse ranges
+    }
+
+    # Try reading frame 0 and show first 5 pixel values
+    if ch_count and num_pixels:
+        try:
+            raw = read_fseq_frame(hdr, 0, start_ch, ch_count)
+            sample_pixels = []
+            actual_bpp = bpp or 3
+            for i in range(min(5, num_pixels)):
+                b = i * actual_bpp
+                if b + 2 < len(raw):
+                    sample_pixels.append([raw[b], raw[b+1], raw[b+2]])
+                else:
+                    sample_pixels.append(None)
+            result['frame0_sample'] = {
+                'bytes_read':    len(raw),
+                'bytes_expected': ch_count,
+                'first_5_pixels_rgb': sample_pixels,
+                'all_zero':      all(v == 0 for v in raw),
+                'all_same':      len(set(raw)) == 1,
+            }
+        except Exception as e:
+            result['frame0_error'] = str(e)
+
+    return jsonify(result)
+
+@app.route('/api/fseq/info')
+def fseq_info():
+    """Return FSEQ file metadata for the canvas scrubber (frame count, fps, duration).
+    Also attempts to auto-detect the overlay model's start channel from FPP."""
+    seq        = request.args.get('sequence', '').strip()
+    model_name = request.args.get('model', config.get('overlay_model_name', '')).strip()
+    if not seq:
+        return jsonify({'error': 'No sequence specified'}), 400
+    name = seq.removeprefix('seq:').removesuffix('.fseq')
+    filepath = os.path.join(FSEQ_SEQUENCE_PATH, name + '.fseq')
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
+    try:
+        hdr = parse_fseq_header(filepath)
+        detected_sc, detected_cc = (get_model_channel_info(model_name)
+                                    if model_name else (None, None))
+        return jsonify({
+            'frame_count':             hdr['frame_count'],
+            'fps':                     round(hdr['fps'], 3),
+            'duration_ms':             hdr['duration_ms'],
+            'channel_count':           hdr['channel_count'],
+            'compression_type':        hdr['compression_type'],
+            'step_time_ms':            hdr['step_time_ms'],
+            'detected_start_channel':  detected_sc,
+            'detected_channel_count':  detected_cc,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/fseq/frame')
+def fseq_frame():
+    """Return a single FSEQ frame as a PNG image for the canvas background preview."""
+    if not PIL_AVAILABLE:
+        return jsonify({'error': 'Pillow not installed — run fpp_install.sh'}), 503
+
+    seq        = request.args.get('sequence', '').strip()
+    frame_idx  = max(0, int(request.args.get('frame', 0)))
+    model_name = request.args.get('model', config.get('overlay_model_name', ''))
+    width      = int(request.args.get('width',  config.get('overlay_model_width',  0)))
+    height     = int(request.args.get('height', config.get('overlay_model_height', 0)))
+    start_ch_override  = request.args.get('start_channel', '').strip()
+    ch_count_override  = request.args.get('channel_count', '').strip()
+
+    if not seq:
+        return jsonify({'error': 'No sequence specified'}), 400
+    if width <= 0 or height <= 0:
+        return jsonify({'error': 'Overlay model dimensions unknown — select a model first'}), 400
+
+    name = seq.removeprefix('seq:').removesuffix('.fseq')
+    filepath = os.path.join(FSEQ_SEQUENCE_PATH, name + '.fseq')
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Sequence not found: {name}.fseq'}), 404
+
+    # Determine start channel and channel count from FPP model info
+    if start_ch_override:
+        start_ch_1 = int(start_ch_override)
+        ch_count   = int(ch_count_override) if ch_count_override else width * height * 3
+    else:
+        start_ch_1, ch_count_fpp = (get_model_channel_info(model_name)
+                                    if model_name else (None, None))
+        ch_count = ch_count_fpp if ch_count_fpp else width * height * 3
+
+    if not start_ch_1:
+        return jsonify({
+            'error': (
+                f'Could not find start channel for model "{model_name}". '
+                'Verify the overlay model name matches an FPP channel output model.'
+            )
+        }), 400
+
+    try:
+        hdr          = parse_fseq_header(filepath)
+        frame_idx    = min(frame_idx, hdr['frame_count'] - 1)
+        start_ch     = start_ch_1 - 1   # convert to 0-indexed
+        num_pixels   = width * height
+        # bytes_per_pixel: 3 for RGB, 4 for RGBW — derived from actual channel count
+        bpp          = max(3, ch_count // num_pixels) if num_pixels > 0 else 3
+
+        raw = read_fseq_frame(hdr, frame_idx, start_ch, ch_count)
+
+        logging.info(
+            f"FSEQ preview: model={model_name} start_ch={start_ch_1} "
+            f"ch_count={ch_count} bpp={bpp} frame={frame_idx} "
+            f"first_px=({raw[0] if raw else '?'},{raw[1] if len(raw)>1 else '?'},"
+            f"{raw[2] if len(raw)>2 else '?'})"
+        )
+
+        img = Image.new('RGB', (width, height))
+        pixels = []
+        for i in range(num_pixels):
+            b = i * bpp
+            if b + 2 < len(raw):
+                pixels.append((raw[b], raw[b + 1], raw[b + 2]))
+            else:
+                pixels.append((0, 0, 0))
+        img.putdata(pixels)
+
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return Response(buf.read(), mimetype='image/png',
+                        headers={'Cache-Control': 'no-store'})
+    except Exception as e:
+        logging.error(f"FSEQ frame error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/media/preview')
+def media_preview():
+    """Return a canvas-preview PNG for an image or video file.
+    ?type=img&file=filename.jpg  — resize image to model dims and return as PNG.
+    ?type=vid&file=filename.mp4&time=0 — extract a frame at `time` seconds via ffmpeg,
+        resize to model dims, return as PNG.  Falls back to a black frame if ffmpeg
+        is unavailable or extraction fails."""
+    if not PIL_AVAILABLE:
+        return jsonify({'error': 'Pillow not installed — run fpp_install.sh'}), 503
+
+    media_type = request.args.get('type', '').strip()   # 'img' or 'vid'
+    filename   = request.args.get('file', '').strip()
+    time_sec   = max(0.0, float(request.args.get('time', 0)))
+    width  = int(request.args.get('width',  config.get('overlay_model_width',  0)))
+    height = int(request.args.get('height', config.get('overlay_model_height', 0)))
+
+    if not filename or media_type not in ('img', 'vid'):
+        return jsonify({'error': 'Requires ?type=img|vid&file=filename'}), 400
+    if width <= 0 or height <= 0:
+        return jsonify({'error': 'Overlay model dimensions unknown — select a model first'}), 400
+
+    # Security: no path traversal — strip all directory components
+    filename = os.path.basename(filename)
+
+    try:
+        if media_type == 'img':
+            img_path = os.path.join(FPP_IMAGES_PATH, filename)
+            if not os.path.exists(img_path):
+                return jsonify({'error': f'Image not found: {filename}'}), 404
+            img = Image.open(img_path).convert('RGB')
+            img = img.resize((width, height), Image.LANCZOS)
+
+        else:  # vid
+            vid_path = os.path.join(FPP_VIDEOS_PATH, filename)
+            if not os.path.exists(vid_path):
+                return jsonify({'error': f'Video not found: {filename}'}), 404
+            # Try ffmpeg to extract a single frame at the requested timestamp
+            import subprocess as _sp
+            try:
+                result = _sp.run(
+                    [
+                        'ffmpeg', '-ss', str(time_sec), '-i', vid_path,
+                        '-vframes', '1', '-f', 'image2pipe',
+                        '-vcodec', 'png', '-'
+                    ],
+                    capture_output=True, timeout=10
+                )
+                if result.returncode == 0 and result.stdout:
+                    img = Image.open(io.BytesIO(result.stdout)).convert('RGB')
+                    img = img.resize((width, height), Image.LANCZOS)
+                else:
+                    # ffmpeg failed — return a dark grey placeholder
+                    img = Image.new('RGB', (width, height), (32, 32, 32))
+            except (FileNotFoundError, _sp.TimeoutExpired):
+                # ffmpeg not installed on this system — return placeholder
+                img = Image.new('RGB', (width, height), (32, 32, 32))
+
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        buf.seek(0)
+        return Response(buf.read(), mimetype='image/png',
+                        headers={'Cache-Control': 'no-store'})
+    except Exception as e:
+        logging.error(f"media_preview error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/test')
 def test_twilio():
@@ -3851,6 +5361,10 @@ def view_messages():
                     clearTimeout(refreshTimer);
                     if (!loadedTabs[date]) { loadedTabs[date] = true; loadHistoryTab(date); }
                 }
+                // Class change doesn't trigger MutationObserver — report height explicitly
+                requestAnimationFrame(function() {
+                    window.parent.postMessage({ type: 'iframeHeight', height: document.body.scrollHeight }, '*');
+                });
             }
 
             function loadHistoryTab(date) {
@@ -4038,10 +5552,18 @@ def api_deactivate():
             r = requests.get(effect_stop_url, timeout=3)
             logging.info(f"🛑 FSEQ Effect Stop: {r.status_code} - {r.text}")
 
-        # Stop Now catches playlists and any foreground sequences
+        # Stop Now catches playlists, videos, and foreground sequences
         command_url = f"{FPP_HOST}/api/command/{urllib.parse.quote('Stop Now')}"
         r2 = requests.get(command_url, timeout=3)
         logging.info(f"🛑 Stop Now: {r2.status_code} - {r2.text}")
+
+        # Image content renders via overlay model (State 2 Opaque) — must clear explicitly
+        overlay_model = config.get('overlay_model_name', '')
+        if default.startswith('img:') and overlay_model:
+            encoded = urllib.parse.quote(overlay_model)
+            state_url = f"{FPP_HOST}/api/overlays/model/{encoded}/state"
+            requests.put(state_url, json={"State": 0}, timeout=3)
+            logging.info(f"🛑 Overlay cleared (img content stopped)")
     except Exception as e:
         logging.warning(f"Could not stop FPP playback: {e}")
 
