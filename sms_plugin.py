@@ -2522,6 +2522,7 @@ def index():
                         <div id="canvas_section">
                             <label>Position Preview:</label>
                             <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Click a line to select it, then drag inside its box to move it, or drag an edge/corner to resize. Text auto-sizes to fill the box — the box is the MAX size text can be.</p>
+                            <p class="help-text" style="margin:-4px 0 8px;">↔️ For scrolling text (Left/Right/Top/Bottom movement), the box is also where the text is allowed to show — it enters and exits at the box's own edges, not the display's. Drag the box past the display's edge (into the shaded margin) to make text start or end off-page instead of at the visible boundary.</p>
                             <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
                                 <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
@@ -3024,8 +3025,13 @@ def index():
                 // modelScaleX/Y (model units -> canvas px) and gutterOriginX/Y + modelPxW/H
                 // (canvas-px offset/size of the model's true visible area) are recomputed by
                 // renderCanvasPreview() every render and read by the mouse handlers below to
-                // convert between canvas-px and model-unit coordinates.
-                var GUTTER_FRAC = 0.15;
+                // convert between canvas-px and model-unit coordinates. X/Y are independent
+                // fractions (most models are much wider than tall, so an equal-fraction gutter
+                // reads as disproportionately wide on the sides); renderCanvasPreview adjusts
+                // canvas.height each render so modelScaleX/Y stay equal despite that (otherwise
+                // the model itself would be drawn non-uniformly stretched).
+                var GUTTER_FRAC_X = 0.10;
+                var GUTTER_FRAC_Y = 0.15;
                 var modelScaleX = 1, modelScaleY = 1;
                 var gutterOriginX = 0, gutterOriginY = 0;
                 var modelPxW = 0, modelPxH = 0;
@@ -3117,29 +3123,48 @@ def index():
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
 
-                    // The gutter only takes up canvas space when it could actually be used --
-                    // if no line scrolls, there's nothing to position off-page, so skip it
-                    // entirely and let the model fill the whole canvas as before.
-                    var hasScrollingLine = [0, 1, 2, 3].some(function(li) {
+                    // The gutter only takes up canvas space on an axis that could actually use
+                    // it -- a purely left/right-scrolling line has no business reserving a
+                    // vertical margin (that would just shrink modelScaleY, and with it every
+                    // line's auto-fit font height, for no reason), and vice versa. So X and Y
+                    // are gated independently by whether any line actually scrolls that axis.
+                    var hasScrollingLineX = [0, 1, 2, 3].some(function(li) {
                         var m = getLineMovement(li);
-                        return m === 'L2R' || m === 'R2L' || m === 'T2B' || m === 'B2T';
+                        return m === 'L2R' || m === 'R2L';
                     });
-                    var frac = hasScrollingLine ? GUTTER_FRAC : 0;
+                    var hasScrollingLineY = [0, 1, 2, 3].some(function(li) {
+                        var m = getLineMovement(li);
+                        return m === 'T2B' || m === 'B2T';
+                    });
+                    var fracX = hasScrollingLineX ? GUTTER_FRAC_X : 0;
+                    var fracY = hasScrollingLineY ? GUTTER_FRAC_Y : 0;
+
+                    // The model itself always renders at the same fixed scale (640px wide
+                    // equivalent, matching the canvas.width=640 convention used elsewhere) --
+                    // gutters GROW the canvas outward to make room for themselves rather than
+                    // shrinking that base scale to fit within a fixed canvas size. Shrinking
+                    // the scale instead would shrink the model's own on-canvas size (and with
+                    // it every line's auto-fit font height) just from turning scrolling on,
+                    // even on an axis the gutter isn't even needed for.
+                    var newCanvasWidth  = Math.round(640 * (1 + 2 * fracX));
+                    var newCanvasHeight = Math.round(640 * (mh / mw) * (1 + 2 * fracY));
+                    if (canvas.width  !== newCanvasWidth)  canvas.width  = newCanvasWidth;
+                    if (canvas.height !== newCanvasHeight) canvas.height = newCanvasHeight;
 
                     // modelScaleX/Y convert model units -> canvas px across the FULL canvas
                     // (model + gutter on both sides); gutterOriginX/Y + modelPxW/H then locate
                     // the model's true visible area within that canvas. Recomputed every render
                     // since these depend on the current model size (and whether any line scrolls).
-                    modelScaleX = canvas.width  / (mw * (1 + 2 * frac));
-                    modelScaleY = canvas.height / (mh * (1 + 2 * frac));
-                    gutterOriginX = mw * frac * modelScaleX;
-                    gutterOriginY = mh * frac * modelScaleY;
+                    modelScaleX = canvas.width  / (mw * (1 + 2 * fracX));
+                    modelScaleY = canvas.height / (mh * (1 + 2 * fracY));
+                    gutterOriginX = mw * fracX * modelScaleX;
+                    gutterOriginY = mh * fracY * modelScaleY;
                     modelPxW = mw * modelScaleX;
                     modelPxH = mh * modelScaleY;
 
                     // Gutter background (off-page space), then the model's true visible area
                     // on top of it, outlined so the boundary between on-/off-page is clear.
-                    if (frac > 0) {
+                    if (fracX > 0 || fracY > 0) {
                         ctx.fillStyle = '#2a2a2a';
                         ctx.fillRect(0, 0, canvas.width, canvas.height);
                     }
@@ -3150,7 +3175,7 @@ def index():
                         ctx.drawImage(window._fseqBgImage, gutterOriginX, gutterOriginY, modelPxW, modelPxH);
                         ctx.imageSmoothingEnabled = true;
                     }
-                    if (frac > 0) {
+                    if (fracX > 0 || fracY > 0) {
                         ctx.save();
                         ctx.strokeStyle = 'rgba(79,195,247,0.7)';
                         ctx.lineWidth = 1;
@@ -3429,10 +3454,10 @@ def index():
                     if (curY === -1) curY = Math.round(mh2 / 2);
                     // Scroll axis can nudge into the gutter; the cross axis (and any
                     // non-scrolling box) stays within the model's true visible area.
-                    var loX = scrollXK ? Math.round(-mw2 * GUTTER_FRAC) : 0;
-                    var hiX = (scrollXK ? Math.round(mw2 * (1 + GUTTER_FRAC)) : mw2) - 1;
-                    var loY = scrollYK ? Math.round(-mh2 * GUTTER_FRAC) : 0;
-                    var hiY = (scrollYK ? Math.round(mh2 * (1 + GUTTER_FRAC)) : mh2) - 1;
+                    var loX = scrollXK ? Math.round(-mw2 * GUTTER_FRAC_X) : 0;
+                    var hiX = (scrollXK ? Math.round(mw2 * (1 + GUTTER_FRAC_X)) : mw2) - 1;
+                    var loY = scrollYK ? Math.round(-mh2 * GUTTER_FRAC_Y) : 0;
+                    var hiY = (scrollYK ? Math.round(mh2 * (1 + GUTTER_FRAC_Y)) : mh2) - 1;
                     if (e.key === 'ArrowLeft')  curX = Math.max(loX, curX - step);
                     if (e.key === 'ArrowRight') curX = Math.min(hiX, curX + step);
                     if (e.key === 'ArrowUp')    curY = Math.max(loY, curY - step);
