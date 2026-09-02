@@ -3018,12 +3018,14 @@ def index():
                 // popping in/out at the visible edge. Sized as a fraction of the model's own
                 // W/H so it scales sensibly with model size; drawn as a shaded margin around
                 // the model area in renderCanvasPreview so the off-page portion of a box stays
-                // visible and grabbable rather than being invisible dead space.
+                // visible and grabbable rather than being invisible dead space. Only actually
+                // reserved on-canvas when at least one line scrolls (see renderCanvasPreview) --
+                // otherwise the model fills the whole canvas as before.
                 // modelScaleX/Y (model units -> canvas px) and gutterOriginX/Y + modelPxW/H
                 // (canvas-px offset/size of the model's true visible area) are recomputed by
                 // renderCanvasPreview() every render and read by the mouse handlers below to
                 // convert between canvas-px and model-unit coordinates.
-                var GUTTER_FRAC = 0.25;
+                var GUTTER_FRAC = 0.15;
                 var modelScaleX = 1, modelScaleY = 1;
                 var gutterOriginX = 0, gutterOriginY = 0;
                 var modelPxW = 0, modelPxH = 0;
@@ -3115,21 +3117,32 @@ def index():
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
 
+                    // The gutter only takes up canvas space when it could actually be used --
+                    // if no line scrolls, there's nothing to position off-page, so skip it
+                    // entirely and let the model fill the whole canvas as before.
+                    var hasScrollingLine = [0, 1, 2, 3].some(function(li) {
+                        var m = getLineMovement(li);
+                        return m === 'L2R' || m === 'R2L' || m === 'T2B' || m === 'B2T';
+                    });
+                    var frac = hasScrollingLine ? GUTTER_FRAC : 0;
+
                     // modelScaleX/Y convert model units -> canvas px across the FULL canvas
                     // (model + gutter on both sides); gutterOriginX/Y + modelPxW/H then locate
                     // the model's true visible area within that canvas. Recomputed every render
-                    // since these depend on the current model size.
-                    modelScaleX = canvas.width  / (mw * (1 + 2 * GUTTER_FRAC));
-                    modelScaleY = canvas.height / (mh * (1 + 2 * GUTTER_FRAC));
-                    gutterOriginX = mw * GUTTER_FRAC * modelScaleX;
-                    gutterOriginY = mh * GUTTER_FRAC * modelScaleY;
+                    // since these depend on the current model size (and whether any line scrolls).
+                    modelScaleX = canvas.width  / (mw * (1 + 2 * frac));
+                    modelScaleY = canvas.height / (mh * (1 + 2 * frac));
+                    gutterOriginX = mw * frac * modelScaleX;
+                    gutterOriginY = mh * frac * modelScaleY;
                     modelPxW = mw * modelScaleX;
                     modelPxH = mh * modelScaleY;
 
                     // Gutter background (off-page space), then the model's true visible area
                     // on top of it, outlined so the boundary between on-/off-page is clear.
-                    ctx.fillStyle = '#2a2a2a';
-                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    if (frac > 0) {
+                        ctx.fillStyle = '#2a2a2a';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    }
                     ctx.fillStyle = '#000';
                     ctx.fillRect(gutterOriginX, gutterOriginY, modelPxW, modelPxH);
                     if (window._fseqBgImage) {
@@ -3137,12 +3150,14 @@ def index():
                         ctx.drawImage(window._fseqBgImage, gutterOriginX, gutterOriginY, modelPxW, modelPxH);
                         ctx.imageSmoothingEnabled = true;
                     }
-                    ctx.save();
-                    ctx.strokeStyle = 'rgba(79,195,247,0.7)';
-                    ctx.lineWidth = 1;
-                    ctx.strokeRect(Math.round(gutterOriginX) + 0.5, Math.round(gutterOriginY) + 0.5,
-                                   Math.round(modelPxW) - 1, Math.round(modelPxH) - 1);
-                    ctx.restore();
+                    if (frac > 0) {
+                        ctx.save();
+                        ctx.strokeStyle = 'rgba(79,195,247,0.7)';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(Math.round(gutterOriginX) + 0.5, Math.round(gutterOriginY) + 0.5,
+                                       Math.round(modelPxW) - 1, Math.round(modelPxH) - 1);
+                        ctx.restore();
+                    }
 
                     var posLabel = '';
                     ctx.textBaseline = 'top';
