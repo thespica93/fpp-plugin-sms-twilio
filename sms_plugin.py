@@ -583,8 +583,10 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
     items: [(text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name,
         orientation), ...]
         movement 'Center': text is auto-fit to (box_w, box_h) and centered in the box, fixed.
-        orientation ('horizontal'/'vertical_rotated'/'vertical_stacked', Center only --
-        scrolling lines are always horizontal) — see _render_oriented_text_strip.
+        orientation ('horizontal'/'vertical_rotated'/'vertical_stacked') applies to Center
+        (all three) and to T2B/B2T ('vertical_rotated' only -- the glyphs read sideways
+        while still travelling vertically). L2R/R2L are always horizontal glyphs -- the
+        point of that movement is horizontal travel. See _render_oriented_text_strip.
         movement 'L2R'/'R2L'/'T2B'/'B2T': text height is auto-fit to box_h (width
             unconstrained — the text is expected to be wider than the box and travels
             across it). The box also acts as a clipping viewport: text is only visible
@@ -615,10 +617,22 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
             resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
             resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
             scrolling = movement in ('L2R', 'R2L', 'T2B', 'B2T')
-            if scrolling:
-                # Scrolling lines are always horizontal -- orientation only applies to
-                # fixed (Center) lines, where the box's own edges are the whole viewport
-                # rather than a window the text travels through.
+            if scrolling and orientation == 'vertical_rotated' and movement in ('T2B', 'B2T'):
+                # T2B/B2T with rotated text: the rotated block reads sideways while
+                # travelling vertically through the box. Rotated width must fit box_w
+                # (centered horizontally, fixed); rotated height is unconstrained since
+                # it's the travel axis -- pass box_h=None through to
+                # _render_oriented_text_strip's rotated branch, which fits raw
+                # (unrotated) height against box_w with raw width free.
+                strip, tw, th = _render_oriented_text_strip(text, font_name, box_w, None,
+                                                              _hex_to_rgb(color_hex), 'vertical_rotated')
+                if strip is None:
+                    strip, tw, th = Image.new('RGB', (1, 1), (0, 0, 0)), 1, 1
+            elif scrolling:
+                # Horizontal glyphs -- all other scrolling cases (L2R/R2L always, and
+                # T2B/B2T when not rotated). Orientation otherwise only applies to fixed
+                # (Center) lines, where the box's own edges are the whole viewport rather
+                # than a window the text travels through.
                 font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_h)
                 tw, th = max(1, tw), max(1, th)
                 strip = Image.new('RGB', (tw, th), (0, 0, 0))
@@ -2478,7 +2492,7 @@ def index():
                                         </select>
                                         <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                                            <input type="number" id="line_1_speed" min="1" max="10" step="0.1" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
                                         </div>
                                         <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2523,7 +2537,7 @@ def index():
                                         </select>
                                         <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_2_speed" min="1" max="10" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
+                                            <input type="number" id="line_2_speed" min="1" max="10" step="0.1" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
                                         </div>
                                         <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2568,7 +2582,7 @@ def index():
                                         </select>
                                         <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_3_speed" min="1" max="10" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
+                                            <input type="number" id="line_3_speed" min="1" max="10" step="0.1" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
                                         </div>
                                         <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2613,7 +2627,7 @@ def index():
                                         </select>
                                         <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                                            <input type="number" id="line_4_speed" min="1" max="10" step="0.1" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
                                         </div>
                                         <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -3053,8 +3067,26 @@ def index():
                 return o === 'vertical_rotated' || o === 'vertical_stacked';
             }
             function updateLineOrientationRowVisibility(i) {
+                var m = getLineMovement(i);
+                // Rotated text works for Center (fixed) and T2B/B2T (travels vertically,
+                // glyphs turned 90 degrees) -- not L2R/R2L, where the point of the movement
+                // is horizontal travel and rotating the glyphs on top of that isn't supported.
+                var applicable = (m === 'Center' || m === 'T2B' || m === 'B2T');
                 var row = document.getElementById('line_' + (i + 1) + '_orientation_row');
-                if (row) row.style.display = (getLineMovement(i) === 'Center') ? 'inline-flex' : 'none';
+                if (row) row.style.display = applicable ? 'inline-flex' : 'none';
+
+                // Stacked (one upright character per row) only makes sense for a fixed line --
+                // combined with vertical scroll it would be ambiguous, so it's Center-only.
+                var sel = document.getElementById('line_' + (i + 1) + '_orientation');
+                if (!sel) return;
+                var stackedOpt = sel.querySelector('option[value="vertical_stacked"]');
+                if (!stackedOpt) return;
+                var stackedAllowed = (m === 'Center');
+                stackedOpt.disabled = !stackedAllowed;
+                if (!stackedAllowed && sel.value === 'vertical_stacked') {
+                    sel.value = 'horizontal';
+                    onLineOrientationChange(i);
+                }
             }
 
             // Per-line Movement select
@@ -3091,10 +3123,13 @@ def index():
             function onLineSpeedChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_speed');
                 if (!el) return;
-                var v = Math.min(10, Math.max(1, parseInt(el.value) || 1));
+                // parseFloat (not parseInt) + rounded to 1 decimal -- speed now supports
+                // 0.1 increments for finer control between the old whole-number-only steps.
+                var v = Math.round(Math.min(10, Math.max(1, parseFloat(el.value) || 1)) * 10) / 10;
                 el.value = v;
                 window._lineSpeeds = window._lineSpeeds || [5,5,5,5];
                 window._lineSpeeds[i] = v;
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
@@ -3440,7 +3475,7 @@ def index():
                         lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
                         drawBoxDecoration(boxX, boxY, boxW, boxH, i);
 
-                        if (scrolling) {
+                        if (scrolling && !(orientation === 'vertical_rotated' && scrollY)) {
                             var fit = fitTextSize(lineText, fontName, Infinity, boxH);
                             var fitSize = fit.size;
                             ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
@@ -3517,6 +3552,56 @@ def index():
                                 ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'alphabetic';
                                 ctx.fillStyle = getLineColor(i);
                                 ctx.fillText(lineText, drawX, drawBaseline);
+                                ctx.restore();
+                            }
+                        } else if (scrolling && orientation === 'vertical_rotated' && scrollY) {
+                            // T2B/B2T with rotated text: the rotated block reads sideways while
+                            // travelling vertically through the box, like the horizontal-glyph
+                            // scrolling branch above but with the glyphs themselves turned 90
+                            // degrees. Fit: rotated width must fit boxW (centered horizontally,
+                            // fixed); rotated height is unconstrained since it's the travel axis
+                            // -- equivalent to fitting raw (unrotated) height against boxW with
+                            // raw width free.
+                            var fitTR = fitTextSize(lineText, fontName, Infinity, boxW);
+                            ctx.font = fitTR.size + 'px "' + fontName + '", sans-serif';
+                            var rawWTR = ctx.measureText(lineText).width;
+                            var rawHTR = fitTR.ascent + fitTR.descent;
+                            var rotatedW = rawHTR, rotatedH = rawWTR; // dims after rotation
+
+                            var lineSpeedTR = (window._lineSpeeds && window._lineSpeeds[i]) || 5;
+                            var stepPxModelTR = Math.max(1, Math.max(10, lineSpeedTR * 20) / 30);
+                            var stepPxCanvasTR = stepPxModelTR * modelScaleY;
+                            var loopStartTR = (movement === 'B2T') ? (boxY + boxH) : (boxY - rotatedH);
+                            var loopEndTR   = (movement === 'B2T') ? (boxY - rotatedH) : (boxY + boxH);
+                            var dirSignTR   = (movement === 'B2T') ? -1 : 1;
+                            var frameCountTR = Math.round((window._scrubSeconds || 0) * 30);
+                            var posTR = loopStartTR;
+                            for (var sfTR = 0; sfTR < frameCountTR; sfTR++) {
+                                posTR += dirSignTR * stepPxCanvasTR;
+                                if ((dirSignTR < 0 && posTR < loopEndTR) || (dirSignTR > 0 && posTR > loopEndTR)) {
+                                    posTR = loopStartTR;
+                                }
+                            }
+                            var dxTR = boxX + Math.max(0, (boxW - rotatedW) / 2);
+
+                            var arrowFontTR = 'bold ' + Math.max(8, Math.round(fitTR.size * 0.4)) + 'px sans-serif';
+                            var arrowTxtTR = (movement === 'B2T') ? '↑' : '↓';
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = arrowFontTR; ctx.textBaseline = 'top';
+                            var awTR = ctx.measureText(arrowTxtTR).width;
+                            ctx.fillText(arrowTxtTR, boxX + (boxW - awTR) / 2, boxY + 2);
+                            ctx.restore();
+
+                            var clipX0TR = Math.max(boxX, gutterOriginX), clipY0TR = Math.max(boxY, gutterOriginY);
+                            var clipX1TR = Math.min(boxX + boxW, gutterOriginX + modelPxW), clipY1TR = Math.min(boxY + boxH, gutterOriginY + modelPxH);
+                            if (clipX1TR > clipX0TR && clipY1TR > clipY0TR) {
+                                ctx.save();
+                                ctx.beginPath(); ctx.rect(clipX0TR, clipY0TR, clipX1TR - clipX0TR, clipY1TR - clipY0TR); ctx.clip();
+                                ctx.translate(dxTR + rotatedW / 2, posTR + rotatedH / 2);
+                                ctx.rotate(-Math.PI / 2);
+                                ctx.textBaseline = 'alphabetic';
+                                ctx.fillStyle = getLineColor(i);
+                                ctx.fillText(lineText, -rawWTR / 2, (fitTR.ascent - fitTR.descent) / 2);
                                 ctx.restore();
                             }
                         } else if (orientation === 'vertical_rotated') {
