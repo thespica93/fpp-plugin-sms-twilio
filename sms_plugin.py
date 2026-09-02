@@ -407,14 +407,20 @@ def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orient
     pdraw = ImageDraw.Draw(probe)
 
     if orientation == 'vertical_rotated':
-        # Sized by box_w alone (raw height <= box_w, becomes rotated width); raw width
-        # is always left unconstrained here regardless of what box_h the caller passed
-        # -- a box that's wide relative to its height would otherwise leave the font
-        # tiny (bound by fitting the string's full length into box_h) despite box_w
-        # having plenty of room. Static (Center) callers accept the text possibly
-        # running past the box's own height in exchange (no clip is applied there);
-        # scrolling callers already pass box_h=None so this is a no-op for them.
-        font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_w)
+        if box_h is None:
+            # Scrolling (T2B/B2T): raw width unconstrained (the travel axis has no
+            # fixed extent); raw height (becomes rotated width) fit to box_w.
+            font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_w)
+        else:
+            # Static (Center, no clip applied): raw width (the string's own length,
+            # which becomes the rotated block's VERTICAL extent) must fit box_h, so
+            # the block doesn't run past the box's own height -- an unconstrained-
+            # height version overflowed badly for any real (multi-character) string.
+            # Raw height (becomes rotated width/thickness) is left unconstrained; it
+            # scales with font size roughly proportionally to raw width, so keeping
+            # the string's length in bounds keeps its thickness reasonable too
+            # without needing an explicit box_w cap.
+            font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_h, None)
         if font is None:
             return None, 0, 0
         strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
@@ -3647,15 +3653,16 @@ def index():
                                 ctx.restore();
                             }
                         } else if (orientation === 'vertical_rotated') {
-                            // Sized by boxW alone (raw height <= boxW, becomes rotated width),
-                            // raw width left unconstrained -- matches the rotated-scrolling
-                            // branches above rather than also capping by boxH. A box that's
-                            // wide relative to its height would otherwise leave the font tiny
-                            // (bound by fitting the string's full length into boxH) despite
-                            // boxW having plenty of room; this lets the font use that room,
-                            // at the cost of the text possibly running past the box's own
-                            // height since Center draws without a clip.
-                            var fitR = fitTextSize(lineText, fontName, Infinity, boxW);
+                            // Sized by boxH alone: raw width (the string's own length, which
+                            // becomes the rotated block's VERTICAL extent) must fit boxH, so
+                            // the block doesn't run past the box's own height -- Center draws
+                            // without a clip, so an unconstrained-height version overflowed
+                            // badly for any real (multi-character) string. Raw height (becomes
+                            // rotated width/thickness) is left unconstrained; it scales with
+                            // font size roughly proportionally to raw width, so keeping the
+                            // string's length in bounds keeps its thickness reasonable too
+                            // without needing an explicit boxW cap.
+                            var fitR = fitTextSize(lineText, fontName, boxH, Infinity);
                             ctx.font = fitR.size + 'px "' + fontName + '", sans-serif';
                             var rawW = ctx.measureText(lineText).width;
                             ctx.save();
