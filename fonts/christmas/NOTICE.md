@@ -9,6 +9,7 @@ requires an exact family-name match to resolve reliably.
 |---|---|---|
 | Christmas Garland.otf | Mozatype | https://www.dafont.com/christmas-garland.font |
 | Kingthings Christmas 2.ttf | Kingthings | https://www.dafont.com/kingthings-christmas.font |
+| New Born Christmas.otf | Keithzo | https://www.dafont.com/new-born-christmas.font |
 | PWTinselLetters.ttf | Peax Webdesign | https://www.dafont.com/pwtinselletters.font |
 | Santa Christmas.ttf | Keithzo | https://www.dafont.com/santa-christmas.font |
 | Santa Chrismast Display.ttf | Keithzo | https://www.dafont.com/santa-christmas.font |
@@ -21,7 +22,7 @@ each ship with a different internal family name (including two typos from the or
 author: "Chrismast" and "start"/"Star") — the odd names are preserved as-is rather than
 corrected, since correcting them would break font resolution.
 
-"Christmas Garland" is the only `.otf` in this set. It renders correctly through the plugin's
-normal PIL-based path, but is not resolvable by FPP's native overlay-text fallback (used only
-when PIL is unavailable or the overlay model's dimensions aren't set), since FPP's own font
-scanner does not recognize `.otf` files.
+"Christmas Garland" and "New Born Christmas" are `.otf` files. They render correctly through
+the plugin's normal PIL-based path, but are not resolvable by FPP's native overlay-text
+fallback (used only when PIL is unavailable or the overlay model's dimensions aren't set),
+since FPP's own font scanner does not recognize `.otf` files.
