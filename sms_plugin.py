@@ -149,7 +149,7 @@ DEFAULT_CONFIG = {
     "line_boxes": [{"x": -1, "y": -1, "w": 300, "h": 60} for _ in range(4)],
     "line_colors": ["", "", "", ""],
     "line_movements": ["Center", "Center", "Center", "Center"],
-    "line_speeds": [5, 5, 5, 5],
+    "line_speeds": [50, 50, 50, 50],
     "line_fonts": ["FreeSans", "FreeSans", "FreeSans", "FreeSans"],
     # Only meaningful for Center (static) lines -- scrolling lines are always
     # 'horizontal'. 'vertical_rotated' = whole line rotated 90deg; 'vertical_stacked' =
@@ -225,7 +225,21 @@ def load_config():
             config['line_movements'] = [config.get('text_position', 'Center')] * 4
             save_config()
         if 'line_speeds' not in loaded:
-            config['line_speeds'] = [config.get('scroll_speed', 5)] * 4
+            # *10: scroll_speed is still on the old 1-10 scale; line_speeds is 0-100.
+            # Seeded fresh on the new scale, so no further scaling is ever needed.
+            config['line_speeds'] = [config.get('scroll_speed', 5) * 10] * 4
+            config['line_speeds_scale_migrated'] = True
+            save_config()
+
+        # Migrate line_speeds itself from the old 1-10(-by-tenths) scale to the new
+        # 0-100 scale (introduced 2026-09) -- without this, speeds saved by anyone
+        # already using per-line speed (e.g. "5") would silently become 10x slower
+        # once reinterpreted on the new scale, rather than an equivalent "50". Only
+        # runs once: the flag above is set here, and pre-set for anyone who just got
+        # line_speeds seeded fresh (already on the new scale, above).
+        if 'line_speeds' in loaded and not config.get('line_speeds_scale_migrated'):
+            config['line_speeds'] = [min(100, round(float(s) * 10)) for s in config.get('line_speeds', [50, 50, 50, 50])]
+            config['line_speeds_scale_migrated'] = True
             save_config()
 
         # Migrate the old single global Font onto per-line settings (introduced
@@ -615,7 +629,7 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
         concrete). -1 is an exact sentinel: a scrolling line's box may otherwise have a
         genuinely negative box_x/box_y, positioning it off-page so its text can enter/exit
         before/after the model's visible edge instead of only at the edge itself.
-        speed: 1-10, independent per line.
+        speed: 0-100, independent per line.
     Returns True if the thread started, False on error."""
     global _scroll_thread
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
@@ -679,14 +693,14 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
                 entry['dir'] = -1.0 if movement == 'R2L' else 1.0
                 entry['loop_start'] = float(resolved_bx + box_w) if movement == 'R2L' else float(resolved_bx - tw)
                 entry['loop_end']   = float(resolved_bx - tw) if movement == 'R2L' else float(resolved_bx + box_w)
-                entry['step_px'] = max(1.0, max(10, speed * 20) / fps)
+                entry['step_px'] = max(1.0, max(10, speed * 2) / fps)
             elif movement in ('T2B', 'B2T'):
                 entry['dx'] = resolved_bx + max(0, (box_w - tw) // 2)
                 entry['pos'] = float(resolved_by + box_h) if movement == 'B2T' else float(resolved_by - th)
                 entry['dir'] = -1.0 if movement == 'B2T' else 1.0
                 entry['loop_start'] = float(resolved_by + box_h) if movement == 'B2T' else float(resolved_by - th)
                 entry['loop_end']   = float(resolved_by - th) if movement == 'B2T' else float(resolved_by + box_h)
-                entry['step_px'] = max(1.0, max(10, speed * 20) / fps)
+                entry['step_px'] = max(1.0, max(10, speed * 2) / fps)
             else:  # Center — fixed, centered in box
                 entry['dx'] = resolved_bx + max(0, (box_w - tw) // 2)
                 entry['dy'] = resolved_by + max(0, (box_h - th) // 2)
@@ -2491,7 +2505,7 @@ def index():
                         {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
                         {% set lc = config.get('line_colors') or ['', '', '', ''] %}
                         {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
-                        {% set ls = config.get('line_speeds') or [5, 5, 5, 5] %}
+                        {% set ls = config.get('line_speeds') or [50, 50, 50, 50] %}
                         {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
                         {% set lo = config.get('line_orientations') or ['horizontal', 'horizontal', 'horizontal', 'horizontal'] %}
                         <div id="message_lines_section">
@@ -2519,7 +2533,7 @@ def index():
                                         </select>
                                         <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_1_speed" min="1" max="10" step="0.1" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                                            <input type="number" id="line_1_speed" min="0" max="100" step="1" value="{{ ls[0] if ls|length > 0 else 50 }}" onchange="onLineSpeedChange(0)">
                                         </div>
                                         <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2564,7 +2578,7 @@ def index():
                                         </select>
                                         <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_2_speed" min="1" max="10" step="0.1" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
+                                            <input type="number" id="line_2_speed" min="0" max="100" step="1" value="{{ ls[1] if ls|length > 1 else 50 }}" onchange="onLineSpeedChange(1)">
                                         </div>
                                         <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2609,7 +2623,7 @@ def index():
                                         </select>
                                         <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_3_speed" min="1" max="10" step="0.1" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
+                                            <input type="number" id="line_3_speed" min="0" max="100" step="1" value="{{ ls[2] if ls|length > 2 else 50 }}" onchange="onLineSpeedChange(2)">
                                         </div>
                                         <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2654,7 +2668,7 @@ def index():
                                         </select>
                                         <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_4_speed" min="1" max="10" step="0.1" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                                            <input type="number" id="line_4_speed" min="0" max="100" step="1" value="{{ ls[3] if ls|length > 3 else 50 }}" onchange="onLineSpeedChange(3)">
                                         </div>
                                         <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2716,7 +2730,7 @@ def index():
                         <script>
                             window._lineBoxesInit = {{ config.get('line_boxes', [{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60}]) | tojson }};
                             window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
-                            window._lineSpeedsInit = {{ config.get('line_speeds', [5, 5, 5, 5]) | tojson }};
+                            window._lineSpeedsInit = {{ config.get('line_speeds', [50, 50, 50, 50]) | tojson }};
                             window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
                             window._lineOrientationsInit = {{ config.get('line_orientations', ['horizontal', 'horizontal', 'horizontal', 'horizontal']) | tojson }};
                             window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
@@ -3192,11 +3206,13 @@ def index():
             function onLineSpeedChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_speed');
                 if (!el) return;
-                // parseFloat (not parseInt) + rounded to 1 decimal -- speed now supports
-                // 0.1 increments for finer control between the old whole-number-only steps.
-                var v = Math.round(Math.min(10, Math.max(1, parseFloat(el.value) || 1)) * 10) / 10;
+                // 0-100 whole-number range -- finer, rounder-feeling granularity than the
+                // old 1-10-by-tenths scale while covering the same practical speed range
+                // (see the *2 multiplier in the step_px formulas below/in Python, which
+                // replaces the old scale's *20 to match).
+                var v = Math.round(Math.min(100, Math.max(0, parseInt(el.value, 10) || 0)));
                 el.value = v;
-                window._lineSpeeds = window._lineSpeeds || [5,5,5,5];
+                window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
                 window._lineSpeeds[i] = v;
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
@@ -3528,8 +3544,8 @@ def index():
                             // (the step is scaled by the same model->canvas factor as everything
                             // else here) so it stays proportionally correct at any preview size.
                             var scrollFps = 30;
-                            var lineSpeed = (window._lineSpeeds && window._lineSpeeds[i]) || 5;
-                            var stepPxModel = Math.max(1, Math.max(10, lineSpeed * 20) / scrollFps);
+                            var lineSpeed = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
+                            var stepPxModel = Math.max(1, Math.max(10, lineSpeed * 2) / scrollFps);
                             var horizScroll = scrollX; // scrollX/scrollY already computed above
                             var stepPxCanvas = stepPxModel * (horizScroll ? modelScaleX : modelScaleY);
                             var loopStart, loopEnd, dirSign;
@@ -3605,8 +3621,8 @@ def index():
                             var rawHTR = fitTR.ascent + fitTR.descent;
                             var rotatedW = rawHTR, rotatedH = rawWTR; // dims after rotation
 
-                            var lineSpeedTR = (window._lineSpeeds && window._lineSpeeds[i]) || 5;
-                            var stepPxModelTR = Math.max(1, Math.max(10, lineSpeedTR * 20) / 30);
+                            var lineSpeedTR = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
+                            var stepPxModelTR = Math.max(1, Math.max(10, lineSpeedTR * 2) / 30);
                             var stepPxCanvasTR = stepPxModelTR * modelScaleY;
                             var loopStartTR = (movement === 'B2T') ? (boxY + boxH) : (boxY - rotatedH);
                             var loopEndTR   = (movement === 'B2T') ? (boxY - rotatedH) : (boxY + boxH);
@@ -3651,8 +3667,8 @@ def index():
                             var fitVS = fitStackedTextSize(charsVS, fontName, boxW, Infinity);
                             var totalHVS = fitVS.lineHeight * charsVS.length;
 
-                            var lineSpeedVS = (window._lineSpeeds && window._lineSpeeds[i]) || 5;
-                            var stepPxModelVS = Math.max(1, Math.max(10, lineSpeedVS * 20) / 30);
+                            var lineSpeedVS = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
+                            var stepPxModelVS = Math.max(1, Math.max(10, lineSpeedVS * 2) / 30);
                             var stepPxCanvasVS = stepPxModelVS * modelScaleY;
                             var loopStartVS = (movement === 'B2T') ? (boxY + boxH) : (boxY - totalHVS);
                             var loopEndVS   = (movement === 'B2T') ? (boxY - totalHVS) : (boxY + boxH);
@@ -4439,7 +4455,7 @@ var _saveTimer = null;
                         return el ? el.value.toUpperCase() : '#FF0000';
                     }),
                     line_movements: window._lineMovements || ['Center','Center','Center','Center'],
-                    line_speeds: window._lineSpeeds || [5,5,5,5],
+                    line_speeds: window._lineSpeeds || [50,50,50,50],
                     line_orientations: window._lineOrientations || ['horizontal','horizontal','horizontal','horizontal'],
                     custom_colors: window._customColors || [],
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
