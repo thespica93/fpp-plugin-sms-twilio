@@ -3149,21 +3149,38 @@ def index():
                 var next = el.value;
                 if (isVerticalOrientation(prev) !== isVerticalOrientation(next)) {
                     var b = window._lineBoxes && window._lineBoxes[i];
-                    var canvas = document.getElementById('matrix_canvas');
-                    if (b) {
+                    // _lineBoxes are stored in MODEL pixel space (window._canvasModelW/H),
+                    // not the preview canvas's own raster size -- matrix_canvas.width is
+                    // always a fixed 640px-wide bitmap scaled to the model's aspect ratio,
+                    // a completely different number from the model's real width/height
+                    // whenever the model isn't 640px wide. Comparing/assigning against the
+                    // canvas element here compared box coordinates against the wrong
+                    // coordinate space and could inflate the box's model-space size well
+                    // past the model's actual extent.
+                    var modelW = window._canvasModelW, modelH = window._canvasModelH;
+                    if (b && modelW && modelH) {
                         // A plain w<->h swap is wrong when the box was sized to span the
-                        // full overlay along its old axis -- canvas width and height are
+                        // full overlay along its old axis -- model width and height are
                         // rarely equal, so reusing the raw old number leaves the new axis
                         // either short of, or overflowing, the overlay's actual extent.
                         // Detect "was full span" before swapping and, if so, snap the new
                         // axis to the overlay's real size on that axis instead.
-                        var wasFullW = canvas && b.w >= canvas.width - 2;
-                        var wasFullH = canvas && b.h >= canvas.height - 2;
-                        var t = b.w; b.w = b.h; b.h = t;
-                        if (canvas) {
-                            if (isVerticalOrientation(next) && wasFullW) b.h = canvas.height;
-                            else if (!isVerticalOrientation(next) && wasFullH) b.w = canvas.width;
+                        var wasFullW = b.w >= modelW - 2;
+                        var wasFullH = b.h >= modelH - 2;
+                        if (wasFullW && wasFullH) {
+                            // Box already covered the entire model in both dimensions --
+                            // there's no meaningful "shape" to transpose (the model itself
+                            // usually isn't square), so keep it covering the entire model
+                            // after the flip too instead of collapsing one axis down to the
+                            // other's old (unrelated) size.
+                            b.w = modelW; b.h = modelH;
+                        } else {
+                            var t = b.w; b.w = b.h; b.h = t;
+                            if (isVerticalOrientation(next) && wasFullW) b.h = modelH;
+                            else if (!isVerticalOrientation(next) && wasFullH) b.w = modelW;
                         }
+                    } else if (b) {
+                        var t2 = b.w; b.w = b.h; b.h = t2;
                     }
                 }
                 window._lineOrientations[i] = next;
