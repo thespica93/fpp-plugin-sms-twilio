@@ -3497,7 +3497,11 @@ def index():
                         var orientation = getLineOrientation(i);
 
                         lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
-                        drawBoxDecoration(boxX, boxY, boxW, boxH, i);
+                        // Decoration (dashed border + resize handles) is drawn in a separate
+                        // pass after ALL lines' text below -- drawing it here, before this
+                        // line's own text, let a large glyph paint over its own handles
+                        // (worse yet, one line's text could cover another line's handles
+                        // too, since canvas draws are strictly back-to-front).
 
                         var vertScrollOriented = scrollY && (orientation === 'vertical_rotated' || orientation === 'vertical_stacked');
 
@@ -3738,6 +3742,12 @@ def index():
                             ) + '  •  ' + b.w + '×' + b.h + ' box';
                         }
                         cumulativeY += boxHeights[i];
+                    }
+
+                    // Draw all box decorations (dashed border + resize handles) after every
+                    // line's text so they're always on top and never hidden behind glyphs.
+                    for (var di = 0; di < 4; di++) {
+                        if (lineRects[di]) drawBoxDecoration(lineRects[di].x, lineRects[di].y, lineRects[di].w, lineRects[di].h, di);
                     }
 
                     var posEl = document.getElementById('pos_display');
