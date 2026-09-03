@@ -2368,6 +2368,7 @@ def index():
         <!-- Tab navigation -->
         <div class="tabs" style="display:flex; align-items:center; gap:6px;">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
+            <button class="tab-btn" onclick="showTab('display', this)">🖥️ Display</button>
             <button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
             <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
@@ -2471,10 +2472,142 @@ def index():
                     </div>
                 </div>
 
-                <!-- RIGHT COLUMN: Text Display -->
+            </div>
+
+            <!-- Filters — full width -->
+            <div class="section" style="margin-top:12px;">
+                <h2>Filters</h2>
+                <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap;">
+
+                    <!-- Sub-col 1: Profanity + Whitelist -->
+                    <div style="flex:1; min-width:220px;">
+                        <div id="blacklist_section">
+                            <label class="toggle-switch"><input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                            <label class="checkbox-label">Enable Profanity Filter</label><br>
+                            <button class="view-btn" onclick="showBlacklistWarning()" style="margin-top:6px;">🚫 Manage Blacklist</button>
+                        </div>
+                        <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                            ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended. Re-enable it to filter names against the Blacklist, or enable the Whitelist instead.
+                        </div>
+                        <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
+                            ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
+                        </div>
+
+                        <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
+
+                        <label class="toggle-switch"><input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                        <label class="checkbox-label">Enable Name Whitelist — only allow approved names</label><br>
+                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top:6px;">📋 Manage Whitelist</button>
+                    </div>
+
+                    <!-- Sub-col 2: Name Format Rules -->
+                    <div style="flex:1; min-width:220px;">
+                        <div id="format_rules_section">
+                            <h3 style="margin-bottom:6px;">Name Format Rules</h3>
+                            <div id="format_rules_disabled_note" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-bottom:8px; font-size:13px;">
+                                ⚠️ Name format rules are disabled when the whitelist is active.
+                            </div>
+                            <div id="format_rules_inputs">
+                                <label class="toggle-switch"><input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
+                                <label class="checkbox-label">One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
+
+                                <label class="toggle-switch"><input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
+                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
+                                <label class="checkbox-label">Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
+
+                                <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
+                                    ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
+                                </div>
+                            </div>
+                            <p id="hyphen_note" class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
+                        </div>
+                    </div>
+
+                    <!-- Sub-col 3: Phone Blocklist + Duplicate Names -->
+                    <div style="flex:0 0 220px;">
+                        <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
+                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top:4px; display:block;">🚫 View Blocklist</button>
+
+                        <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
+
+                        <label class="toggle-switch"><input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();"><span class="toggle-slider"></span></label>
+                        <label class="checkbox-label">Allow Duplicate Names — same phone number can submit the same name multiple times per day</label>
+                    </div>
+
+                </div>
+            </div>
+            <script>
+                var _formatRulesInitialized = false;
+                function updateFormatRules() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var inputs = document.getElementById('format_rules_inputs');
+                    var note = document.getElementById('format_rules_disabled_note');
+                    inputs.style.opacity = whitelistOn ? '0.4' : '1';
+                    inputs.style.pointerEvents = whitelistOn ? 'none' : '';
+                    note.style.display = whitelistOn ? 'block' : 'none';
+                    if (whitelistOn) {
+                        document.getElementById('one_word_only').checked = false;
+                        document.getElementById('two_words_max').checked = false;
+                    } else if (_formatRulesInitialized) {
+                        document.getElementById('two_words_max').checked = true;
+                    }
+                    _formatRulesInitialized = true;
+                    checkFormatWarning();
+                }
+                function checkFormatWarning() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var oneWord = document.getElementById('one_word_only').checked;
+                    var twoWords = document.getElementById('two_words_max').checked;
+                    var warn = !whitelistOn && !oneWord && !twoWords;
+                    var rulesActive = !whitelistOn && (oneWord || twoWords);
+                    document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
+                    document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
+                }
+                function checkDuplicateState() {
+                    var allowDupes = document.getElementById('allow_duplicate_names').checked;
+                    var row = document.getElementById('row_duplicate');
+                    var cb = document.getElementById('sms_response_duplicate');
+                    var warn = document.getElementById('duplicate_disabled_warning');
+                    if (!row) return;
+                    if (allowDupes) {
+                        row.classList.add('locked');
+                        row.classList.remove('enabled');
+                        if (cb) cb.checked = false;
+                    } else {
+                        row.classList.remove('locked');
+                        toggleResp('duplicate');
+                    }
+                    if (warn) warn.style.display = allowDupes ? '' : 'none';
+                }
+                function checkFiltersState() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var profanityOn = document.getElementById('profanity_filter').checked;
+                    var section = document.getElementById('blacklist_section');
+                    section.style.opacity = whitelistOn ? '0.4' : '1';
+                    section.style.pointerEvents = whitelistOn ? 'none' : '';
+                    var maxLenSection = document.getElementById('max_length_section');
+                    maxLenSection.style.opacity = whitelistOn ? '0.4' : '1';
+                    maxLenSection.style.pointerEvents = whitelistOn ? 'none' : '';
+                    document.getElementById('max_length_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
+                    document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
+                    document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
+                }
+                updateFormatRules();
+                checkFiltersState();
+                checkDuplicateState();
+            </script>
+
+        </div>
+
+        <!-- Display Settings Tab -->
+        <div id="tab-display" class="tab-content">
+            <div class="columns">
+
+                <!-- LEFT COLUMN: Message Lines editor -->
                 <div class="column">
                     <div class="section">
-                        <h2>Text Display Options</h2>
+                        <h2>Message Lines</h2>
 
                         <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
                         <style>
@@ -2691,6 +2824,13 @@ def index():
                             </div>
                         </div>
                         <p class="help-text">🎨 Click the ▾ next to a line's color to save or recall colors. Each card's Movement controls that line only.</p>
+                    </div>
+                </div>
+
+                <!-- RIGHT COLUMN: Live Preview -->
+                <div class="column">
+                    <div class="section">
+                        <h2>Preview</h2>
 
                         <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
                         <div id="canvas_section">
@@ -2739,131 +2879,6 @@ def index():
                 </div>
 
             </div>
-
-            <!-- Filters — full width, spans both columns -->
-            <div class="section" style="margin-top:12px;">
-                <h2>Filters</h2>
-                <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap;">
-
-                    <!-- Sub-col 1: Profanity + Whitelist -->
-                    <div style="flex:1; min-width:220px;">
-                        <div id="blacklist_section">
-                            <label class="toggle-switch"><input type="checkbox" id="profanity_filter" {{ 'checked' if config.profanity_filter else '' }} onchange="checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
-                            <label class="checkbox-label">Enable Profanity Filter</label><br>
-                            <button class="view-btn" onclick="showBlacklistWarning()" style="margin-top:6px;">🚫 Manage Blacklist</button>
-                        </div>
-                        <div id="profanity_disabled_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
-                            ⚠️ <strong>Profanity filter is disabled</strong> — this is not recommended. Re-enable it to filter names against the Blacklist, or enable the Whitelist instead.
-                        </div>
-                        <div id="blacklist_disabled_warning" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-top:8px; font-size:13px;">
-                            ⚠️ <strong>Blacklist inactive</strong> — whitelist is enabled. All names are validated against the whitelist.
-                        </div>
-
-                        <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
-
-                        <label class="toggle-switch"><input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
-                        <label class="checkbox-label">Enable Name Whitelist — only allow approved names</label><br>
-                        <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top:6px;">📋 Manage Whitelist</button>
-                    </div>
-
-                    <!-- Sub-col 2: Name Format Rules -->
-                    <div style="flex:1; min-width:220px;">
-                        <div id="format_rules_section">
-                            <h3 style="margin-bottom:6px;">Name Format Rules</h3>
-                            <div id="format_rules_disabled_note" style="display:none; background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:8px 12px; margin-bottom:8px; font-size:13px;">
-                                ⚠️ Name format rules are disabled when the whitelist is active.
-                            </div>
-                            <div id="format_rules_inputs">
-                                <label class="toggle-switch"><input type="checkbox" id="one_word_only" {{ 'checked' if config.get('one_word_only', False) and not config.get('use_whitelist', False) else '' }}
-                                       onchange="if(this.checked) document.getElementById('two_words_max').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
-                                <label class="checkbox-label">One Word Only (e.g., "John" ✓, "John Smith" ✗)</label><br>
-
-                                <label class="toggle-switch"><input type="checkbox" id="two_words_max" {{ 'checked' if config.get('two_words_max', True) and not config.get('use_whitelist', False) else '' }}
-                                       onchange="if(this.checked) document.getElementById('one_word_only').checked = false; checkFormatWarning(); saveConfig();"><span class="toggle-slider"></span></label>
-                                <label class="checkbox-label">Two Words Maximum (e.g., "John Smith" ✓, sentences ✗)</label><br>
-
-                                <div id="format_warning" style="display:none; background:#f8d7da; border:1px solid #f5c6cb; color:#721c24; border-radius:5px; padding:10px 14px; margin:8px 0; font-size:13px;">
-                                    ⚠️ <strong>Warning:</strong> With no format rules enabled, viewers can send any message up to your Max Message Length. This is not recommended.
-                                </div>
-                            </div>
-                            <p id="hyphen_note" class="help-text">ℹ️ Hyphenated names like "Jean-Luc" count as one word. All names are converted to Proper Case.</p>
-                        </div>
-                    </div>
-
-                    <!-- Sub-col 3: Phone Blocklist + Duplicate Names -->
-                    <div style="flex:0 0 220px;">
-                        <label style="font-weight:bold; margin-bottom:4px;">Phone Blocklist</label>
-                        <button onclick="location.href='/blocklist'" style="background:#f44336; margin-top:4px; display:block;">🚫 View Blocklist</button>
-
-                        <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
-
-                        <label class="toggle-switch"><input type="checkbox" id="allow_duplicate_names" {{ 'checked' if config.get('allow_duplicate_names', False) else '' }} onchange="checkDuplicateState(); saveConfig();"><span class="toggle-slider"></span></label>
-                        <label class="checkbox-label">Allow Duplicate Names — same phone number can submit the same name multiple times per day</label>
-                    </div>
-
-                </div>
-            </div>
-            <script>
-                var _formatRulesInitialized = false;
-                function updateFormatRules() {
-                    var whitelistOn = document.getElementById('use_whitelist').checked;
-                    var inputs = document.getElementById('format_rules_inputs');
-                    var note = document.getElementById('format_rules_disabled_note');
-                    inputs.style.opacity = whitelistOn ? '0.4' : '1';
-                    inputs.style.pointerEvents = whitelistOn ? 'none' : '';
-                    note.style.display = whitelistOn ? 'block' : 'none';
-                    if (whitelistOn) {
-                        document.getElementById('one_word_only').checked = false;
-                        document.getElementById('two_words_max').checked = false;
-                    } else if (_formatRulesInitialized) {
-                        document.getElementById('two_words_max').checked = true;
-                    }
-                    _formatRulesInitialized = true;
-                    checkFormatWarning();
-                }
-                function checkFormatWarning() {
-                    var whitelistOn = document.getElementById('use_whitelist').checked;
-                    var oneWord = document.getElementById('one_word_only').checked;
-                    var twoWords = document.getElementById('two_words_max').checked;
-                    var warn = !whitelistOn && !oneWord && !twoWords;
-                    var rulesActive = !whitelistOn && (oneWord || twoWords);
-                    document.getElementById('format_warning').style.display = warn ? 'block' : 'none';
-                    document.getElementById('hyphen_note').style.opacity = rulesActive ? '1' : '0.4';
-                }
-                function checkDuplicateState() {
-                    var allowDupes = document.getElementById('allow_duplicate_names').checked;
-                    var row = document.getElementById('row_duplicate');
-                    var cb = document.getElementById('sms_response_duplicate');
-                    var warn = document.getElementById('duplicate_disabled_warning');
-                    if (!row) return;
-                    if (allowDupes) {
-                        row.classList.add('locked');
-                        row.classList.remove('enabled');
-                        if (cb) cb.checked = false;
-                    } else {
-                        row.classList.remove('locked');
-                        toggleResp('duplicate');
-                    }
-                    if (warn) warn.style.display = allowDupes ? '' : 'none';
-                }
-                function checkFiltersState() {
-                    var whitelistOn = document.getElementById('use_whitelist').checked;
-                    var profanityOn = document.getElementById('profanity_filter').checked;
-                    var section = document.getElementById('blacklist_section');
-                    section.style.opacity = whitelistOn ? '0.4' : '1';
-                    section.style.pointerEvents = whitelistOn ? 'none' : '';
-                    var maxLenSection = document.getElementById('max_length_section');
-                    maxLenSection.style.opacity = whitelistOn ? '0.4' : '1';
-                    maxLenSection.style.pointerEvents = whitelistOn ? 'none' : '';
-                    document.getElementById('max_length_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
-                    document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
-                    document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
-                }
-                updateFormatRules();
-                checkFiltersState();
-                checkDuplicateState();
-            </script>
-
         </div>
 
         <!-- SMS Responses Tab -->
@@ -3277,8 +3292,8 @@ def index():
 
                 var initLS = (window._lineSpeedsInit && Array.isArray(window._lineSpeedsInit))
                     ? window._lineSpeedsInit.slice()
-                    : [5, 5, 5, 5];
-                while (initLS.length < 4) initLS.push(5);
+                    : [50, 50, 50, 50];
+                while (initLS.length < 4) initLS.push(50);
                 window._lineSpeeds = initLS;
 
                 // Orientation only applies to Center (static) lines -- see getLineOrientation
