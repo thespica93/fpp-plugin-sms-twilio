@@ -413,14 +413,13 @@ def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orient
             font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_w)
         else:
             # Static (Center, no clip applied): raw width (the string's own length,
-            # which becomes the rotated block's VERTICAL extent) must fit box_h, so
-            # the block doesn't run past the box's own height -- an unconstrained-
-            # height version overflowed badly for any real (multi-character) string.
-            # Raw height (becomes rotated width/thickness) is left unconstrained; it
-            # scales with font size roughly proportionally to raw width, so keeping
-            # the string's length in bounds keeps its thickness reasonable too
-            # without needing an explicit box_w cap.
-            font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_h, None)
+            # which becomes the rotated block's VERTICAL extent) must fit box_h, and
+            # raw height (becomes the rotated block's horizontal extent/thickness)
+            # must fit box_w -- both axes constrained, same "stays inside the
+            # bounding box" contract as horizontal/stacked. Leaving box_w
+            # unconstrained let short strings (e.g. a single character) pick an
+            # oversized font whose thickness blew past the box's width.
+            font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_h, box_w)
         if font is None:
             return None, 0, 0
         strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
@@ -3109,7 +3108,10 @@ def index():
                 var stackedOpt = sel.querySelector('option[value="vertical_stacked"]');
                 if (!stackedOpt) return;
                 stackedOpt.disabled = !applicable;
-                if (!applicable && sel.value === 'vertical_stacked') {
+                // Not just the Stacked option -- Rotated is equally inapplicable once the
+                // movement is L2R/R2L, so reset (and swap the box back, via
+                // onLineOrientationChange) for either vertical value, not only Stacked.
+                if (!applicable && isVerticalOrientation(sel.value)) {
                     sel.value = 'horizontal';
                     onLineOrientationChange(i);
                 }
@@ -3147,7 +3149,22 @@ def index():
                 var next = el.value;
                 if (isVerticalOrientation(prev) !== isVerticalOrientation(next)) {
                     var b = window._lineBoxes && window._lineBoxes[i];
-                    if (b) { var t = b.w; b.w = b.h; b.h = t; }
+                    var canvas = document.getElementById('matrix_canvas');
+                    if (b) {
+                        // A plain w<->h swap is wrong when the box was sized to span the
+                        // full overlay along its old axis -- canvas width and height are
+                        // rarely equal, so reusing the raw old number leaves the new axis
+                        // either short of, or overflowing, the overlay's actual extent.
+                        // Detect "was full span" before swapping and, if so, snap the new
+                        // axis to the overlay's real size on that axis instead.
+                        var wasFullW = canvas && b.w >= canvas.width - 2;
+                        var wasFullH = canvas && b.h >= canvas.height - 2;
+                        var t = b.w; b.w = b.h; b.h = t;
+                        if (canvas) {
+                            if (isVerticalOrientation(next) && wasFullW) b.h = canvas.height;
+                            else if (!isVerticalOrientation(next) && wasFullH) b.w = canvas.width;
+                        }
+                    }
                 }
                 window._lineOrientations[i] = next;
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
@@ -3653,16 +3670,14 @@ def index():
                                 ctx.restore();
                             }
                         } else if (orientation === 'vertical_rotated') {
-                            // Sized by boxH alone: raw width (the string's own length, which
-                            // becomes the rotated block's VERTICAL extent) must fit boxH, so
-                            // the block doesn't run past the box's own height -- Center draws
-                            // without a clip, so an unconstrained-height version overflowed
-                            // badly for any real (multi-character) string. Raw height (becomes
-                            // rotated width/thickness) is left unconstrained; it scales with
-                            // font size roughly proportionally to raw width, so keeping the
-                            // string's length in bounds keeps its thickness reasonable too
-                            // without needing an explicit boxW cap.
-                            var fitR = fitTextSize(lineText, fontName, boxH, Infinity);
+                            // Both axes constrained: raw width (becomes the rotated block's
+                            // VERTICAL extent) must fit boxH, and raw height (becomes the
+                            // rotated block's horizontal extent/thickness) must fit boxW --
+                            // same "stays inside the bounding box" contract as horizontal/
+                            // stacked. Leaving boxW unconstrained let short strings (e.g. a
+                            // single character) pick an oversized font whose thickness blew
+                            // past the box's width.
+                            var fitR = fitTextSize(lineText, fontName, boxH, boxW);
                             ctx.font = fitR.size + 'px "' + fontName + '", sans-serif';
                             var rawW = ctx.measureText(lineText).width;
                             ctx.save();
