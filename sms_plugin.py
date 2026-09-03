@@ -2399,7 +2399,7 @@ def index():
             .column .section:last-child { flex: 1; }
             .top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 15px 0; padding: 15px; background: #f8f8f8; border-radius: 5px; border: 1px solid #ddd; }
             .tabs { display: flex; gap: 0; margin: 20px 0 0 0; border-bottom: 2px solid #4CAF50; }
-            .tab-btn { background: #f0f0f0; color: #555; padding: 10px 24px; border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 14px; font-weight: bold; margin-right: 4px; }
+            .tab-btn { background: #f0f0f0; color: #555; padding: 7px 14px; border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 13px; font-weight: bold; margin-right: 2px; }
             .tab-btn.active { background: #4CAF50; color: white; border-color: #4CAF50; }
             .tab-btn:hover:not(.active) { background: #e8e8e8; }
             .tab-content { display: none; }
@@ -2409,16 +2409,16 @@ def index():
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
 
         <!-- Tab navigation -->
-        <div class="tabs" style="display:flex; align-items:center; gap:6px;">
+        <div class="tabs" style="display:flex; align-items:center; gap:2px;">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
             <button class="tab-btn" onclick="showTab('display', this)">🖥️ Display</button>
             <button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
-            <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
+            <button class="view-btn" onclick="viewMessages()" style="margin:0 0 0 10px; padding:7px 14px; font-size:13px;">📋 View Message Queue</button>
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
-            <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
-                <button id="btn_twilio_start" onclick="twilioStart()" style="background:#2e7d32; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">▶ TwilioStart</button>
-                <button id="btn_twilio_stop" onclick="twilioStop()" style="background:#c62828; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">■ TwilioStop</button>
+            <div style="margin-left:auto; display:flex; gap:4px; align-items:center;">
+                <button id="btn_twilio_start" onclick="twilioStart()" style="background:#2e7d32; color:#fff; border:none; padding:6px 12px; border-radius:4px; font-size:12px; font-weight:bold; cursor:pointer;">▶ TwilioStart</button>
+                <button id="btn_twilio_stop" onclick="twilioStop()" style="background:#c62828; color:#fff; border:none; padding:6px 12px; border-radius:4px; font-size:12px; font-weight:bold; cursor:pointer;">■ TwilioStop</button>
             </div>
         </div>
 
