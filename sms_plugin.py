@@ -692,20 +692,45 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
 
             entry = {'strip': strip, 'tw': tw, 'th': th, 'movement': movement,
                      'clip': (resolved_bx, resolved_by, box_w, box_h)}
+            # speed == 0 is the "fit to display time" sentinel: instead of a fixed
+            # px/s speed (which, with dynamic-length text, either loops a short name
+            # several times or cuts a long name off mid-scroll), time one complete
+            # pass to span the whole display duration -- the text enters at the start
+            # and fully exits right as the display window ends, regardless of length.
+            # speed <= 0 encodes fit-to-time: 0 or -1 = one pass, -N = N passes.
+            # (Negative because it shares the one speed field with the positive manual
+            # px/s speeds -- no separate config key needed.)
+            fit_to_time = (speed <= 0)
+            fit_passes = max(1, -int(speed)) if speed < 0 else 1
+            entry['fit'] = fit_to_time
+            entry['fit_passes'] = fit_passes
+            entry['wraps'] = 0
+            entry['done'] = False
+
+            def _step_for(loop_start, loop_end):
+                # Fit: cover fit_passes complete passes over the whole `duration`
+                # (each pass = one loop_start->loop_end traversal), so the text makes
+                # exactly that many passes and fully exits right as the window ends.
+                # Otherwise: fixed px/s from the speed value.
+                if fit_to_time:
+                    total = abs(loop_end - loop_start) * fit_passes
+                    return max(0.1, total / max(1.0, duration * fps))
+                return max(1.0, max(10, speed * 2) / fps)
+
             if movement in ('L2R', 'R2L'):
                 entry['dy'] = resolved_by + max(0, (box_h - th) // 2)
                 entry['pos'] = float(resolved_bx + box_w) if movement == 'R2L' else float(resolved_bx - tw)
                 entry['dir'] = -1.0 if movement == 'R2L' else 1.0
                 entry['loop_start'] = float(resolved_bx + box_w) if movement == 'R2L' else float(resolved_bx - tw)
                 entry['loop_end']   = float(resolved_bx - tw) if movement == 'R2L' else float(resolved_bx + box_w)
-                entry['step_px'] = max(1.0, max(10, speed * 2) / fps)
+                entry['step_px'] = _step_for(entry['loop_start'], entry['loop_end'])
             elif movement in ('T2B', 'B2T'):
                 entry['dx'] = resolved_bx + max(0, (box_w - tw) // 2)
                 entry['pos'] = float(resolved_by + box_h) if movement == 'B2T' else float(resolved_by - th)
                 entry['dir'] = -1.0 if movement == 'B2T' else 1.0
                 entry['loop_start'] = float(resolved_by + box_h) if movement == 'B2T' else float(resolved_by - th)
                 entry['loop_end']   = float(resolved_by - th) if movement == 'B2T' else float(resolved_by + box_h)
-                entry['step_px'] = max(1.0, max(10, speed * 2) / fps)
+                entry['step_px'] = _step_for(entry['loop_start'], entry['loop_end'])
             else:  # Center — fixed, centered in box
                 entry['dx'] = resolved_bx + max(0, (box_w - tw) // 2)
                 entry['dy'] = resolved_by + max(0, (box_h - th) // 2)
@@ -761,9 +786,23 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
                     pass
                 for e in prepared:
                     if e['movement'] in ('L2R', 'R2L', 'T2B', 'B2T'):
+                        if e.get('done'):
+                            continue  # fit passes all completed -- hold fully exited
                         e['pos'] += e['dir'] * e['step_px']
-                        if (e['dir'] < 0 and e['pos'] < e['loop_end']) or (e['dir'] > 0 and e['pos'] > e['loop_end']):
-                            e['pos'] = e['loop_start']
+                        overshot = (e['dir'] < 0 and e['pos'] < e['loop_end']) or (e['dir'] > 0 and e['pos'] > e['loop_end'])
+                        if overshot:
+                            # A pass just completed. Fixed-speed loops forever (snap back
+                            # and repeat for the rest of the window). Fit-to-time snaps back
+                            # for passes 1..N-1, then on the Nth pass holds fully exited at
+                            # loop_end (no jarring snap-back flash at the very end).
+                            if e.get('fit'):
+                                e['wraps'] += 1
+                                if e['wraps'] >= e['fit_passes']:
+                                    e['pos'] = e['loop_end']; e['done'] = True
+                                else:
+                                    e['pos'] = e['loop_start']
+                            else:
+                                e['pos'] = e['loop_start']
                 _time.sleep(1.0 / fps)
 
         _scroll_thread = threading.Thread(target=_animate, daemon=True)
@@ -1716,7 +1755,11 @@ def send_to_fpp(name):
             if not line_color.startswith('#'):
                 line_color = '#' + line_color
             movement = line_movements_cfg[i] if i < len(line_movements_cfg) and line_movements_cfg[i] else 'Center'
-            speed = line_speeds_cfg[i] if i < len(line_speeds_cfg) and line_speeds_cfg[i] else global_scroll_speed
+            # NOTE: guard on `is not None`, not truthiness -- speed 0 (and negative values)
+            # are the fit-to-display-time encoding: 0/-1 = one pass, -N = N passes. A plain
+            # `and line_speeds_cfg[i]` would treat 0 as "unset" and fall back to the global
+            # fixed speed, silently disabling fit mode on the real device.
+            speed = line_speeds_cfg[i] if (i < len(line_speeds_cfg) and line_speeds_cfg[i] is not None) else global_scroll_speed
             font_name = line_fonts_cfg[i] if i < len(line_fonts_cfg) and line_fonts_cfg[i] else global_font
             orientation = line_orientations_cfg[i] if i < len(line_orientations_cfg) and line_orientations_cfg[i] else 'horizontal'
             rendered_lines.append((rendered, box.get('x', -1), box.get('y', -1), box.get('w', 300), box.get('h', 60),
@@ -2364,7 +2407,7 @@ def index():
             .column .section:last-child { flex: 1; }
             .top-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 15px 0; padding: 15px; background: #f8f8f8; border-radius: 5px; border: 1px solid #ddd; }
             .tabs { display: flex; gap: 0; margin: 20px 0 0 0; border-bottom: 2px solid #4CAF50; }
-            .tab-btn { background: #f0f0f0; color: #555; padding: 10px 24px; border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 14px; font-weight: bold; margin-right: 4px; }
+            .tab-btn { background: #f0f0f0; color: #555; padding: 7px 14px; border: 1px solid #ddd; border-bottom: none; border-radius: 4px 4px 0 0; cursor: pointer; font-size: 13px; font-weight: bold; margin-right: 2px; }
             .tab-btn.active { background: #4CAF50; color: white; border-color: #4CAF50; }
             .tab-btn:hover:not(.active) { background: #e8e8e8; }
             .tab-content { display: none; }
@@ -2374,15 +2417,16 @@ def index():
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{window.parent.postMessage({type:'scrollTop'},'*');}catch(e){}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
 
         <!-- Tab navigation -->
-        <div class="tabs" style="display:flex; align-items:center; gap:6px;">
+        <div class="tabs" style="display:flex; align-items:center; gap:2px;">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
+            <button class="tab-btn" onclick="showTab('display', this)">🖥️ Display</button>
             {% if sms_responses_enabled %}<button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>{% endif %}
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
-            <button class="view-btn" onclick="viewMessages()" style="margin-left:8px;">📋 View Message Queue</button>
+            <button class="view-btn" onclick="viewMessages()" style="margin:0 0 0 10px; padding:7px 14px; font-size:13px;">📋 View Message Queue</button>
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
-            <div style="margin-left:auto; display:flex; gap:8px; align-items:center;">
-                <button id="btn_twilio_start" onclick="twilioStart()" style="background:#2e7d32; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">▶ TwilioStart</button>
-                <button id="btn_twilio_stop" onclick="twilioStop()" style="background:#c62828; color:#fff; border:none; padding:8px 16px; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;">■ TwilioStop</button>
+            <div style="margin-left:auto; display:flex; gap:4px; align-items:center;">
+                <button id="btn_twilio_start" onclick="twilioStart()" style="background:#2e7d32; color:#fff; border:none; padding:6px 12px; border-radius:4px; font-size:12px; font-weight:bold; cursor:pointer;">▶ TwilioStart</button>
+                <button id="btn_twilio_stop" onclick="twilioStop()" style="background:#c62828; color:#fff; border:none; padding:6px 12px; border-radius:4px; font-size:12px; font-weight:bold; cursor:pointer;">■ TwilioStop</button>
             </div>
         </div>
 
@@ -2461,8 +2505,9 @@ def index():
                         <h2 style="margin-top: 0;">Message Settings</h2>
 
                         <label>Display Duration (seconds):</label>
-                        <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300">
+                        <input type="number" id="display_duration" value="{{ config.display_duration }}" min="5" max="300" onchange="if(window.renderCanvasPreview)window.renderCanvasPreview();">
                         <p class="help-text">⏱️ Each message displays for this many seconds before moving to the next</p>
+                        <p class="help-text">💡 Scrolling lines set to "Fit to time" use this as their scroll window — one full pass per display.</p>
                         <p class="help-text">💡 Recommended: set this to a multiple of your Names Display Content sequence's length, so it doesn't cut off mid-loop</p>
 
                         <label>Max Messages Per Phone (0 = unlimited):</label>
@@ -2479,276 +2524,9 @@ def index():
                     </div>
                 </div>
 
-                <!-- RIGHT COLUMN: Text Display -->
-                <div class="column">
-                    <div class="section">
-                        <h2>Text Display Options</h2>
-
-                        <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
-                        <style>
-                            .line-card { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:8px 8px 6px; margin-bottom:6px; }
-                            .line-row { display:flex; align-items:center; gap:6px; }
-                            .line-row input[type="text"] { margin-bottom:0; padding:6px; }
-                            .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
-                            .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
-                            .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
-                            .reset-line-btn:hover { background:#666; }
-                            .line-color-group { position:relative; display:flex; align-items:center; flex-shrink:0; }
-                            .line-color-swatch { width:24px; height:24px; padding:0; border:1px solid #666; border-radius:4px 0 0 4px; cursor:pointer; background:none; }
-                            .color-palette-btn { width:16px; height:24px; padding:0; border:1px solid #666; border-left:none; border-radius:0 4px 4px 0; background:#444; color:#ccc; font-size:9px; cursor:pointer; }
-                            .color-palette-btn:hover { background:#666; }
-                            .color-palette-popover { position:absolute; top:28px; right:0; z-index:50; background:#2a2a2a; border:1px solid #666; border-radius:5px; padding:8px; width:140px; box-shadow:0 4px 12px rgba(0,0,0,0.5); }
-                            .color-palette-swatches { display:flex; flex-wrap:wrap; gap:4px; }
-                            .color-palette-swatch { width:20px; height:20px; border:1px solid #666; border-radius:3px; padding:0; cursor:pointer; }
-                            .color-palette-save-btn { margin-top:6px; width:100%; font-size:11px; background:#444; color:#ccc; border:1px dashed #888; border-radius:3px; padding:4px; cursor:pointer; }
-                            .color-palette-empty { font-size:10px; color:#888; text-align:center; padding:4px 0; }
-                            .line-movement-row { margin-top:5px; padding-top:5px; border-top:1px solid #555; }
-                            .line-mini-label { font-weight:normal; font-size:12px; color:#aaa; flex-shrink:0; }
-                            .line-group-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-                            .line-group-controls select { width:auto; margin-bottom:0; padding:6px; flex:1; min-width:160px; }
-                            .line-speed-row { display:flex; align-items:center; gap:6px; }
-                            .line-speed-row label { margin:0; font-weight:normal; font-size:12px; color:#aaa; }
-                            .line-speed-row input { width:56px; margin-bottom:0; padding:6px; }
-                        </style>
-                        {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
-                        {% set lc = config.get('line_colors') or ['', '', '', ''] %}
-                        {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
-                        {% set ls = config.get('line_speeds') or [50, 50, 50, 50] %}
-                        {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
-                        {% set lo = config.get('line_orientations') or ['horizontal', 'horizontal', 'horizontal', 'horizontal'] %}
-                        <div id="message_lines_section">
-                            <div class="line-card">
-                                <div class="line-row">
-                                    <span class="line-label">Line 1:</span>
-                                    <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
-                                    <div class="line-color-group">
-                                        <input type="color" id="line_1_color" class="line-color-swatch" value="{{ lc[0] if lc|length > 0 and lc[0] else '#FF0000' }}" title="Line 1 color" onchange="onLineColorChange(0)">
-                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(0)" title="Saved colors">▾</button>
-                                        <div id="line_1_palette_popover" class="color-palette-popover" style="display:none;"></div>
-                                    </div>
-                                    <span id="line_1_pos" class="pos-badge">auto</span>
-                                    <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Move:</span>
-                                        <select id="line_1_movement" onchange="onLineMovementChange(0)">
-                                            <option value="Center" {{ 'selected' if lm[0] == 'Center' else '' }}>Static</option>
-                                            <option value="L2R" {{ 'selected' if lm[0] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                            <option value="R2L" {{ 'selected' if lm[0] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                            <option value="T2B" {{ 'selected' if lm[0] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                            <option value="B2T" {{ 'selected' if lm[0] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                        </select>
-                                        <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_1_speed" min="0" max="100" step="1" value="{{ ls[0] if ls|length > 0 else 50 }}" onchange="onLineSpeedChange(0)">
-                                        </div>
-                                        <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
-                                            <span class="line-mini-label">Style:</span>
-                                            <select id="line_1_orientation" onchange="onLineOrientationChange(0)">
-                                                <option value="horizontal" {{ 'selected' if lo[0] == 'horizontal' else '' }}>Horizontal</option>
-                                                <option value="vertical_rotated" {{ 'selected' if lo[0] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
-                                                <option value="vertical_stacked" {{ 'selected' if lo[0] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
-                                            </select>
-                                        </span>
-                                    </div>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Font:</span>
-                                        <select id="line_1_font" onchange="onLineFontChange(0)">
-                                            <option value="">Loading fonts...</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="line-card">
-                                <div class="line-row">
-                                    <span class="line-label">Line 2:</span>
-                                    <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
-                                    <div class="line-color-group">
-                                        <input type="color" id="line_2_color" class="line-color-swatch" value="{{ lc[1] if lc|length > 1 and lc[1] else '#FF0000' }}" title="Line 2 color" onchange="onLineColorChange(1)">
-                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(1)" title="Saved colors">▾</button>
-                                        <div id="line_2_palette_popover" class="color-palette-popover" style="display:none;"></div>
-                                    </div>
-                                    <span id="line_2_pos" class="pos-badge">auto</span>
-                                    <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Move:</span>
-                                        <select id="line_2_movement" onchange="onLineMovementChange(1)">
-                                            <option value="Center" {{ 'selected' if lm[1] == 'Center' else '' }}>Static</option>
-                                            <option value="L2R" {{ 'selected' if lm[1] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                            <option value="R2L" {{ 'selected' if lm[1] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                            <option value="T2B" {{ 'selected' if lm[1] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                            <option value="B2T" {{ 'selected' if lm[1] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                        </select>
-                                        <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_2_speed" min="0" max="100" step="1" value="{{ ls[1] if ls|length > 1 else 50 }}" onchange="onLineSpeedChange(1)">
-                                        </div>
-                                        <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
-                                            <span class="line-mini-label">Style:</span>
-                                            <select id="line_2_orientation" onchange="onLineOrientationChange(1)">
-                                                <option value="horizontal" {{ 'selected' if lo[1] == 'horizontal' else '' }}>Horizontal</option>
-                                                <option value="vertical_rotated" {{ 'selected' if lo[1] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
-                                                <option value="vertical_stacked" {{ 'selected' if lo[1] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
-                                            </select>
-                                        </span>
-                                    </div>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Font:</span>
-                                        <select id="line_2_font" onchange="onLineFontChange(1)">
-                                            <option value="">Loading fonts...</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="line-card">
-                                <div class="line-row">
-                                    <span class="line-label">Line 3:</span>
-                                    <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
-                                    <div class="line-color-group">
-                                        <input type="color" id="line_3_color" class="line-color-swatch" value="{{ lc[2] if lc|length > 2 and lc[2] else '#FF0000' }}" title="Line 3 color" onchange="onLineColorChange(2)">
-                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(2)" title="Saved colors">▾</button>
-                                        <div id="line_3_palette_popover" class="color-palette-popover" style="display:none;"></div>
-                                    </div>
-                                    <span id="line_3_pos" class="pos-badge">auto</span>
-                                    <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Move:</span>
-                                        <select id="line_3_movement" onchange="onLineMovementChange(2)">
-                                            <option value="Center" {{ 'selected' if lm[2] == 'Center' else '' }}>Static</option>
-                                            <option value="L2R" {{ 'selected' if lm[2] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                            <option value="R2L" {{ 'selected' if lm[2] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                            <option value="T2B" {{ 'selected' if lm[2] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                            <option value="B2T" {{ 'selected' if lm[2] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                        </select>
-                                        <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_3_speed" min="0" max="100" step="1" value="{{ ls[2] if ls|length > 2 else 50 }}" onchange="onLineSpeedChange(2)">
-                                        </div>
-                                        <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
-                                            <span class="line-mini-label">Style:</span>
-                                            <select id="line_3_orientation" onchange="onLineOrientationChange(2)">
-                                                <option value="horizontal" {{ 'selected' if lo[2] == 'horizontal' else '' }}>Horizontal</option>
-                                                <option value="vertical_rotated" {{ 'selected' if lo[2] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
-                                                <option value="vertical_stacked" {{ 'selected' if lo[2] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
-                                            </select>
-                                        </span>
-                                    </div>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Font:</span>
-                                        <select id="line_3_font" onchange="onLineFontChange(2)">
-                                            <option value="">Loading fonts...</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="line-card">
-                                <div class="line-row">
-                                    <span class="line-label">Line 4:</span>
-                                    <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
-                                    <div class="line-color-group">
-                                        <input type="color" id="line_4_color" class="line-color-swatch" value="{{ lc[3] if lc|length > 3 and lc[3] else '#FF0000' }}" title="Line 4 color" onchange="onLineColorChange(3)">
-                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(3)" title="Saved colors">▾</button>
-                                        <div id="line_4_palette_popover" class="color-palette-popover" style="display:none;"></div>
-                                    </div>
-                                    <span id="line_4_pos" class="pos-badge">auto</span>
-                                    <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Move:</span>
-                                        <select id="line_4_movement" onchange="onLineMovementChange(3)">
-                                            <option value="Center" {{ 'selected' if lm[3] == 'Center' else '' }}>Static</option>
-                                            <option value="L2R" {{ 'selected' if lm[3] == 'L2R' else '' }}>Scroll Left to Right</option>
-                                            <option value="R2L" {{ 'selected' if lm[3] == 'R2L' else '' }}>Scroll Right to Left</option>
-                                            <option value="T2B" {{ 'selected' if lm[3] == 'T2B' else '' }}>Scroll Top to Bottom</option>
-                                            <option value="B2T" {{ 'selected' if lm[3] == 'B2T' else '' }}>Scroll Bottom to Top</option>
-                                        </select>
-                                        <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_4_speed" min="0" max="100" step="1" value="{{ ls[3] if ls|length > 3 else 50 }}" onchange="onLineSpeedChange(3)">
-                                        </div>
-                                        <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
-                                            <span class="line-mini-label">Style:</span>
-                                            <select id="line_4_orientation" onchange="onLineOrientationChange(3)">
-                                                <option value="horizontal" {{ 'selected' if lo[3] == 'horizontal' else '' }}>Horizontal</option>
-                                                <option value="vertical_rotated" {{ 'selected' if lo[3] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
-                                                <option value="vertical_stacked" {{ 'selected' if lo[3] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
-                                            </select>
-                                        </span>
-                                    </div>
-                                </div>
-                                <div class="line-movement-row">
-                                    <div class="line-group-controls">
-                                        <span class="line-mini-label">Font:</span>
-                                        <select id="line_4_font" onchange="onLineFontChange(3)">
-                                            <option value="">Loading fonts...</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <p class="help-text">🎨 Click the ▾ next to a line's color to save or recall colors. Each card's Movement controls that line only.</p>
-
-                        <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
-                        <div id="canvas_section">
-                            <label>Position Preview:</label>
-                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Click a line to select it, then drag inside its box to move it, or drag an edge/corner to resize. Text auto-sizes to fill the box — the box is the MAX size text can be.</p>
-                            <p class="help-text" style="margin:-4px 0 8px;">↔️ For scrolling text (Left/Right/Top/Bottom movement), the box is also where the text is allowed to show — it enters and exits at the box's own edges, not the display's, and always starts fully off-page before scrolling in.</p>
-                            <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
-                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
-                                <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
-                                <span id="pos_display" style="font-size:12px; color:#888;"></span>
-                            </div>
-
-                            <!-- Canvas background preview (FSEQ / video / image) -->
-                            <div style="margin-top:10px; padding:10px; background:#616161; border:1px solid #777; border-radius:4px;">
-                                <span style="font-size:13px; font-weight:bold; color:#eee;">Background Preview</span>
-                                <span id="fseq_scrub_hint" style="font-weight:normal; font-size:11px; color:#bbb; margin-left:6px;">Use scroll bar to move preview.</span>
-                                <div id="fseq_preview_controls" style="margin-top:8px;">
-                                    <div style="margin-bottom:6px;">
-                                        <span id="fseq_seq_label" style="font-size:12px; color:#ccc;">Sequence: —</span>
-                                    </div>
-                                    <div id="fseq_scrubber_row" style="display:none;">
-                                        <div style="display:flex; align-items:center; gap:8px;">
-                                            <span id="fseq_time_display" style="font-size:12px; color:#aaa; min-width:85px; white-space:nowrap;">0:00 / 0:00</span>
-                                            <input type="range" id="fseq_scrubber" min="0" max="100" value="0" step="1"
-                                                   style="flex:1;" oninput="fseqScrub(this.value)">
-                                            <button type="button" onclick="clearFseqPreview()" style="padding:4px 8px; font-size:11px; background:#555; color:#fff; border:none; border-radius:3px; cursor:pointer;">Clear</button>
-                                        </div>
-                                        <div id="fseq_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
-                                    </div>
-                                    <div id="fseq_load_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
-                        <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
-                        <script>
-                            window._lineBoxesInit = {{ config.get('line_boxes', [{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60}]) | tojson }};
-                            window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
-                            window._lineSpeedsInit = {{ config.get('line_speeds', [50, 50, 50, 50]) | tojson }};
-                            window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
-                            window._lineOrientationsInit = {{ config.get('line_orientations', ['horizontal', 'horizontal', 'horizontal', 'horizontal']) | tojson }};
-                            window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
-                        </script>
-                    </div>
-                </div>
-
             </div>
 
-            <!-- Filters — full width, spans both columns -->
+            <!-- Filters — full width -->
             <div class="section" style="margin-top:12px;">
                 <h2>Filters</h2>
                 <div style="display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap;">
@@ -2872,6 +2650,324 @@ def index():
                 checkDuplicateState();
             </script>
 
+        </div>
+
+        <!-- Display Settings Tab -->
+        <div id="tab-display" class="tab-content">
+            <div class="columns">
+
+                <!-- LEFT COLUMN: Message Lines editor -->
+                <div class="column">
+                    <div class="section">
+                        <h2>Message Lines</h2>
+
+                        <label>Message Lines: <span style="font-size:11px; color:#888; font-weight:normal;">Use {name} in any line. Empty lines are skipped.</span></label>
+                        <style>
+                            .line-card { background:#3a3a3a; border:1px solid #555; border-radius:5px; padding:8px 8px 6px; margin-bottom:6px; }
+                            .line-row { display:flex; align-items:center; gap:6px; }
+                            .line-row input[type="text"] { margin-bottom:0; padding:6px; }
+                            .line-label { width:46px; font-size:12px; color:#aaa; flex-shrink:0; }
+                            .pos-badge { font-size:11px; color:#888; white-space:nowrap; min-width:80px; text-align:right; font-family:monospace; }
+                            .reset-line-btn { background:#444; border:none; color:#ccc; padding:2px 7px; font-size:12px; border-radius:3px; cursor:pointer; flex-shrink:0; }
+                            .reset-line-btn:hover { background:#666; }
+                            .line-color-group { position:relative; display:flex; align-items:center; flex-shrink:0; }
+                            .line-color-swatch { width:24px; height:24px; padding:0; border:1px solid #666; border-radius:4px 0 0 4px; cursor:pointer; background:none; }
+                            .color-palette-btn { width:16px; height:24px; padding:0; border:1px solid #666; border-left:none; border-radius:0 4px 4px 0; background:#444; color:#ccc; font-size:9px; cursor:pointer; }
+                            .color-palette-btn:hover { background:#666; }
+                            .color-palette-popover { position:absolute; top:28px; right:0; z-index:50; background:#2a2a2a; border:1px solid #666; border-radius:5px; padding:8px; width:140px; box-shadow:0 4px 12px rgba(0,0,0,0.5); }
+                            .color-palette-swatches { display:flex; flex-wrap:wrap; gap:4px; }
+                            .color-palette-swatch { width:20px; height:20px; border:1px solid #666; border-radius:3px; padding:0; cursor:pointer; }
+                            .color-palette-save-btn { margin-top:6px; width:100%; font-size:11px; background:#444; color:#ccc; border:1px dashed #888; border-radius:3px; padding:4px; cursor:pointer; }
+                            .color-palette-empty { font-size:10px; color:#888; text-align:center; padding:4px 0; }
+                            .line-movement-row { margin-top:5px; padding-top:5px; border-top:1px solid #555; }
+                            .line-mini-label { font-weight:normal; font-size:12px; color:#aaa; flex-shrink:0; }
+                            .line-group-controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+                            .line-group-controls select { width:auto; margin-bottom:0; padding:6px; flex:1; min-width:160px; }
+                            .line-speed-row { display:flex; align-items:center; gap:6px; }
+                            .line-speed-row label { margin:0; font-weight:normal; font-size:12px; color:#aaa; }
+                            .line-speed-row input[type="number"] { width:56px; margin-bottom:0; padding:6px; }
+                            .line-speed-auto { display:inline-flex; align-items:center; gap:4px; cursor:pointer; white-space:nowrap; }
+                            .line-speed-auto input[type="checkbox"] { width:auto; margin:0; cursor:pointer; }
+                            .line-speed-sub { display:inline-flex; align-items:center; gap:6px; }
+                        </style>
+                        {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
+                        {% set lc = config.get('line_colors') or ['', '', '', ''] %}
+                        {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
+                        {% set ls = config.get('line_speeds') or [50, 50, 50, 50] %}
+                        {# Per-line speed value with a safe fallback. speed <= 0 encodes
+                           fit-to-time: 0/-1 = 1 pass, -N = N passes. #}
+                        {% set s0 = ls[0] if ls|length > 0 else 50 %}
+                        {% set s1 = ls[1] if ls|length > 1 else 50 %}
+                        {% set s2 = ls[2] if ls|length > 2 else 50 %}
+                        {% set s3 = ls[3] if ls|length > 3 else 50 %}
+                        {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
+                        {% set lo = config.get('line_orientations') or ['horizontal', 'horizontal', 'horizontal', 'horizontal'] %}
+                        <div id="message_lines_section">
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 1:</span>
+                                    <input type="text" id="line_1" value="{{ ml[0] if ml|length > 0 else 'Merry Christmas' }}" placeholder="e.g. Merry Christmas" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_1_color" class="line-color-swatch" value="{{ lc[0] if lc|length > 0 and lc[0] else '#FF0000' }}" title="Line 1 color" onchange="onLineColorChange(0)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(0)" title="Saved colors">▾</button>
+                                        <div id="line_1_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_1_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(0)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_1_movement" onchange="onLineMovementChange(0)">
+                                            <option value="Center" {{ 'selected' if lm[0] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[0] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[0] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[0] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[0] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_1_speed_auto" {{ 'checked' if s0 <= 0 else '' }} onchange="onLineSpeedAutoChange(0)"> Fit to time</label>
+                                            <span id="line_1_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s0 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_1_speed" min="1" max="100" step="1" value="{{ s0 if s0 > 0 else 50 }}" onchange="onLineSpeedChange(0)">
+                                            </span>
+                                            <span id="line_1_passes_wrap" class="line-speed-sub" style="{{ '' if s0 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_1_passes" min="1" max="20" step="1" value="{{ (-s0) if s0 < 0 else 1 }}" onchange="onLinePassesChange(0)">
+                                            </span>
+                                        </div>
+                                        <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_1_orientation" onchange="onLineOrientationChange(0)">
+                                                <option value="horizontal" {{ 'selected' if lo[0] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[0] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[0] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_1_font" onchange="onLineFontChange(0)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 2:</span>
+                                    <input type="text" id="line_2" value="{{ ml[1] if ml|length > 1 else '{name}!' }}" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_2_color" class="line-color-swatch" value="{{ lc[1] if lc|length > 1 and lc[1] else '#FF0000' }}" title="Line 2 color" onchange="onLineColorChange(1)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(1)" title="Saved colors">▾</button>
+                                        <div id="line_2_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_2_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(1)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_2_movement" onchange="onLineMovementChange(1)">
+                                            <option value="Center" {{ 'selected' if lm[1] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[1] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[1] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[1] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[1] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_2_speed_auto" {{ 'checked' if s1 <= 0 else '' }} onchange="onLineSpeedAutoChange(1)"> Fit to time</label>
+                                            <span id="line_2_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s1 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_2_speed" min="1" max="100" step="1" value="{{ s1 if s1 > 0 else 50 }}" onchange="onLineSpeedChange(1)">
+                                            </span>
+                                            <span id="line_2_passes_wrap" class="line-speed-sub" style="{{ '' if s1 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_2_passes" min="1" max="20" step="1" value="{{ (-s1) if s1 < 0 else 1 }}" onchange="onLinePassesChange(1)">
+                                            </span>
+                                        </div>
+                                        <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_2_orientation" onchange="onLineOrientationChange(1)">
+                                                <option value="horizontal" {{ 'selected' if lo[1] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[1] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[1] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_2_font" onchange="onLineFontChange(1)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 3:</span>
+                                    <input type="text" id="line_3" value="{{ ml[2] if ml|length > 2 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_3_color" class="line-color-swatch" value="{{ lc[2] if lc|length > 2 and lc[2] else '#FF0000' }}" title="Line 3 color" onchange="onLineColorChange(2)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(2)" title="Saved colors">▾</button>
+                                        <div id="line_3_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_3_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(2)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_3_movement" onchange="onLineMovementChange(2)">
+                                            <option value="Center" {{ 'selected' if lm[2] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[2] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[2] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[2] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[2] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_3_speed_auto" {{ 'checked' if s2 <= 0 else '' }} onchange="onLineSpeedAutoChange(2)"> Fit to time</label>
+                                            <span id="line_3_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s2 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_3_speed" min="1" max="100" step="1" value="{{ s2 if s2 > 0 else 50 }}" onchange="onLineSpeedChange(2)">
+                                            </span>
+                                            <span id="line_3_passes_wrap" class="line-speed-sub" style="{{ '' if s2 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_3_passes" min="1" max="20" step="1" value="{{ (-s2) if s2 < 0 else 1 }}" onchange="onLinePassesChange(2)">
+                                            </span>
+                                        </div>
+                                        <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_3_orientation" onchange="onLineOrientationChange(2)">
+                                                <option value="horizontal" {{ 'selected' if lo[2] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[2] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[2] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_3_font" onchange="onLineFontChange(2)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="line-card">
+                                <div class="line-row">
+                                    <span class="line-label">Line 4:</span>
+                                    <input type="text" id="line_4" value="{{ ml[3] if ml|length > 3 else '' }}" placeholder="" style="flex:1;" onblur="saveConfig()">
+                                    <div class="line-color-group">
+                                        <input type="color" id="line_4_color" class="line-color-swatch" value="{{ lc[3] if lc|length > 3 and lc[3] else '#FF0000' }}" title="Line 4 color" onchange="onLineColorChange(3)">
+                                        <button type="button" class="color-palette-btn" onclick="toggleColorPalette(3)" title="Saved colors">▾</button>
+                                        <div id="line_4_palette_popover" class="color-palette-popover" style="display:none;"></div>
+                                    </div>
+                                    <span id="line_4_pos" class="pos-badge">auto</span>
+                                    <button type="button" class="reset-line-btn" onclick="resetLine(3)" title="Reset to auto-center">✕</button>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Move:</span>
+                                        <select id="line_4_movement" onchange="onLineMovementChange(3)">
+                                            <option value="Center" {{ 'selected' if lm[3] == 'Center' else '' }}>Static</option>
+                                            <option value="L2R" {{ 'selected' if lm[3] == 'L2R' else '' }}>Scroll Left to Right</option>
+                                            <option value="R2L" {{ 'selected' if lm[3] == 'R2L' else '' }}>Scroll Right to Left</option>
+                                            <option value="T2B" {{ 'selected' if lm[3] == 'T2B' else '' }}>Scroll Top to Bottom</option>
+                                            <option value="B2T" {{ 'selected' if lm[3] == 'B2T' else '' }}>Scroll Bottom to Top</option>
+                                        </select>
+                                        <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_4_speed_auto" {{ 'checked' if s3 <= 0 else '' }} onchange="onLineSpeedAutoChange(3)"> Fit to time</label>
+                                            <span id="line_4_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s3 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_4_speed" min="1" max="100" step="1" value="{{ s3 if s3 > 0 else 50 }}" onchange="onLineSpeedChange(3)">
+                                            </span>
+                                            <span id="line_4_passes_wrap" class="line-speed-sub" style="{{ '' if s3 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_4_passes" min="1" max="20" step="1" value="{{ (-s3) if s3 < 0 else 1 }}" onchange="onLinePassesChange(3)">
+                                            </span>
+                                        </div>
+                                        <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_4_orientation" onchange="onLineOrientationChange(3)">
+                                                <option value="horizontal" {{ 'selected' if lo[3] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[3] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[3] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
+                                    </div>
+                                </div>
+                                <div class="line-movement-row">
+                                    <div class="line-group-controls">
+                                        <span class="line-mini-label">Font:</span>
+                                        <select id="line_4_font" onchange="onLineFontChange(3)">
+                                            <option value="">Loading fonts...</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="help-text">🎨 Click the ▾ next to a line's color to save or recall colors. Each card's Movement controls that line only.</p>
+                    </div>
+                </div>
+
+                <!-- RIGHT COLUMN: Live Preview -->
+                <div class="column">
+                    <div class="section">
+                        <h2>Preview</h2>
+
+                        <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
+                        <div id="canvas_section">
+                            <label>Position Preview:</label>
+                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Click a line to select it, then drag inside its box to move it, or drag an edge/corner to resize. Text auto-sizes to fill the box — the box is the MAX size text can be.</p>
+                            <p class="help-text" style="margin:-4px 0 8px;">↔️ For scrolling text (Left/Right/Top/Bottom movement), the box is also where the text is allowed to show — it enters and exits at the box's own edges, not the display's, and always starts fully off-page before scrolling in.</p>
+                            <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
+                            <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
+                                <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
+                                <span id="pos_display" style="font-size:12px; color:#888;"></span>
+                            </div>
+
+                            <!-- Canvas background preview (FSEQ / video / image) -->
+                            <div style="margin-top:10px; padding:10px; background:#616161; border:1px solid #777; border-radius:4px;">
+                                <span style="font-size:13px; font-weight:bold; color:#eee;">Background Preview</span>
+                                <span id="fseq_scrub_hint" style="font-weight:normal; font-size:11px; color:#bbb; margin-left:6px;">Use scroll bar to move preview.</span>
+                                <div id="fseq_preview_controls" style="margin-top:8px;">
+                                    <div style="margin-bottom:6px;">
+                                        <span id="fseq_seq_label" style="font-size:12px; color:#ccc;">Sequence: —</span>
+                                    </div>
+                                    <div id="fseq_scrubber_row" style="display:none;">
+                                        <div style="display:flex; align-items:center; gap:8px;">
+                                            <span id="fseq_time_display" style="font-size:12px; color:#aaa; min-width:85px; white-space:nowrap;">0:00 / 0:00</span>
+                                            <input type="range" id="fseq_scrubber" min="0" max="100" value="0" step="1"
+                                                   style="flex:1;" oninput="fseqScrub(this.value)">
+                                            <button type="button" onclick="clearFseqPreview()" style="padding:4px 8px; font-size:11px; background:#555; color:#fff; border:none; border-radius:3px; cursor:pointer;">Clear</button>
+                                        </div>
+                                        <div id="fseq_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
+                                    </div>
+                                    <div id="fseq_load_status" style="font-size:11px; color:#888; margin-top:4px; min-height:16px;"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
+                        <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
+                        <script>
+                            window._lineBoxesInit = {{ config.get('line_boxes', [{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60}]) | tojson }};
+                            window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
+                            window._lineSpeedsInit = {{ config.get('line_speeds', [50, 50, 50, 50]) | tojson }};
+                            window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
+                            window._lineOrientationsInit = {{ config.get('line_orientations', ['horizontal', 'horizontal', 'horizontal', 'horizontal']) | tojson }};
+                            window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
+                        </script>
+                    </div>
+                </div>
+
+            </div>
         </div>
 
         <!-- SMS Responses Tab -->
@@ -3214,18 +3310,57 @@ def index():
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
-            // Per-line Speed input
+            // Per-line manual Speed input (1-100 px/s). Fit-to-time uses a separate encoding
+            // (speed <= 0) set via the checkbox / Times box below, never typed here.
             function onLineSpeedChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_speed');
                 if (!el) return;
-                // 0-100 whole-number range -- finer, rounder-feeling granularity than the
-                // old 1-10-by-tenths scale while covering the same practical speed range
-                // (see the *2 multiplier in the step_px formulas below/in Python, which
-                // replaces the old scale's *20 to match).
-                var v = Math.round(Math.min(100, Math.max(0, parseInt(el.value, 10) || 0)));
+                var v = Math.round(Math.min(100, Math.max(1, parseInt(el.value, 10) || 1)));
                 el.value = v;
                 window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
                 window._lineSpeeds[i] = v;
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line "Fit to display time" checkbox. Checked swaps the Speed box for the
+            // Times (pass count) box and stores speed = -times (fit-to-time encoding, read
+            // by the preview + backend). Unchecked restores the manual px/s speed.
+            function onLineSpeedAutoChange(i) {
+                var auto = document.getElementById('line_' + (i + 1) + '_speed_auto');
+                if (!auto) return;
+                var speedWrap = document.getElementById('line_' + (i + 1) + '_speed_wrap');
+                var passesWrap = document.getElementById('line_' + (i + 1) + '_passes_wrap');
+                window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
+                if (auto.checked) {
+                    if (speedWrap) speedWrap.style.display = 'none';
+                    if (passesWrap) passesWrap.style.display = '';
+                    var pEl = document.getElementById('line_' + (i + 1) + '_passes');
+                    var p = pEl ? Math.round(Math.min(20, Math.max(1, parseInt(pEl.value, 10) || 1))) : 1;
+                    if (pEl) pEl.value = p;
+                    window._lineSpeeds[i] = -p;  // negative = fit-to-time, N passes
+                } else {
+                    if (speedWrap) speedWrap.style.display = '';
+                    if (passesWrap) passesWrap.style.display = 'none';
+                    var sEl = document.getElementById('line_' + (i + 1) + '_speed');
+                    var v = sEl ? Math.round(Math.min(100, Math.max(1, parseInt(sEl.value, 10) || 50))) : 50;
+                    if (sEl) sEl.value = v;
+                    window._lineSpeeds[i] = v;
+                }
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line "Times" (pass count) input, shown only in fit-to-time mode. Stores
+            // speed = -times so the backend/preview make that many complete passes over the
+            // display duration.
+            function onLinePassesChange(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_passes');
+                if (!el) return;
+                var p = Math.round(Math.min(20, Math.max(1, parseInt(el.value, 10) || 1)));
+                el.value = p;
+                window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
+                window._lineSpeeds[i] = -p;
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
@@ -3289,8 +3424,8 @@ def index():
 
                 var initLS = (window._lineSpeedsInit && Array.isArray(window._lineSpeedsInit))
                     ? window._lineSpeedsInit.slice()
-                    : [5, 5, 5, 5];
-                while (initLS.length < 4) initLS.push(5);
+                    : [50, 50, 50, 50];
+                while (initLS.length < 4) initLS.push(50);
                 window._lineSpeeds = initLS;
 
                 // Orientation only applies to Center (static) lines -- see getLineOrientation
@@ -3412,6 +3547,50 @@ def index():
                         }
                     }
                     return best;
+                }
+
+                // Per-line scroll speed, defaulting to 50. speed <= 0 is REAL (fit-to-time:
+                // 0/-1 = one pass, -N = N passes), so this must not use `|| 50`, which would
+                // coerce 0 back to 50 and silently disable fit mode.
+                function getLineSpeed(i) {
+                    var v = window._lineSpeeds && window._lineSpeeds[i];
+                    return (v === undefined || v === null) ? 50 : v;
+                }
+                function isFitSpeed(lineSpeed) { return lineSpeed <= 0; }
+                function fitPassCount(lineSpeed) { return lineSpeed < 0 ? -lineSpeed : 1; }
+                // Per-frame scroll step (in the same coordinate space as loopStart/loopEnd).
+                // Fit-to-time (speed <= 0): cover `passes` complete loopStart->loopEnd
+                // traversals across the whole `displayDur`, so it makes exactly that many
+                // passes in the window. Otherwise a fixed px/s speed, scaled from model
+                // space to that coordinate space by axisScale. Mirrors _step_for().
+                function scrollStepPx(lineSpeed, loopStart, loopEnd, displayDur, fps, axisScale) {
+                    if (isFitSpeed(lineSpeed)) {
+                        var total = Math.abs(loopEnd - loopStart) * fitPassCount(lineSpeed);
+                        return Math.max(0.1, total / Math.max(1, displayDur * fps));
+                    }
+                    return Math.max(1, Math.max(10, lineSpeed * 2) / fps) * axisScale;
+                }
+                // Simulate scroll position at the current scrub time. Fixed-speed loops
+                // forever (snap back to loopStart). Fit-to-time loops for passes 1..N-1 then
+                // holds at loopEnd once all N passes are done. Mirrors _animate's per-frame
+                // advance in animate_lines_via_shm.
+                function scrollPosAt(loopStart, loopEnd, dirSign, stepPx, scrubSeconds, fps, fitMode, passes) {
+                    var frames = Math.round((scrubSeconds || 0) * fps);
+                    var pos = loopStart, wraps = 0, done = false;
+                    for (var f = 0; f < frames; f++) {
+                        if (done) { pos = loopEnd; continue; }
+                        pos += dirSign * stepPx;
+                        var overshot = (dirSign < 0 && pos < loopEnd) || (dirSign > 0 && pos > loopEnd);
+                        if (overshot) {
+                            if (fitMode && ++wraps >= passes) { pos = loopEnd; done = true; }
+                            else pos = loopStart;
+                        }
+                    }
+                    return pos;
+                }
+                function getDisplayDuration() {
+                    var el = document.getElementById('display_duration');
+                    return (el && parseInt(el.value, 10)) || 10;
                 }
 
                 function updateBadges() {
@@ -3556,10 +3735,9 @@ def index():
                             // (the step is scaled by the same model->canvas factor as everything
                             // else here) so it stays proportionally correct at any preview size.
                             var scrollFps = 30;
-                            var lineSpeed = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
-                            var stepPxModel = Math.max(1, Math.max(10, lineSpeed * 2) / scrollFps);
+                            var lineSpeed = getLineSpeed(i);
+                            var fitMode = isFitSpeed(lineSpeed);
                             var horizScroll = scrollX; // scrollX/scrollY already computed above
-                            var stepPxCanvas = stepPxModel * (horizScroll ? modelScaleX : modelScaleY);
                             var loopStart, loopEnd, dirSign;
                             if (horizScroll) {
                                 loopStart = (movement === 'R2L') ? (boxX + boxW) : (boxX - textW);
@@ -3570,14 +3748,10 @@ def index():
                                 loopEnd   = (movement === 'B2T') ? (boxY - textH) : (boxY + boxH);
                                 dirSign   = (movement === 'B2T') ? -1 : 1;
                             }
-                            var scrollFrameCount = Math.round((window._scrubSeconds || 0) * scrollFps);
-                            var scrollPos = loopStart;
-                            for (var sf = 0; sf < scrollFrameCount; sf++) {
-                                scrollPos += dirSign * stepPxCanvas;
-                                if ((dirSign < 0 && scrollPos < loopEnd) || (dirSign > 0 && scrollPos > loopEnd)) {
-                                    scrollPos = loopStart;
-                                }
-                            }
+                            var stepPxCanvas = scrollStepPx(lineSpeed, loopStart, loopEnd,
+                                getDisplayDuration(), scrollFps, horizScroll ? modelScaleX : modelScaleY);
+                            var scrollPos = scrollPosAt(loopStart, loopEnd, dirSign, stepPxCanvas,
+                                window._scrubSeconds, scrollFps, fitMode, fitPassCount(lineSpeed));
 
                             var drawX = horizScroll ? scrollPos : (boxX + Math.max(0, (boxW - textW) / 2));
                             // drawTop is the visual top of the text; fillText itself (baseline
@@ -3633,20 +3807,15 @@ def index():
                             var rawHTR = fitTR.ascent + fitTR.descent;
                             var rotatedW = rawHTR, rotatedH = rawWTR; // dims after rotation
 
-                            var lineSpeedTR = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
-                            var stepPxModelTR = Math.max(1, Math.max(10, lineSpeedTR * 2) / 30);
-                            var stepPxCanvasTR = stepPxModelTR * modelScaleY;
+                            var lineSpeedTR = getLineSpeed(i);
+                            var fitModeTR = isFitSpeed(lineSpeedTR);
                             var loopStartTR = (movement === 'B2T') ? (boxY + boxH) : (boxY - rotatedH);
                             var loopEndTR   = (movement === 'B2T') ? (boxY - rotatedH) : (boxY + boxH);
                             var dirSignTR   = (movement === 'B2T') ? -1 : 1;
-                            var frameCountTR = Math.round((window._scrubSeconds || 0) * 30);
-                            var posTR = loopStartTR;
-                            for (var sfTR = 0; sfTR < frameCountTR; sfTR++) {
-                                posTR += dirSignTR * stepPxCanvasTR;
-                                if ((dirSignTR < 0 && posTR < loopEndTR) || (dirSignTR > 0 && posTR > loopEndTR)) {
-                                    posTR = loopStartTR;
-                                }
-                            }
+                            var stepPxCanvasTR = scrollStepPx(lineSpeedTR, loopStartTR, loopEndTR,
+                                getDisplayDuration(), 30, modelScaleY);
+                            var posTR = scrollPosAt(loopStartTR, loopEndTR, dirSignTR, stepPxCanvasTR,
+                                window._scrubSeconds, 30, fitModeTR, fitPassCount(lineSpeedTR));
                             var dxTR = boxX + Math.max(0, (boxW - rotatedW) / 2);
 
                             var arrowFontTR = 'bold ' + Math.max(8, Math.round(fitTR.size * 0.4)) + 'px sans-serif';
@@ -3679,20 +3848,15 @@ def index():
                             var fitVS = fitStackedTextSize(charsVS, fontName, boxW, Infinity);
                             var totalHVS = fitVS.lineHeight * charsVS.length;
 
-                            var lineSpeedVS = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
-                            var stepPxModelVS = Math.max(1, Math.max(10, lineSpeedVS * 2) / 30);
-                            var stepPxCanvasVS = stepPxModelVS * modelScaleY;
+                            var lineSpeedVS = getLineSpeed(i);
+                            var fitModeVS = isFitSpeed(lineSpeedVS);
                             var loopStartVS = (movement === 'B2T') ? (boxY + boxH) : (boxY - totalHVS);
                             var loopEndVS   = (movement === 'B2T') ? (boxY - totalHVS) : (boxY + boxH);
                             var dirSignVS   = (movement === 'B2T') ? -1 : 1;
-                            var frameCountVS = Math.round((window._scrubSeconds || 0) * 30);
-                            var posVS = loopStartVS;
-                            for (var sfVS = 0; sfVS < frameCountVS; sfVS++) {
-                                posVS += dirSignVS * stepPxCanvasVS;
-                                if ((dirSignVS < 0 && posVS < loopEndVS) || (dirSignVS > 0 && posVS > loopEndVS)) {
-                                    posVS = loopStartVS;
-                                }
-                            }
+                            var stepPxCanvasVS = scrollStepPx(lineSpeedVS, loopStartVS, loopEndVS,
+                                getDisplayDuration(), 30, modelScaleY);
+                            var posVS = scrollPosAt(loopStartVS, loopEndVS, dirSignVS, stepPxCanvasVS,
+                                window._scrubSeconds, 30, fitModeVS, fitPassCount(lineSpeedVS));
 
                             var arrowFontVS = 'bold ' + Math.max(8, Math.round(fitVS.size * 0.4)) + 'px sans-serif';
                             var arrowTxtVS = (movement === 'B2T') ? '↑' : '↓';
