@@ -143,16 +143,23 @@ DEFAULT_CONFIG = {
     "overlay_model_name": "",
     "text_color": "#FF0000",
     "text_font": "FreeSans",
-    "text_font_size": 48,
     "text_position": "Center",
     "message_template": "Merry Christmas {name}!",  # legacy — migrated to message_lines on load
     "message_lines": ["Merry Christmas", "{name}!", "", ""],
-    "line_positions": [{"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}, {"x": -1, "y": -1}],
+    # Each box is the MAX area a line can render into; font size auto-fits to it
+    # (largest size where the actual message text fits both w and h), then is
+    # centered within the box. x/y < 0 means auto-position (horizontally centered /
+    # vertically stacked among the other auto-positioned lines) — w/h are always
+    # concrete since there's no "auto size" for the fit target itself.
+    "line_boxes": [{"x": -1, "y": -1, "w": 300, "h": 60} for _ in range(4)],
     "line_colors": ["", "", "", ""],
     "line_movements": ["Center", "Center", "Center", "Center"],
-    "line_speeds": [5, 5, 5, 5],
+    "line_speeds": [50, 50, 50, 50],
     "line_fonts": ["FreeSans", "FreeSans", "FreeSans", "FreeSans"],
-    "line_font_sizes": [48, 48, 48, 48],
+    # Only meaningful for Center (static) lines -- scrolling lines are always
+    # 'horizontal'. 'vertical_rotated' = whole line rotated 90deg; 'vertical_stacked' =
+    # one upright character per row.
+    "line_orientations": ["horizontal", "horizontal", "horizontal", "horizontal"],
     "custom_colors": [],
     "scroll_speed": 5,
     "overlay_model_width": 0,
@@ -213,7 +220,6 @@ def load_config():
         if 'message_lines' not in loaded and 'message_template' in loaded:
             tmpl = loaded.get('message_template', 'Merry Christmas {name}!')
             config['message_lines'] = [tmpl, '', '', '']
-            config['line_positions'] = [{'x': -1, 'y': -1}] * 4
             save_config()
             logging.info(f"Migrated message_template '{tmpl}' to message_lines[0]")
 
@@ -224,18 +230,49 @@ def load_config():
             config['line_movements'] = [config.get('text_position', 'Center')] * 4
             save_config()
         if 'line_speeds' not in loaded:
-            config['line_speeds'] = [config.get('scroll_speed', 5)] * 4
+            # *10: scroll_speed is still on the old 1-10 scale; line_speeds is 0-100.
+            # Seeded fresh on the new scale, so no further scaling is ever needed.
+            config['line_speeds'] = [config.get('scroll_speed', 5) * 10] * 4
+            config['line_speeds_scale_migrated'] = True
             save_config()
 
-        # Migrate the old single global Font/Font Size onto per-line settings
-        # (introduced alongside per-line font) so upgrading doesn't reset
-        # everyone's lines back to FreeSans/48.
+        # Migrate line_speeds itself from the old 1-10(-by-tenths) scale to the new
+        # 0-100 scale (introduced 2026-09) -- without this, speeds saved by anyone
+        # already using per-line speed (e.g. "5") would silently become 10x slower
+        # once reinterpreted on the new scale, rather than an equivalent "50". Only
+        # runs once: the flag above is set here, and pre-set for anyone who just got
+        # line_speeds seeded fresh (already on the new scale, above).
+        if 'line_speeds' in loaded and not config.get('line_speeds_scale_migrated'):
+            config['line_speeds'] = [min(100, round(float(s) * 10)) for s in config.get('line_speeds', [50, 50, 50, 50])]
+            config['line_speeds_scale_migrated'] = True
+            save_config()
+
+        # Migrate the old single global Font onto per-line settings (introduced
+        # alongside per-line font) so upgrading doesn't reset everyone's lines
+        # back to FreeSans.
         if 'line_fonts' not in loaded:
             config['line_fonts'] = [config.get('text_font', 'FreeSans')] * 4
             save_config()
-        if 'line_font_sizes' not in loaded:
-            config['line_font_sizes'] = [config.get('text_font_size', 48)] * 4
+
+        # Migrate the old point-based line_positions + fixed line_font_sizes onto
+        # the new box-based line_boxes (font size became auto-fit-to-box instead
+        # of a fixed per-line number), so upgrading doesn't reset positioning.
+        # Reads straight from the old raw file contents (loaded), not `config`,
+        # since line_positions/line_font_sizes are no longer in DEFAULT_CONFIG.
+        if 'line_boxes' not in loaded:
+            old_positions = loaded.get('line_positions', [{'x': -1, 'y': -1}] * 4)
+            old_sizes = loaded.get('line_font_sizes', [loaded.get('text_font_size', 48)] * 4)
+            model_w = config.get('overlay_model_width', 0)
+            default_w = round(model_w * 0.9) if model_w > 0 else 300
+            boxes = []
+            for i in range(4):
+                pos = old_positions[i] if i < len(old_positions) else {'x': -1, 'y': -1}
+                size = old_sizes[i] if i < len(old_sizes) else 48
+                boxes.append({'x': pos.get('x', -1), 'y': pos.get('y', -1),
+                              'w': default_w, 'h': round(size * 1.3)})
+            config['line_boxes'] = boxes
             save_config()
+            logging.info("Migrated line_positions/line_font_sizes to line_boxes")
 
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
@@ -266,11 +303,17 @@ def save_config():
     except Exception as e:
         logging.error(f"Error saving config: {e}")
 
-def _find_font(font_name, font_size):
-    """Locate a PIL ImageFont matching font_name. Returns ImageFont or None."""
-    if not PIL_AVAILABLE:
-        return None
+_font_path_cache = {}
 
+def _resolve_font_path(font_name):
+    """Resolve a font name to its file path (fc-match, falling back to a manual
+    directory search), cached per name for the process lifetime. Box-fit sizing
+    calls this many times per line (once per binary-search step) at different
+    sizes, so the expensive part — locating the file — only happens once."""
+    if font_name in _font_path_cache:
+        return _font_path_cache[font_name]
+
+    path = None
     # Use fontconfig (fc-match) — same resolution FPP uses for its font names
     try:
         import subprocess
@@ -279,37 +322,91 @@ def _find_font(font_name, font_size):
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0 and result.stdout.strip():
-            font_path = result.stdout.strip()
-            if os.path.exists(font_path):
-                return ImageFont.truetype(font_path, font_size)
+            candidate = result.stdout.strip()
+            if os.path.exists(candidate):
+                path = candidate
     except Exception:
         pass
 
-    # Fallback: manual search in common FPP font directories
-    search_dirs = [
-        '/usr/share/fonts/truetype/freefont',
-        '/usr/share/fonts/truetype',
-        '/usr/share/fonts/opentype',
-        '/usr/share/fonts',
-        '/usr/local/share/fonts',
-        '/usr/share/fpp/fonts',
-        '/home/fpp/media/fonts',
-    ]
-    font_name_lower = font_name.lower()
-    for search_dir in search_dirs:
-        if not os.path.isdir(search_dir):
-            continue
-        for dirpath, _, filenames in os.walk(search_dir):
-            for fname in filenames:
-                if fname.lower().endswith(('.ttf', '.otf')) and font_name_lower in fname.lower():
-                    try:
-                        return ImageFont.truetype(os.path.join(dirpath, fname), font_size)
-                    except Exception:
-                        pass
+    if not path:
+        # Fallback: manual search in common FPP font directories
+        search_dirs = [
+            '/usr/share/fonts/truetype/freefont',
+            '/usr/share/fonts/truetype',
+            '/usr/share/fonts/opentype',
+            '/usr/share/fonts',
+            '/usr/local/share/fonts',
+            '/usr/share/fpp/fonts',
+            '/home/fpp/media/fonts',
+        ]
+        font_name_lower = font_name.lower()
+        for search_dir in search_dirs:
+            if not os.path.isdir(search_dir):
+                continue
+            for dirpath, _, filenames in os.walk(search_dir):
+                for fname in filenames:
+                    if fname.lower().endswith(('.ttf', '.otf')) and font_name_lower in fname.lower():
+                        path = os.path.join(dirpath, fname)
+                        break
+                if path:
+                    break
+            if path:
+                break
+
+    _font_path_cache[font_name] = path
+    return path
+
+def _find_font(font_name, font_size):
+    """Locate a PIL ImageFont matching font_name at a specific size. Returns ImageFont or None."""
+    if not PIL_AVAILABLE:
+        return None
+    path = _resolve_font_path(font_name)
+    if path:
+        try:
+            return ImageFont.truetype(path, font_size)
+        except Exception:
+            pass
     try:
         return ImageFont.load_default()
     except Exception:
         return None
+
+def _fit_text_to_box(draw, text, font_name, box_w, box_h, min_size=6, max_size=None):
+    """Binary search the largest font size where `text` fits within box_w x box_h.
+    Pass box_w=None to fit width only, or box_h=None to fit height only -- used for
+    scrolling lines, where the text is expected to be larger than its box along the
+    travel axis and moves across/through it rather than being shrunk to fit.
+    max_size defaults to a cap that scales with whichever of box_w/box_h is given,
+    rather than a fixed number -- otherwise a constraining dimension bigger than the
+    cap leaves real headroom unused forever, since the search can never explore past
+    it. Returns (font_or_None, text_w, text_h) at the best-fit size."""
+    if not PIL_AVAILABLE or not text:
+        return None, 0, 0
+    if max_size is None:
+        max_size = max([300] + [int(d * 2) for d in (box_w, box_h) if d is not None])
+    lo, hi = min_size, max_size
+    # Seed with the smallest size so a box too small for even min_size to fit still
+    # renders something (slightly overflowing) instead of the line silently vanishing.
+    best_font = _find_font(font_name, min_size)
+    if best_font is not None:
+        bbox = draw.textbbox((0, 0), text, font=best_font)
+        best_w, best_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    else:
+        best_w, best_h = len(text) * (min_size * 0.6), min_size
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        font = _find_font(font_name, mid)
+        if font is not None:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        else:
+            w, h = len(text) * (mid * 0.6), mid
+        if (box_w is None or w <= box_w) and (box_h is None or h <= box_h):
+            best_font, best_w, best_h = font, w, h
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best_font, best_w, best_h
 
 def _hex_to_rgb(hex_str):
     """Parse a '#RRGGBB' (or 'RRGGBB') string into an (r, g, b) tuple."""
@@ -317,34 +414,110 @@ def _hex_to_rgb(hex_str):
     return (int(hex_str[0:2], 16), int(hex_str[2:4], 16), int(hex_str[4:6], 16))
 
 
+def _render_oriented_text_strip(text, font_name, box_w, box_h, color_rgb, orientation):
+    """Auto-fit `text` to (box_w, box_h) per `orientation` and render it to a tightly-sized
+    RGB strip (black background, matching the other strip/paste code in this file) for the
+    caller to center/paste within its own box. orientation is 'horizontal' (default),
+    'vertical_rotated' (whole line rotated 90 degrees), or 'vertical_stacked' (one
+    character per row, each upright). Either box_w or box_h may be None to leave that
+    dimension unconstrained -- used for T2B/B2T scrolling, where the travel axis has no
+    fixed extent. Returns (strip_or_None, w, h)."""
+    probe = Image.new('RGB', (1, 1))
+    pdraw = ImageDraw.Draw(probe)
+
+    if orientation == 'vertical_rotated':
+        if box_h is None:
+            # Scrolling (T2B/B2T): raw width unconstrained (the travel axis has no
+            # fixed extent); raw height (becomes rotated width) fit to box_w.
+            font, tw, th = _fit_text_to_box(pdraw, text, font_name, None, box_w)
+        else:
+            # Static (Center, no clip applied): raw width (the string's own length,
+            # which becomes the rotated block's VERTICAL extent) must fit box_h, and
+            # raw height (becomes the rotated block's horizontal extent/thickness)
+            # must fit box_w -- both axes constrained, same "stays inside the
+            # bounding box" contract as horizontal/stacked. Leaving box_w
+            # unconstrained let short strings (e.g. a single character) pick an
+            # oversized font whose thickness blew past the box's width.
+            font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_h, box_w)
+        if font is None:
+            return None, 0, 0
+        strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
+        ImageDraw.Draw(strip).text((0, 0), text, fill=color_rgb, font=font)
+        rotated = strip.rotate(-90, expand=True)
+        return rotated, rotated.width, rotated.height
+
+    elif orientation == 'vertical_stacked':
+        chars = list(text)
+        if not chars:
+            return None, 0, 0
+        lo, hi = 6, 300
+        best_font, best_w, best_lh = None, 1, lo
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            font = _find_font(font_name, mid)
+            if font is not None:
+                max_w = max_h = 0
+                for c in chars:
+                    bbox = pdraw.textbbox((0, 0), c, font=font)
+                    max_w = max(max_w, bbox[2] - bbox[0])
+                    max_h = max(max_h, bbox[3] - bbox[1])
+            else:
+                max_w, max_h = mid, mid
+            total_h = max_h * len(chars)
+            if (box_w is None or max_w <= box_w) and (box_h is None or total_h <= box_h):
+                best_font, best_w, best_lh = font, max_w, max_h
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if best_font is None:
+            return None, 0, 0
+        total_h = best_lh * len(chars)
+        strip = Image.new('RGB', (max(1, best_w), max(1, total_h)), (0, 0, 0))
+        sdraw = ImageDraw.Draw(strip)
+        for idx, c in enumerate(chars):
+            bbox = pdraw.textbbox((0, 0), c, font=best_font)
+            cw = bbox[2] - bbox[0]
+            cx = max(0, (best_w - cw) // 2)
+            cy = idx * best_lh
+            sdraw.text((cx - bbox[0], cy - bbox[1]), c, fill=color_rgb, font=best_font)
+        return strip, strip.width, strip.height
+
+    else:  # 'horizontal'
+        font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_w, box_h)
+        if font is None:
+            return None, 0, 0
+        strip = Image.new('RGB', (max(1, tw), max(1, th)), (0, 0, 0))
+        ImageDraw.Draw(strip).text((0, 0), text, fill=color_rgb, font=font)
+        return strip, strip.width, strip.height
+
+
 def render_to_shm(line_items, model_name, width, height):
-    """Render multiple text lines to FPP shared memory, each with its own position, color, and font.
-    line_items: list of (text, x, y, color_hex, font_name, font_size) tuples.
-    x/y < 0 means auto-center that line. Returns True on success, False on failure."""
+    """Render multiple text lines to FPP shared memory, each with its own box, color, font,
+    and orientation.
+    line_items: list of (text, box_x, box_y, box_w, box_h, color_hex, font_name, orientation)
+    tuples. orientation is 'horizontal' (default), 'vertical_rotated', or 'vertical_stacked'
+    — see _render_oriented_text_strip. Font size is auto-fit to (box_w, box_h), then the
+    rendered text is centered within the box. box_x/box_y == -1 auto-centers the box itself
+    on the canvas (vertical stacking among lines is resolved by the caller before this
+    point, so box_y is normally already concrete). -1 is an exact sentinel, not just any
+    negative value: scrolling lines may legitimately have negative box_x/box_y to position
+    the box off-page. Returns True on success, False on failure."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
         img = Image.new('RGB', (width, height), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
-        font_cache = {}
 
-        for (text, x, y, color_hex, font_name, font_size) in line_items:
+        for (text, box_x, box_y, box_w, box_h, color_hex, font_name, orientation) in line_items:
             if not text:
                 continue
-            font_key = (font_name, font_size)
-            if font_key not in font_cache:
-                font_cache[font_key] = _find_font(font_name, font_size)
-            font = font_cache[font_key]
-            if font is not None:
-                bbox = draw.textbbox((0, 0), text, font=font)
-                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            else:
-                text_w = len(text) * 6
-                text_h = font_size
-
-            draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
-            draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
-            draw.text((draw_x, draw_y), text, fill=_hex_to_rgb(color_hex), font=font)
+            resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
+            resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
+            strip, sw, sh = _render_oriented_text_strip(text, font_name, box_w, box_h,
+                                                          _hex_to_rgb(color_hex), orientation)
+            if strip is not None:
+                draw_x = resolved_bx + max(0, (box_w - sw) // 2)
+                draw_y = resolved_by + max(0, (box_h - sh) // 2)
+                img.paste(strip, (draw_x, draw_y))
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         raw = img.tobytes()
@@ -385,9 +558,9 @@ def render_to_shm(line_items, model_name, width, height):
 def render_image_to_shm(image_path, model_name, width, height, line_items=None):
     """Load an image file, resize to model dimensions, optionally composite text on top,
     then write to FPP shared memory.  Returns True on success.
-    line_items: optional list of (text, x, y, color_hex, font_name, font_size) to draw over
-    the image (same as render_to_shm). State 2 (Opaque) should be used so the image fully
-    covers the background."""
+    line_items: optional list of (text, box_x, box_y, box_w, box_h, color_hex, font_name,
+    orientation) to draw over the image (same box-fit behavior as render_to_shm). State 2
+    (Opaque) should be used so the image fully covers the background."""
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
@@ -395,24 +568,17 @@ def render_image_to_shm(image_path, model_name, width, height, line_items=None):
         img = img.resize((width, height), Image.LANCZOS)
 
         if line_items:
-            draw = ImageDraw.Draw(img)
-            font_cache = {}
-            for (text, x, y, color_hex, font_name, font_size) in line_items:
+            for (text, box_x, box_y, box_w, box_h, color_hex, font_name, orientation) in line_items:
                 if not text:
                     continue
-                font_key = (font_name, font_size)
-                if font_key not in font_cache:
-                    font_cache[font_key] = _find_font(font_name, font_size) if font_name else None
-                font = font_cache[font_key]
-                if font is not None:
-                    bbox = draw.textbbox((0, 0), text, font=font)
-                    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                else:
-                    text_w = len(text) * 6
-                    text_h = font_size
-                draw_x = max(0, (width - text_w) // 2) if x < 0 else max(0, min(width - text_w, x))
-                draw_y = max(0, (height - text_h) // 2) if y < 0 else max(0, min(height - text_h, y))
-                draw.text((draw_x, draw_y), text, fill=_hex_to_rgb(color_hex), font=font)
+                resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
+                resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
+                strip, sw, sh = _render_oriented_text_strip(text, font_name, box_w, box_h,
+                                                              _hex_to_rgb(color_hex), orientation)
+                if strip is not None:
+                    draw_x = resolved_bx + max(0, (box_w - sw) // 2)
+                    draw_y = resolved_by + max(0, (box_h - sh) // 2)
+                    img.paste(strip, (draw_x, draw_y))
 
         shm_path = f"/dev/shm/FPP-Model-Data-{model_name}"
         raw = img.tobytes()
@@ -447,62 +613,102 @@ def render_image_to_shm(image_path, model_name, width, height, line_items=None):
 
 
 def animate_lines_via_shm(items, model_name, width, height, duration):
-    """Animate independently-moving/colored/sized text lines together in FPP shared memory.
+    """Animate independently-moving/colored/fitted text lines together in FPP shared memory.
     Runs in a background thread for `duration` seconds then stops.
 
-    items: [(text, x, y, color_hex, movement, speed, font_name, font_size), ...]
-        movement 'Center': fixed at (x, y). x/y < 0 means auto-center that axis.
-        movement 'L2R'/'R2L': scrolls horizontally across the full width at fixed y
-            (y < 0 means auto-center vertically).
-        movement 'T2B'/'B2T': scrolls vertically across the full height at fixed x
-            (x < 0 means auto-center horizontally).
-        speed: 1-10, independent per line.
+    items: [(text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name,
+        orientation), ...]
+        movement 'Center': text is auto-fit to (box_w, box_h) and centered in the box, fixed.
+        orientation ('horizontal'/'vertical_rotated'/'vertical_stacked') applies to Center
+        and to T2B/B2T (all three -- for rotated the glyphs read sideways, for stacked
+        each upright character is its own row, both still travelling vertically). L2R/R2L
+        are always horizontal glyphs -- the point of that movement is horizontal travel.
+        See _render_oriented_text_strip.
+        movement 'L2R'/'R2L'/'T2B'/'B2T': text height is auto-fit to box_h (width
+            unconstrained — the text is expected to be wider than the box and travels
+            across it). The box also acts as a clipping viewport: text is only visible
+            while passing through it, appearing to enter and exit at the box's own edges
+            rather than the full canvas edges.
+        box_x/box_y == -1 auto-centers the box itself on the canvas (vertical stacking
+        among lines is resolved by the caller before this point, so box_y is normally
+        concrete). -1 is an exact sentinel: a scrolling line's box may otherwise have a
+        genuinely negative box_x/box_y, positioning it off-page so its text can enter/exit
+        before/after the model's visible edge instead of only at the edge itself.
+        speed: 0-100, independent per line.
     Returns True if the thread started, False on error."""
     global _scroll_thread
     if not PIL_AVAILABLE or width <= 0 or height <= 0:
         return False
     try:
         fps = 30
-        font_cache = {}
 
-        # Pre-render each line to its own image strip and resolve its fixed axis/motion
+        # Pre-render each line to its own image strip (fit to its box) and resolve its
+        # fixed axis/motion + clip rect.
         probe = Image.new('RGB', (1, 1))
         pdraw = ImageDraw.Draw(probe)
         prepared = []
-        for (text, x, y, color_hex, movement, speed, font_name, font_size) in items:
+        for (text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name,
+             orientation) in items:
             if not text:
                 continue
-            font_key = (font_name, font_size)
-            if font_key not in font_cache:
-                font_cache[font_key] = _find_font(font_name, font_size)
-            font = font_cache[font_key]
-            if font:
-                bbox = pdraw.textbbox((0, 0), text, font=font)
-                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            resolved_bx = max(0, (width - box_w) // 2) if box_x == -1 else box_x
+            resolved_by = max(0, (height - box_h) // 2) if box_y == -1 else box_y
+            scrolling = movement in ('L2R', 'R2L', 'T2B', 'B2T')
+            vertical_scroll_oriented = (scrolling and movement in ('T2B', 'B2T')
+                                         and orientation in ('vertical_rotated', 'vertical_stacked'))
+            if vertical_scroll_oriented:
+                # T2B/B2T with rotated or stacked text: the block (sideways-reading for
+                # rotated, one upright character per row for stacked) travels vertically
+                # through the box. Its width must fit box_w (centered horizontally,
+                # fixed); its height is unconstrained since it's the travel axis -- pass
+                # box_h=None through to _render_oriented_text_strip.
+                strip, tw, th = _render_oriented_text_strip(text, font_name, box_w, None,
+                                                              _hex_to_rgb(color_hex), orientation)
+                if strip is None:
+                    strip, tw, th = Image.new('RGB', (1, 1), (0, 0, 0)), 1, 1
+            elif scrolling:
+                # Horizontal glyphs -- all other scrolling cases (L2R/R2L always, and
+                # T2B/B2T when not rotated/stacked). Orientation otherwise only applies
+                # to fixed (Center) lines, where the box's own edges are the whole
+                # viewport rather than a window the text travels through.
+                # The font is only constrained on the CROSS axis -- the travel axis is
+                # unconstrained since the text scrolls through it (using the box's full
+                # extent there rather than being capped by whichever dimension happens
+                # to be smaller). L2R/R2L travel along X, so height (box_h) is the
+                # constraint; T2B/B2T travel along Y, so width (box_w) is.
+                horiz_scroll = movement in ('L2R', 'R2L')
+                box_w_fit = None if horiz_scroll else box_w
+                box_h_fit = box_h if horiz_scroll else None
+                font, tw, th = _fit_text_to_box(pdraw, text, font_name, box_w_fit, box_h_fit)
+                tw, th = max(1, tw), max(1, th)
+                strip = Image.new('RGB', (tw, th), (0, 0, 0))
+                if font is not None:
+                    ImageDraw.Draw(strip).text((0, 0), text, fill=_hex_to_rgb(color_hex), font=font)
             else:
-                tw, th = len(text) * 6, font_size
-            tw, th = max(1, tw), max(1, th)
-            strip = Image.new('RGB', (tw, th), (0, 0, 0))
-            ImageDraw.Draw(strip).text((0, 0), text, fill=_hex_to_rgb(color_hex), font=font)
+                strip, tw, th = _render_oriented_text_strip(text, font_name, box_w, box_h,
+                                                              _hex_to_rgb(color_hex), orientation)
+                if strip is None:
+                    strip, tw, th = Image.new('RGB', (1, 1), (0, 0, 0)), 1, 1
 
-            entry = {'strip': strip, 'tw': tw, 'th': th, 'movement': movement}
+            entry = {'strip': strip, 'tw': tw, 'th': th, 'movement': movement,
+                     'clip': (resolved_bx, resolved_by, box_w, box_h)}
             if movement in ('L2R', 'R2L'):
-                entry['dy'] = max(0, (height - th) // 2) if y < 0 else max(0, min(height - th, y))
-                entry['pos'] = float(width) if movement == 'R2L' else float(-tw)
+                entry['dy'] = resolved_by + max(0, (box_h - th) // 2)
+                entry['pos'] = float(resolved_bx + box_w) if movement == 'R2L' else float(resolved_bx - tw)
                 entry['dir'] = -1.0 if movement == 'R2L' else 1.0
-                entry['loop_start'] = float(width) if movement == 'R2L' else float(-tw)
-                entry['loop_end']   = float(-tw) if movement == 'R2L' else float(width)
-                entry['step_px'] = max(1.0, max(10, speed * 20) / fps)
+                entry['loop_start'] = float(resolved_bx + box_w) if movement == 'R2L' else float(resolved_bx - tw)
+                entry['loop_end']   = float(resolved_bx - tw) if movement == 'R2L' else float(resolved_bx + box_w)
+                entry['step_px'] = max(1.0, max(10, speed * 2) / fps)
             elif movement in ('T2B', 'B2T'):
-                entry['dx'] = max(0, (width - tw) // 2) if x < 0 else max(0, min(width - tw, x))
-                entry['pos'] = float(height) if movement == 'B2T' else float(-th)
+                entry['dx'] = resolved_bx + max(0, (box_w - tw) // 2)
+                entry['pos'] = float(resolved_by + box_h) if movement == 'B2T' else float(resolved_by - th)
                 entry['dir'] = -1.0 if movement == 'B2T' else 1.0
-                entry['loop_start'] = float(height) if movement == 'B2T' else float(-th)
-                entry['loop_end']   = float(-th) if movement == 'B2T' else float(height)
-                entry['step_px'] = max(1.0, max(10, speed * 20) / fps)
-            else:  # Center — fixed, doesn't move
-                entry['dx'] = max(0, (width - tw) // 2) if x < 0 else max(0, min(width - tw, x))
-                entry['dy'] = max(0, (height - th) // 2) if y < 0 else max(0, min(height - th, y))
+                entry['loop_start'] = float(resolved_by + box_h) if movement == 'B2T' else float(resolved_by - th)
+                entry['loop_end']   = float(resolved_by - th) if movement == 'B2T' else float(resolved_by + box_h)
+                entry['step_px'] = max(1.0, max(10, speed * 2) / fps)
+            else:  # Center — fixed, centered in box
+                entry['dx'] = resolved_bx + max(0, (box_w - tw) // 2)
+                entry['dy'] = resolved_by + max(0, (box_h - th) // 2)
             prepared.append(entry)
 
         if not prepared:
@@ -517,6 +723,18 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
         logging.info(f"🎬 animate_lines_via_shm: model={model_name} size={width}x{height} "
                      f"lines={len(prepared)} duration={duration}s")
 
+        def _clip_paste(frame, strip, src_x, src_y, dst_x, dst_y, vis_w, vis_h, clip):
+            # Intersect the paste rect with the line's own box, so scrolling text is only
+            # visible while inside it — entering/exiting at the box edges instead of the
+            # full canvas edges.
+            cx, cy, cw, ch = clip
+            x0, y0 = max(dst_x, cx), max(dst_y, cy)
+            x1, y1 = min(dst_x + vis_w, cx + cw), min(dst_y + vis_h, cy + ch)
+            if x1 <= x0 or y1 <= y0:
+                return
+            crop_x0, crop_y0 = src_x + (x0 - dst_x), src_y + (y0 - dst_y)
+            frame.paste(strip.crop((crop_x0, crop_y0, crop_x0 + (x1 - x0), crop_y0 + (y1 - y0))), (x0, y0))
+
         def _animate():
             import time as _time
             start = _time.time()
@@ -528,13 +746,13 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
                         src_x = max(0, -ix); dst_x = max(0, ix)
                         vis_w = min(e['tw'] - src_x, width - dst_x)
                         if vis_w > 0:
-                            frame.paste(e['strip'].crop((src_x, 0, src_x + vis_w, e['th'])), (dst_x, e['dy']))
+                            _clip_paste(frame, e['strip'], src_x, 0, dst_x, e['dy'], vis_w, e['th'], e['clip'])
                     elif e['movement'] in ('T2B', 'B2T'):
                         iy = int(e['pos'])
                         src_y = max(0, -iy); dst_y = max(0, iy)
                         vis_h = min(e['th'] - src_y, height - dst_y)
                         if vis_h > 0:
-                            frame.paste(e['strip'].crop((0, src_y, e['tw'], src_y + vis_h)), (e['dx'], dst_y))
+                            _clip_paste(frame, e['strip'], 0, src_y, e['dx'], dst_y, e['tw'], vis_h, e['clip'])
                     else:
                         frame.paste(e['strip'], (e['dx'], e['dy']))
                 try:
@@ -1471,56 +1689,58 @@ def send_to_fpp(name):
         
         # Build per-line rendered items from message_lines config
         message_lines = config.get('message_lines', ['Merry Christmas', '{name}!', '', ''])
-        line_positions_cfg = config.get('line_positions', [])
+        line_boxes_cfg = config.get('line_boxes', [])
         line_colors_cfg = config.get('line_colors', [])
         line_movements_cfg = config.get('line_movements', [])
         line_speeds_cfg = config.get('line_speeds', [])
         line_fonts_cfg = config.get('line_fonts', [])
-        line_font_sizes_cfg = config.get('line_font_sizes', [])
+        line_orientations_cfg = config.get('line_orientations', [])
 
         global_text_color = config.get('text_color', '#FF0000')
         if not global_text_color.startswith('#'):
             global_text_color = '#' + global_text_color
         global_scroll_speed = config.get('scroll_speed', 5)
         global_font = config.get('text_font', 'FreeSans')
-        global_font_size = config.get('text_font_size', 48)
+        default_box = {'x': -1, 'y': -1, 'w': 300, 'h': 60}
 
-        # Collect non-empty rendered lines + their saved positions/colors/movement/speed/font.
-        # A line with no override for a given setting falls back to the matching global default.
-        rendered_lines = []  # [(rendered_text, px, py, color_hex, movement, speed, font_name, font_size), ...]
+        # Collect non-empty rendered lines + their saved box/colors/movement/speed/font.
+        # A line with no override for a given setting falls back to the matching global
+        # default. Font size is not stored — it's auto-fit to the line's box at render time.
+        rendered_lines = []  # [(rendered_text, box_x, box_y, box_w, box_h, color_hex, movement, speed, font_name, orientation), ...]
         for i, tmpl_line in enumerate(message_lines):
             if not tmpl_line.strip():
                 continue
             rendered = tmpl_line.replace('{name}', name)
-            pos = line_positions_cfg[i] if i < len(line_positions_cfg) else {'x': -1, 'y': -1}
+            box = line_boxes_cfg[i] if i < len(line_boxes_cfg) and line_boxes_cfg[i] else default_box
             line_color = line_colors_cfg[i] if i < len(line_colors_cfg) and line_colors_cfg[i] else global_text_color
             if not line_color.startswith('#'):
                 line_color = '#' + line_color
             movement = line_movements_cfg[i] if i < len(line_movements_cfg) and line_movements_cfg[i] else 'Center'
             speed = line_speeds_cfg[i] if i < len(line_speeds_cfg) and line_speeds_cfg[i] else global_scroll_speed
             font_name = line_fonts_cfg[i] if i < len(line_fonts_cfg) and line_fonts_cfg[i] else global_font
-            font_size = line_font_sizes_cfg[i] if i < len(line_font_sizes_cfg) and line_font_sizes_cfg[i] else global_font_size
-            rendered_lines.append((rendered, pos.get('x', -1), pos.get('y', -1), line_color, movement, speed, font_name, font_size))
+            orientation = line_orientations_cfg[i] if i < len(line_orientations_cfg) and line_orientations_cfg[i] else 'horizontal'
+            rendered_lines.append((rendered, box.get('x', -1), box.get('y', -1), box.get('w', 300), box.get('h', 60),
+                                    line_color, movement, speed, font_name, orientation))
 
-        # Compute stacked Y defaults (group centered vertically). Each line's own font size
-        # determines its own height in the stack now that lines can differ.
+        # Compute stacked Y defaults (group centered vertically). Each line's own box height
+        # determines its own height in the stack.
         mh_pre = config.get('overlay_model_height', 0)
-        line_heights = [int(item[7] * 1.2) for item in rendered_lines]
+        line_heights = [item[4] for item in rendered_lines]
         total_stack_height = sum(line_heights)
         stack_start_y = max(0, (mh_pre - total_stack_height) // 2) if mh_pre > 0 else 0
 
-        # Resolve each line's Y (stacked default when unset). X stays -1 (auto-centered by
-        # measured text width inside the render functions) unless explicitly positioned.
-        all_items = []  # [(text, x, resolved_y, color_hex, movement, speed, font_name, font_size), ...]
+        # Resolve each line's box Y (stacked default when unset). Box X stays -1
+        # (auto-centered horizontally inside the render functions) unless explicitly positioned.
+        all_items = []  # [(text, box_x, resolved_box_y, box_w, box_h, color_hex, movement, speed, font_name, orientation), ...]
         cumulative_y = stack_start_y
-        for idx, (rendered, px, py, lcolor, movement, speed, font_name, font_size) in enumerate(rendered_lines):
-            resolved_y = cumulative_y if py < 0 else py
-            all_items.append((rendered, px, resolved_y, lcolor, movement, speed, font_name, font_size))
+        for idx, (rendered, bx, by, bw, bh, lcolor, movement, speed, font_name, orientation) in enumerate(rendered_lines):
+            resolved_y = cumulative_y if by == -1 else by
+            all_items.append((rendered, bx, resolved_y, bw, bh, lcolor, movement, speed, font_name, orientation))
             cumulative_y += line_heights[idx]
 
         # True if at least one line scrolls — decides whether the fast one-shot static
         # render is enough, or the animated per-line renderer is needed.
-        any_moving = any(item[4] != 'Center' for item in all_items)
+        any_moving = any(item[6] != 'Center' for item in all_items)
 
         # FPP API fallback: join lines with newline
         display_message = '\n'.join(item[0] for item in rendered_lines) if rendered_lines else name
@@ -1580,7 +1800,9 @@ def send_to_fpp(name):
                 text_position = config.get('text_position', 'Center')  # used only by the non-PIL fallback below
                 text_color = global_text_color
                 text_font = config.get('text_font', 'FreeSans')
-                font_size = config.get('text_font_size', 48)
+                # The non-PIL fallback below has no concept of per-line boxes — approximate
+                # a single FontSize from the first line's box height (box_h is index 4).
+                font_size = all_items[0][4] if all_items else 48
                 scroll_speed = config.get('scroll_speed', 20)
 
                 import urllib.parse
@@ -1629,7 +1851,7 @@ def send_to_fpp(name):
 
                 if PIL_AVAILABLE and mw > 0 and mh > 0:
                     if not any_moving:
-                        line_items = [(t, x, y, c, fn, fs) for (t, x, y, c, _m, _s, fn, fs) in all_items]
+                        line_items = [(t, bx, by, bw, bh, c, fn, o) for (t, bx, by, bw, bh, c, _m, _s, fn, o) in all_items]
                         if img_bg_path:
                             shm_rendered = render_image_to_shm(
                                 img_bg_path, overlay_model, mw, mh,
@@ -2289,12 +2511,11 @@ def index():
                             .line-speed-row input { width:56px; margin-bottom:0; padding:6px; }
                         </style>
                         {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
-                        {% set lp = config.get('line_positions') or [] %}
                         {% set lc = config.get('line_colors') or ['', '', '', ''] %}
                         {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
-                        {% set ls = config.get('line_speeds') or [5, 5, 5, 5] %}
+                        {% set ls = config.get('line_speeds') or [50, 50, 50, 50] %}
                         {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
-                        {% set lfs = config.get('line_font_sizes') or [48, 48, 48, 48] %}
+                        {% set lo = config.get('line_orientations') or ['horizontal', 'horizontal', 'horizontal', 'horizontal'] %}
                         <div id="message_lines_section">
                             <div class="line-card">
                                 <div class="line-row">
@@ -2320,8 +2541,16 @@ def index():
                                         </select>
                                         <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_1_speed" min="1" max="10" value="{{ ls[0] if ls|length > 0 else 5 }}" onchange="onLineSpeedChange(0)">
+                                            <input type="number" id="line_1_speed" min="0" max="100" step="1" value="{{ ls[0] if ls|length > 0 else 50 }}" onchange="onLineSpeedChange(0)">
                                         </div>
+                                        <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_1_orientation" onchange="onLineOrientationChange(0)">
+                                                <option value="horizontal" {{ 'selected' if lo[0] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[0] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[0] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2330,10 +2559,6 @@ def index():
                                         <select id="line_1_font" onchange="onLineFontChange(0)">
                                             <option value="">Loading fonts...</option>
                                         </select>
-                                        <div class="line-speed-row">
-                                            <label>Size:</label>
-                                            <input type="number" id="line_1_font_size" min="12" max="200" value="{{ lfs[0] if lfs|length > 0 else 48 }}" onchange="onLineFontSizeChange(0)">
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -2361,8 +2586,16 @@ def index():
                                         </select>
                                         <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_2_speed" min="1" max="10" value="{{ ls[1] if ls|length > 1 else 5 }}" onchange="onLineSpeedChange(1)">
+                                            <input type="number" id="line_2_speed" min="0" max="100" step="1" value="{{ ls[1] if ls|length > 1 else 50 }}" onchange="onLineSpeedChange(1)">
                                         </div>
+                                        <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_2_orientation" onchange="onLineOrientationChange(1)">
+                                                <option value="horizontal" {{ 'selected' if lo[1] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[1] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[1] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2371,10 +2604,6 @@ def index():
                                         <select id="line_2_font" onchange="onLineFontChange(1)">
                                             <option value="">Loading fonts...</option>
                                         </select>
-                                        <div class="line-speed-row">
-                                            <label>Size:</label>
-                                            <input type="number" id="line_2_font_size" min="12" max="200" value="{{ lfs[1] if lfs|length > 1 else 48 }}" onchange="onLineFontSizeChange(1)">
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -2402,8 +2631,16 @@ def index():
                                         </select>
                                         <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_3_speed" min="1" max="10" value="{{ ls[2] if ls|length > 2 else 5 }}" onchange="onLineSpeedChange(2)">
+                                            <input type="number" id="line_3_speed" min="0" max="100" step="1" value="{{ ls[2] if ls|length > 2 else 50 }}" onchange="onLineSpeedChange(2)">
                                         </div>
+                                        <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_3_orientation" onchange="onLineOrientationChange(2)">
+                                                <option value="horizontal" {{ 'selected' if lo[2] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[2] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[2] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2412,10 +2649,6 @@ def index():
                                         <select id="line_3_font" onchange="onLineFontChange(2)">
                                             <option value="">Loading fonts...</option>
                                         </select>
-                                        <div class="line-speed-row">
-                                            <label>Size:</label>
-                                            <input type="number" id="line_3_font_size" min="12" max="200" value="{{ lfs[2] if lfs|length > 2 else 48 }}" onchange="onLineFontSizeChange(2)">
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -2443,8 +2676,16 @@ def index():
                                         </select>
                                         <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
                                             <label>Speed:</label>
-                                            <input type="number" id="line_4_speed" min="1" max="10" value="{{ ls[3] if ls|length > 3 else 5 }}" onchange="onLineSpeedChange(3)">
+                                            <input type="number" id="line_4_speed" min="0" max="100" step="1" value="{{ ls[3] if ls|length > 3 else 50 }}" onchange="onLineSpeedChange(3)">
                                         </div>
+                                        <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
+                                            <span class="line-mini-label">Style:</span>
+                                            <select id="line_4_orientation" onchange="onLineOrientationChange(3)">
+                                                <option value="horizontal" {{ 'selected' if lo[3] == 'horizontal' else '' }}>Horizontal</option>
+                                                <option value="vertical_rotated" {{ 'selected' if lo[3] == 'vertical_rotated' else '' }}>Vertical (Rotated)</option>
+                                                <option value="vertical_stacked" {{ 'selected' if lo[3] == 'vertical_stacked' else '' }}>Vertical (Stacked)</option>
+                                            </select>
+                                        </span>
                                     </div>
                                 </div>
                                 <div class="line-movement-row">
@@ -2453,10 +2694,6 @@ def index():
                                         <select id="line_4_font" onchange="onLineFontChange(3)">
                                             <option value="">Loading fonts...</option>
                                         </select>
-                                        <div class="line-speed-row">
-                                            <label>Size:</label>
-                                            <input type="number" id="line_4_font_size" min="12" max="200" value="{{ lfs[3] if lfs|length > 3 else 48 }}" onchange="onLineFontSizeChange(3)">
-                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -2466,7 +2703,8 @@ def index():
                         <!-- Canvas: per-line drag in static mode; block preview in scroll modes -->
                         <div id="canvas_section">
                             <label>Position Preview:</label>
-                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Drag any line anywhere within the canvas to reposition it</p>
+                            <p id="canvas_hint" style="font-weight:bold; font-size:13px; color:#4fc3f7; margin:4px 0 8px;">🖱️ Click a line to select it, then drag inside its box to move it, or drag an edge/corner to resize. Text auto-sizes to fill the box — the box is the MAX size text can be.</p>
+                            <p class="help-text" style="margin:-4px 0 8px;">↔️ For scrolling text (Left/Right/Top/Bottom movement), the box is also where the text is allowed to show — it enters and exits at the box's own edges, not the display's, and always starts fully off-page before scrolling in.</p>
                             <canvas id="matrix_canvas" style="width:100%; display:block; background:#000; border:2px solid #555; border-radius:4px; cursor:default;"></canvas>
                             <div style="display:flex; gap:8px; margin-top:6px; align-items:center;">
                                 <button type="button" onclick="resetAllLines()" style="background:#555; padding:6px 12px; font-size:12px;">Reset All to Center</button>
@@ -2498,11 +2736,11 @@ def index():
                         <input type="hidden" id="overlay_model_width" value="{{ config.get('overlay_model_width', 0) }}">
                         <input type="hidden" id="overlay_model_height" value="{{ config.get('overlay_model_height', 0) }}">
                         <script>
-                            window._linePositionsInit = {{ config.get('line_positions', [{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1},{'x':-1,'y':-1}]) | tojson }};
+                            window._lineBoxesInit = {{ config.get('line_boxes', [{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60},{'x':-1,'y':-1,'w':300,'h':60}]) | tojson }};
                             window._lineMovementsInit = {{ config.get('line_movements', ['Center', 'Center', 'Center', 'Center']) | tojson }};
-                            window._lineSpeedsInit = {{ config.get('line_speeds', [5, 5, 5, 5]) | tojson }};
+                            window._lineSpeedsInit = {{ config.get('line_speeds', [50, 50, 50, 50]) | tojson }};
                             window._lineFontsInit = {{ config.get('line_fonts', ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans']) | tojson }};
-                            window._lineFontSizesInit = {{ config.get('line_font_sizes', [48, 48, 48, 48]) | tojson }};
+                            window._lineOrientationsInit = {{ config.get('line_orientations', ['horizontal', 'horizontal', 'horizontal', 'horizontal']) | tojson }};
                             window._customColorsInit = {{ config.get('custom_colors', []) | tojson }};
                         </script>
                     </div>
@@ -2872,13 +3110,106 @@ def index():
                 if (row) row.style.display = (getLineMovement(i) === 'Center') ? 'none' : '';
             }
 
+            // Orientation only applies to Center (static) lines -- a scrolling line is
+            // always horizontal (the point of L2R/R2L/T2B/B2T is travel along one axis;
+            // rotating or stacking the glyphs on top of that isn't supported).
+            function getLineOrientation(i) {
+                return (window._lineOrientations && window._lineOrientations[i]) || 'horizontal';
+            }
+            function isVerticalOrientation(o) {
+                return o === 'vertical_rotated' || o === 'vertical_stacked';
+            }
+            function updateLineOrientationRowVisibility(i) {
+                var m = getLineMovement(i);
+                // Rotated/stacked text both work for Center (fixed) and T2B/B2T (travels
+                // vertically -- rotated glyphs read sideways, stacked keeps each character
+                // upright, one per row) -- not L2R/R2L, where the point of the movement is
+                // horizontal travel and neither combines with that meaningfully.
+                var applicable = (m === 'Center' || m === 'T2B' || m === 'B2T');
+                var row = document.getElementById('line_' + (i + 1) + '_orientation_row');
+                if (row) row.style.display = applicable ? 'inline-flex' : 'none';
+
+                var sel = document.getElementById('line_' + (i + 1) + '_orientation');
+                if (!sel) return;
+                var stackedOpt = sel.querySelector('option[value="vertical_stacked"]');
+                if (!stackedOpt) return;
+                stackedOpt.disabled = !applicable;
+                // Not just the Stacked option -- Rotated is equally inapplicable once the
+                // movement is L2R/R2L, so reset (and swap the box back, via
+                // onLineOrientationChange) for either vertical value, not only Stacked.
+                if (!applicable && isVerticalOrientation(sel.value)) {
+                    sel.value = 'horizontal';
+                    onLineOrientationChange(i);
+                }
+            }
+
             // Per-line Movement select
             function onLineMovementChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_movement');
                 if (!el) return;
                 window._lineMovements = window._lineMovements || ['Center','Center','Center','Center'];
-                window._lineMovements[i] = el.value;
+                var newMovement = el.value;
+                window._lineMovements[i] = newMovement;
+                // T2B/B2T reads much better with the text itself rotated to match its
+                // vertical travel (a single horizontal line moving straight up/down is an
+                // unusual look) -- default to that unless the line already has an explicit
+                // orientation, so switching to T2B/B2T "just works" without an extra step.
+                if ((newMovement === 'T2B' || newMovement === 'B2T') && getLineOrientation(i) === 'horizontal') {
+                    var orientSel = document.getElementById('line_' + (i + 1) + '_orientation');
+                    if (orientSel) { orientSel.value = 'vertical_rotated'; onLineOrientationChange(i); }
+                }
                 updateLineSpeedRowVisibility(i);
+                updateLineOrientationRowVisibility(i);
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line Orientation select. Swaps the box's W/H when crossing the
+            // horizontal/vertical boundary (either direction) so switching to vertical
+            // starts from a sensible portrait-shaped box instead of a leftover wide one.
+            function onLineOrientationChange(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_orientation');
+                if (!el) return;
+                window._lineOrientations = window._lineOrientations || ['horizontal','horizontal','horizontal','horizontal'];
+                var prev = getLineOrientation(i);
+                var next = el.value;
+                if (isVerticalOrientation(prev) !== isVerticalOrientation(next)) {
+                    var b = window._lineBoxes && window._lineBoxes[i];
+                    // _lineBoxes are stored in MODEL pixel space (window._canvasModelW/H),
+                    // not the preview canvas's own raster size -- matrix_canvas.width is
+                    // always a fixed 640px-wide bitmap scaled to the model's aspect ratio,
+                    // a completely different number from the model's real width/height
+                    // whenever the model isn't 640px wide. Comparing/assigning against the
+                    // canvas element here compared box coordinates against the wrong
+                    // coordinate space and could inflate the box's model-space size well
+                    // past the model's actual extent.
+                    var modelW = window._canvasModelW, modelH = window._canvasModelH;
+                    if (b && modelW && modelH) {
+                        // A plain w<->h swap is wrong when the box was sized to span the
+                        // full overlay along its old axis -- model width and height are
+                        // rarely equal, so reusing the raw old number leaves the new axis
+                        // either short of, or overflowing, the overlay's actual extent.
+                        // Detect "was full span" before swapping and, if so, snap the new
+                        // axis to the overlay's real size on that axis instead.
+                        var wasFullW = b.w >= modelW - 2;
+                        var wasFullH = b.h >= modelH - 2;
+                        if (wasFullW && wasFullH) {
+                            // Box already covered the entire model in both dimensions --
+                            // there's no meaningful "shape" to transpose (the model itself
+                            // usually isn't square), so keep it covering the entire model
+                            // after the flip too instead of collapsing one axis down to the
+                            // other's old (unrelated) size.
+                            b.w = modelW; b.h = modelH;
+                        } else {
+                            var t = b.w; b.w = b.h; b.h = t;
+                            if (isVerticalOrientation(next) && wasFullW) b.h = modelH;
+                            else if (!isVerticalOrientation(next) && wasFullH) b.w = modelW;
+                        }
+                    } else if (b) {
+                        var t2 = b.w; b.w = b.h; b.h = t2;
+                    }
+                }
+                window._lineOrientations[i] = next;
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
@@ -2887,10 +3218,15 @@ def index():
             function onLineSpeedChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_speed');
                 if (!el) return;
-                var v = Math.min(10, Math.max(1, parseInt(el.value) || 1));
+                // 0-100 whole-number range -- finer, rounder-feeling granularity than the
+                // old 1-10-by-tenths scale while covering the same practical speed range
+                // (see the *2 multiplier in the step_px formulas below/in Python, which
+                // replaces the old scale's *20 to match).
+                var v = Math.round(Math.min(100, Math.max(0, parseInt(el.value, 10) || 0)));
                 el.value = v;
-                window._lineSpeeds = window._lineSpeeds || [5,5,5,5];
+                window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
                 window._lineSpeeds[i] = v;
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
@@ -2907,11 +3243,6 @@ def index():
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
-            // Per-line Font Size input
-            function onLineFontSizeChange(i) {
-                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
-                if (typeof saveConfig === 'function') saveConfig();
-            }
 
             function updateModelAspect(width, height) {
                 if (width > 0 && height > 0) {
@@ -2938,12 +3269,16 @@ def index():
                 canvas.width  = 640;
                 canvas.height = Math.round(640 * window._canvasModelH / window._canvasModelW);
 
-                // Load per-line positions from config (injected as JS by server to avoid HTML attribute quote issues)
-                var initLP = (window._linePositionsInit && Array.isArray(window._linePositionsInit))
-                    ? window._linePositionsInit
-                    : [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
-                while (initLP.length < 4) initLP.push({x:-1,y:-1});
-                window._linePositions = initLP;
+                // Load per-line boxes from config (injected as JS by server to avoid HTML
+                // attribute quote issues). Each box is the MAX area a line renders into —
+                // font size auto-fits to it. x/y < 0 means auto-position; w/h are always
+                // concrete (there's no "auto size" for the fit target itself).
+                var initLB = (window._lineBoxesInit && Array.isArray(window._lineBoxesInit))
+                    ? window._lineBoxesInit
+                    : [{x: -1, y: -1, w: 300, h: 60}, {x: -1, y: -1, w: 300, h: 60},
+                       {x: -1, y: -1, w: 300, h: 60}, {x: -1, y: -1, w: 300, h: 60}];
+                while (initLB.length < 4) initLB.push({x: -1, y: -1, w: 300, h: 60});
+                window._lineBoxes = initLB;
 
                 // Load per-line movement + speed from config
                 var initLM = (window._lineMovementsInit && Array.isArray(window._lineMovementsInit))
@@ -2958,11 +3293,28 @@ def index():
                 while (initLS.length < 4) initLS.push(5);
                 window._lineSpeeds = initLS;
 
+                // Orientation only applies to Center (static) lines -- see getLineOrientation
+                var initLO = (window._lineOrientationsInit && Array.isArray(window._lineOrientationsInit))
+                    ? window._lineOrientationsInit.slice()
+                    : ['horizontal', 'horizontal', 'horizontal', 'horizontal'];
+                while (initLO.length < 4) initLO.push('horizontal');
+                window._lineOrientations = initLO;
+
                 var selectedLine = -1;
                 var hoveredLine  = -1;
                 var lineRects    = [null, null, null, null]; // canvas-pixel rects, filled by render
                 var dragging     = false;
                 var dragOffX     = 0, dragOffY = 0;
+
+                // modelScaleX/Y (model units -> canvas px) are recomputed by
+                // renderCanvasPreview() every render and read by the mouse handlers below to
+                // convert between canvas-px and model-unit coordinates. gutterOriginX/Y and
+                // modelPxW/H are always 0,0 and canvas.width,canvas.height respectively (the
+                // model fills the whole canvas) -- kept as named values since several call
+                // sites read them, rather than inlining canvas.width/height everywhere.
+                var modelScaleX = 1, modelScaleY = 1;
+                var gutterOriginX = 0, gutterOriginY = 0;
+                var modelPxW = 0, modelPxH = 0;
 
                 function getLineText(i) {
                     var el = document.getElementById('line_' + (i + 1));
@@ -2975,45 +3327,139 @@ def index():
                     return (el && el.value) || '#FF0000';
                 }
 
-                // Reads this line's own font/size directly from its font inputs
+                // Reads this line's own font directly from its font input
                 function getLineFont(i) {
                     var el = document.getElementById('line_' + (i + 1) + '_font');
                     return (el && el.value) || 'sans-serif';
                 }
-                function getLineFontSize(i) {
-                    var el = document.getElementById('line_' + (i + 1) + '_font_size');
-                    return (el && parseInt(el.value)) || 48;
+
+                // Binary search the largest font size where `text` fits within boxW x boxH.
+                // Pass boxW = Infinity to fit height only (used for scrolling lines, where
+                // the text is expected to be wider than its box and travels across it).
+                // Height uses actualBoundingBoxAscent/Descent -- the real measured extent of
+                // this specific text run -- rather than a flat fontSize*1.2 estimate. A
+                // generic estimate undersells how tall decorative/dingbat fonts actually
+                // render (e.g. graphics that rise well above a normal cap-height), letting an
+                // oversized fit through that then gets clipped by a scrolling line's box
+                // (Center draws without a clip, so the same oversized fit there just overflows
+                // invisibly instead of visibly losing its top). Matches the backend's PIL
+                // textbbox-based measurement in _fit_text_to_box.
+                function fitTextSize(text, fontName, boxW, boxH) {
+                    var lo = 6;
+                    // The cap has to scale with the box, not be a fixed number -- otherwise
+                    // a constraining dimension bigger than the cap leaves real headroom
+                    // unused forever, since the search can never explore past it (seen with
+                    // a 300px-tall box: the search maxed out at 300 even though that size's
+                    // actual ascent+descent was only ~225, well under the 300 limit).
+                    var hi = Math.max(300, isFinite(boxW) ? Math.ceil(boxW * 2) : 0,
+                                           isFinite(boxH) ? Math.ceil(boxH * 2) : 0);
+                    var best = { size: lo, ascent: lo * 0.8, descent: lo * 0.2 };
+                    // actualBoundingBoxAscent/Descent are measured relative to whatever
+                    // textBaseline is current at measureText() time -- not always
+                    // 'alphabetic' -- so it must be pinned here rather than inherited from
+                    // whatever the caller last set (renderCanvasPreview leaves it at 'top',
+                    // which made ascent come back negative and the fit wildly wrong).
+                    ctx.textBaseline = 'alphabetic';
+                    while (lo <= hi) {
+                        var mid = Math.floor((lo + hi) / 2);
+                        ctx.font = mid + 'px "' + fontName + '", sans-serif';
+                        var metrics = ctx.measureText(text);
+                        var w = metrics.width;
+                        var ascent = metrics.actualBoundingBoxAscent || mid * 0.8;
+                        var descent = metrics.actualBoundingBoxDescent || mid * 0.2;
+                        var h = ascent + descent;
+                        if (w <= boxW && h <= boxH) {
+                            best = { size: mid, ascent: ascent, descent: descent };
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    return best;
+                }
+
+                // Like fitTextSize, but for 'vertical_stacked' orientation: each character
+                // sits on its own row (upright, not rotated), all sharing one font size --
+                // the largest where the widest character fits boxW and all rows stacked fit
+                // boxH. lineHeight is the per-row height (tallest character's ascent+descent).
+                function fitStackedTextSize(chars, fontName, boxW, boxH) {
+                    var lo = 6;
+                    // See fitTextSize -- the cap must scale with the box or real headroom
+                    // goes unused. For stacked text, a single row's height only needs to
+                    // reach boxH / chars.length (the total stack height constraint divided
+                    // across all the rows), not the full boxH.
+                    var hi = Math.max(300, isFinite(boxW) ? Math.ceil(boxW * 2) : 0,
+                                           isFinite(boxH) ? Math.ceil((boxH / chars.length) * 2) : 0);
+                    var best = { size: lo, ascent: lo * 0.8, descent: lo * 0.2, lineHeight: lo };
+                    ctx.textBaseline = 'alphabetic';
+                    while (lo <= hi) {
+                        var mid = Math.floor((lo + hi) / 2);
+                        ctx.font = mid + 'px "' + fontName + '", sans-serif';
+                        var maxW = 0, maxAscent = 0, maxDescent = 0;
+                        for (var ci = 0; ci < chars.length; ci++) {
+                            var metrics = ctx.measureText(chars[ci]);
+                            maxW = Math.max(maxW, metrics.width);
+                            maxAscent = Math.max(maxAscent, metrics.actualBoundingBoxAscent || mid * 0.8);
+                            maxDescent = Math.max(maxDescent, metrics.actualBoundingBoxDescent || mid * 0.2);
+                        }
+                        var lineHeight = maxAscent + maxDescent;
+                        var totalH = lineHeight * chars.length;
+                        if (maxW <= boxW && totalH <= boxH) {
+                            best = { size: mid, ascent: maxAscent, descent: maxDescent, lineHeight: lineHeight };
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    return best;
                 }
 
                 function updateBadges() {
                     for (var i = 0; i < 4; i++) {
                         var badge = document.getElementById('line_' + (i + 1) + '_pos');
                         if (!badge) continue;
-                        var lp = window._linePositions[i];
-                        var movement = getLineMovement(i);
-                        var txt;
-                        if (movement === 'L2R' || movement === 'R2L') {
-                            txt = lp.y < 0 ? 'auto' : ('Y:' + lp.y);
-                        } else if (movement === 'T2B' || movement === 'B2T') {
-                            txt = lp.x < 0 ? 'auto' : ('X:' + lp.x);
-                        } else {
-                            txt = (lp.x < 0 && lp.y < 0) ? 'auto' : ('X:' + lp.x + ' Y:' + lp.y);
-                        }
+                        var b = window._lineBoxes[i];
+                        var txt = (b.x === -1 && b.y === -1) ? 'auto' : ('X:' + b.x + ' Y:' + b.y);
                         badge.textContent = txt;
                         badge.style.color = (i === selectedLine) ? '#4CAF50' : '#888';
                     }
                 }
 
-                function drawLineDecoration(drawX, drawY, lw2, lh2, i) {
+                // Returns the 8 resize handle points (4 corners + 4 edge midpoints) for a
+                // box rect, each tagged with its handle key and CSS resize cursor.
+                var HANDLE_SIZE = 8;
+                function getHandlePoints(r) {
+                    var midX = r.x + r.w / 2, midY = r.y + r.h / 2;
+                    return {
+                        nw: {x: r.x,       y: r.y,       cursor: 'nwse-resize'},
+                        se: {x: r.x + r.w, y: r.y + r.h, cursor: 'nwse-resize'},
+                        ne: {x: r.x + r.w, y: r.y,       cursor: 'nesw-resize'},
+                        sw: {x: r.x,       y: r.y + r.h, cursor: 'nesw-resize'},
+                        n:  {x: midX,      y: r.y,       cursor: 'ns-resize'},
+                        s:  {x: midX,      y: r.y + r.h, cursor: 'ns-resize'},
+                        e:  {x: r.x + r.w, y: midY,      cursor: 'ew-resize'},
+                        w:  {x: r.x,       y: midY,      cursor: 'ew-resize'}
+                    };
+                }
+
+                // Draws the box outline + (when selected) its 8 resize handles. The box
+                // itself is now the visible/draggable/resizable element, replacing the old
+                // text-hugging highlight rectangle.
+                function drawBoxDecoration(boxX, boxY, boxW, boxH, i) {
+                    ctx.save();
+                    ctx.strokeStyle = (i === selectedLine) ? '#4CAF50' :
+                                       (i === hoveredLine) ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.2)';
+                    ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+                    ctx.strokeRect(boxX, boxY, boxW, boxH);
+                    ctx.restore();
                     if (i === selectedLine) {
                         ctx.save();
-                        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.setLineDash([]);
-                        ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
-                        ctx.restore();
-                    } else if (i === hoveredLine) {
-                        ctx.save();
-                        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
-                        ctx.strokeRect(drawX - 2, drawY - 2, lw2 + 4, lh2 + 4);
+                        ctx.fillStyle = '#4CAF50';
+                        var pts = getHandlePoints({x: boxX, y: boxY, w: boxW, h: boxH});
+                        for (var key in pts) {
+                            var p = pts[key];
+                            ctx.fillRect(p.x - HANDLE_SIZE / 2, p.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+                        }
                         ctx.restore();
                     }
                 }
@@ -3021,6 +3467,19 @@ def index():
                 function renderCanvasPreview() {
                     var mw = window._canvasModelW || 640;
                     var mh = window._canvasModelH || 360;
+
+                    // The model fills the whole canvas -- no off-page margin. Scrolling text
+                    // already starts fully hidden on its own (see the scroll-position
+                    // simulation below: it starts at loop_start, past the box's own clip
+                    // edge, before ever reaching the visible model area) without needing the
+                    // box itself to extend past the model edge.
+                    modelScaleX = canvas.width / mw;
+                    modelScaleY = canvas.height / mh;
+                    gutterOriginX = 0;
+                    gutterOriginY = 0;
+                    modelPxW = canvas.width;
+                    modelPxH = canvas.height;
+
                     ctx.fillStyle = '#000';
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                     if (window._fseqBgImage) {
@@ -3028,90 +3487,295 @@ def index():
                         ctx.drawImage(window._fseqBgImage, 0, 0, canvas.width, canvas.height);
                         ctx.imageSmoothingEnabled = true;
                     }
+
                     var posLabel = '';
                     ctx.textBaseline = 'top';
 
                     lineRects = [null, null, null, null];
 
-                    // Each line can now have its own font size, so precompute each non-empty
-                    // line's scaled size/height before stacking (lines no longer share one height).
-                    var scaledSizes = [0, 0, 0, 0], lineHeights = [0, 0, 0, 0];
-                    var totalStackHeight = 0;
+                    // Precompute each non-empty line's scaled box height for auto-stacking
+                    var boxHeights = [0, 0, 0, 0], totalStackHeight = 0;
                     for (var pi = 0; pi < 4; pi++) {
                         if (!getLineText(pi)) continue;
-                        var sz = Math.round(getLineFontSize(pi) * canvas.width / mw);
-                        scaledSizes[pi] = sz;
-                        lineHeights[pi] = Math.round(sz * 1.2);
-                        totalStackHeight += lineHeights[pi];
+                        boxHeights[pi] = window._lineBoxes[pi].h * modelScaleY;
+                        totalStackHeight += boxHeights[pi];
                     }
-                    var stackStartY = (canvas.height - totalStackHeight) / 2;
+                    var stackStartY = gutterOriginY + (modelPxH - totalStackHeight) / 2;
 
                     var cumulativeY = stackStartY;
                     for (var i = 0; i < 4; i++) {
                         var lineText = getLineText(i);
                         if (!lineText) { lineRects[i] = null; continue; }
                         var movement = getLineMovement(i);
-                        var lp  = window._linePositions[i];
-                        var fontName   = getLineFont(i);
-                        var scaledFont = scaledSizes[i];
-                        var lineH      = lineHeights[i];
-                        var arrowFont  = 'bold ' + Math.max(8, Math.round(scaledFont * 0.4)) + 'px sans-serif';
-                        var thisStackY = cumulativeY;
-                        ctx.font = scaledFont + 'px "' + fontName + '", sans-serif';
-                        var lw2 = ctx.measureText(lineText).width;
-                        var lh2 = scaledFont;
-                        var drawX, drawY;
+                        var scrolling = (movement === 'L2R' || movement === 'R2L' || movement === 'T2B' || movement === 'B2T');
+                        var scrollX = (movement === 'L2R' || movement === 'R2L');
+                        var scrollY = (movement === 'T2B' || movement === 'B2T');
+                        var b = window._lineBoxes[i];
+                        var fontName = getLineFont(i);
 
-                        if (movement === 'L2R' || movement === 'R2L') {
-                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
-                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
-                            drawX = (canvas.width - lw2) / 2;
-                            ctx.save();
-                            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
-                            ctx.beginPath(); ctx.moveTo(0, drawY + lh2/2); ctx.lineTo(canvas.width, drawY + lh2/2); ctx.stroke();
-                            ctx.restore();
-                            ctx.save();
-                            ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.font = arrowFont; ctx.textBaseline = 'top';
-                            var arrowTxt = movement === 'L2R' ? '→' : '←';
-                            var arrowX = movement === 'L2R' ? 2 : canvas.width - ctx.measureText(arrowTxt).width - 2;
-                            ctx.fillText(arrowTxt, arrowX, drawY);
-                            ctx.restore();
-                            if (i === selectedLine)
-                                posLabel = 'Line ' + (i+1) + ' Y: ' + (lp.y < 0 ? 'auto' : lp.y) + ' — drag up/down';
+                        var boxW = b.w * modelScaleX, boxH = b.h * modelScaleY;
+                        var boxX = b.x === -1 ? (modelPxW - boxW) / 2 : b.x * modelScaleX;
+                        var boxY = b.y === -1 ? cumulativeY : b.y * modelScaleY;
+                        boxX = Math.max(0, Math.min(canvas.width - boxW, boxX));
+                        boxY = Math.max(0, Math.min(canvas.height - boxH, boxY));
 
-                        } else if (movement === 'T2B' || movement === 'B2T') {
-                            drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
-                            drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
-                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
-                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
-                            ctx.save();
-                            ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.setLineDash([3,5]); ctx.lineWidth = 1;
-                            ctx.beginPath(); ctx.moveTo(drawX + lw2/2, 0); ctx.lineTo(drawX + lw2/2, canvas.height); ctx.stroke();
-                            ctx.restore();
-                            ctx.save();
-                            ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.font = arrowFont; ctx.textBaseline = 'top';
-                            var sarrow = movement === 'T2B' ? '↓' : '↑';
-                            ctx.fillText(sarrow, drawX + lw2/2 - ctx.measureText(sarrow).width/2, 2);
-                            ctx.restore();
-                            if (i === selectedLine)
-                                posLabel = 'Line ' + (i+1) + ' X: ' + (lp.x < 0 ? 'auto' : lp.x) + ' — drag left/right';
+                        // scrollY-gated below rather than forced here -- L2R/R2L stay
+                        // horizontal regardless of what's stored (the Style dropdown is
+                        // hidden for them), and T2B/B2T can be 'vertical_rotated'.
+                        var orientation = getLineOrientation(i);
 
+                        lineRects[i] = {x: boxX, y: boxY, w: boxW, h: boxH};
+                        // Decoration (dashed border + resize handles) is drawn in a separate
+                        // pass after ALL lines' text below -- drawing it here, before this
+                        // line's own text, let a large glyph paint over its own handles
+                        // (worse yet, one line's text could cover another line's handles
+                        // too, since canvas draws are strictly back-to-front).
+
+                        var vertScrollOriented = scrollY && (orientation === 'vertical_rotated' || orientation === 'vertical_stacked');
+
+                        if (scrolling && !vertScrollOriented) {
+                            // The font is only constrained on the CROSS axis -- the travel
+                            // axis is unconstrained since the text scrolls through it, so it
+                            // can use the box's full extent there rather than being capped by
+                            // whichever dimension happens to be smaller. L2R/R2L travel along
+                            // X, so height (boxH) is the constraint; T2B/B2T travel along Y,
+                            // so width (boxW) is.
+                            var fit = scrollX ? fitTextSize(lineText, fontName, Infinity, boxH)
+                                               : fitTextSize(lineText, fontName, boxW, Infinity);
+                            var fitSize = fit.size;
+                            ctx.font = fitSize + 'px "' + fontName + '", sans-serif';
+                            var textW = ctx.measureText(lineText).width;
+                            var textH = fit.ascent + fit.descent;
+
+                            // Simulate the exact backend scroll position at the current scrub
+                            // time (see animate_lines_via_shm's per-frame loop): a constant
+                            // per-frame step that SNAPS back to the starting edge once it fully
+                            // exits the box, rather than smoothly wrapping -- so at t=0 the text
+                            // sits fully off-page at its starting edge, not visible in the box
+                            // like a static "sitting on the screen" snapshot. Runs in canvas-px
+                            // (the step is scaled by the same model->canvas factor as everything
+                            // else here) so it stays proportionally correct at any preview size.
+                            var scrollFps = 30;
+                            var lineSpeed = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
+                            var stepPxModel = Math.max(1, Math.max(10, lineSpeed * 2) / scrollFps);
+                            var horizScroll = scrollX; // scrollX/scrollY already computed above
+                            var stepPxCanvas = stepPxModel * (horizScroll ? modelScaleX : modelScaleY);
+                            var loopStart, loopEnd, dirSign;
+                            if (horizScroll) {
+                                loopStart = (movement === 'R2L') ? (boxX + boxW) : (boxX - textW);
+                                loopEnd   = (movement === 'R2L') ? (boxX - textW) : (boxX + boxW);
+                                dirSign   = (movement === 'R2L') ? -1 : 1;
+                            } else {
+                                loopStart = (movement === 'B2T') ? (boxY + boxH) : (boxY - textH);
+                                loopEnd   = (movement === 'B2T') ? (boxY - textH) : (boxY + boxH);
+                                dirSign   = (movement === 'B2T') ? -1 : 1;
+                            }
+                            var scrollFrameCount = Math.round((window._scrubSeconds || 0) * scrollFps);
+                            var scrollPos = loopStart;
+                            for (var sf = 0; sf < scrollFrameCount; sf++) {
+                                scrollPos += dirSign * stepPxCanvas;
+                                if ((dirSign < 0 && scrollPos < loopEnd) || (dirSign > 0 && scrollPos > loopEnd)) {
+                                    scrollPos = loopStart;
+                                }
+                            }
+
+                            var drawX = horizScroll ? scrollPos : (boxX + Math.max(0, (boxW - textW) / 2));
+                            // drawTop is the visual top of the text; fillText itself (baseline
+                            // 'alphabetic') needs the baseline Y, which sits fit.ascent below
+                            // that -- using the font's generic 'top' metric here (as a plain
+                            // top-baseline fillText would) is what let decorative fonts render
+                            // above where we thought the top was, since actualBoundingBoxAscent
+                            // can exceed it.
+                            var drawTop = horizScroll ? (boxY + Math.max(0, (boxH - textH) / 2)) : scrollPos;
+                            var drawBaseline = drawTop + fit.ascent;
+
+                            var arrowFont = 'bold ' + Math.max(8, Math.round(fitSize * 0.4)) + 'px sans-serif';
+                            var arrowTxt = {L2R:'→', R2L:'←', T2B:'↓', B2T:'↑'}[movement];
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = arrowFont; ctx.textBaseline = 'top';
+                            var aw = ctx.measureText(arrowTxt).width;
+                            var ax, ay;
+                            if (movement === 'T2B' || movement === 'B2T') {
+                                ax = boxX + (boxW - aw) / 2;
+                                ay = (movement === 'B2T') ? boxY + boxH - textH - 2 : boxY + 2;
+                            } else {
+                                ax = (movement === 'R2L') ? boxX + boxW - aw - 2 : boxX + 2;
+                                ay = boxY + 2;
+                            }
+                            ctx.fillText(arrowTxt, ax, ay);
+                            ctx.restore();
+
+                            // Clip to the intersection of the box and the model's true visible
+                            // area — matches the runtime, where a box extending past the model
+                            // edge is cut off there regardless of how far the box itself
+                            // continues (there are no pixels beyond the model edge to draw into).
+                            var clipX0 = Math.max(boxX, gutterOriginX), clipY0 = Math.max(boxY, gutterOriginY);
+                            var clipX1 = Math.min(boxX + boxW, gutterOriginX + modelPxW), clipY1 = Math.min(boxY + boxH, gutterOriginY + modelPxH);
+                            if (clipX1 > clipX0 && clipY1 > clipY0) {
+                                ctx.save();
+                                ctx.beginPath(); ctx.rect(clipX0, clipY0, clipX1 - clipX0, clipY1 - clipY0); ctx.clip();
+                                ctx.font = fitSize + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'alphabetic';
+                                ctx.fillStyle = getLineColor(i);
+                                ctx.fillText(lineText, drawX, drawBaseline);
+                                ctx.restore();
+                            }
+                        } else if (scrolling && orientation === 'vertical_rotated' && scrollY) {
+                            // T2B/B2T with rotated text: the rotated block reads sideways while
+                            // travelling vertically through the box, like the horizontal-glyph
+                            // scrolling branch above but with the glyphs themselves turned 90
+                            // degrees. Fit: rotated width must fit boxW (centered horizontally,
+                            // fixed); rotated height is unconstrained since it's the travel axis
+                            // -- equivalent to fitting raw (unrotated) height against boxW with
+                            // raw width free.
+                            var fitTR = fitTextSize(lineText, fontName, Infinity, boxW);
+                            ctx.font = fitTR.size + 'px "' + fontName + '", sans-serif';
+                            var rawWTR = ctx.measureText(lineText).width;
+                            var rawHTR = fitTR.ascent + fitTR.descent;
+                            var rotatedW = rawHTR, rotatedH = rawWTR; // dims after rotation
+
+                            var lineSpeedTR = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
+                            var stepPxModelTR = Math.max(1, Math.max(10, lineSpeedTR * 2) / 30);
+                            var stepPxCanvasTR = stepPxModelTR * modelScaleY;
+                            var loopStartTR = (movement === 'B2T') ? (boxY + boxH) : (boxY - rotatedH);
+                            var loopEndTR   = (movement === 'B2T') ? (boxY - rotatedH) : (boxY + boxH);
+                            var dirSignTR   = (movement === 'B2T') ? -1 : 1;
+                            var frameCountTR = Math.round((window._scrubSeconds || 0) * 30);
+                            var posTR = loopStartTR;
+                            for (var sfTR = 0; sfTR < frameCountTR; sfTR++) {
+                                posTR += dirSignTR * stepPxCanvasTR;
+                                if ((dirSignTR < 0 && posTR < loopEndTR) || (dirSignTR > 0 && posTR > loopEndTR)) {
+                                    posTR = loopStartTR;
+                                }
+                            }
+                            var dxTR = boxX + Math.max(0, (boxW - rotatedW) / 2);
+
+                            var arrowFontTR = 'bold ' + Math.max(8, Math.round(fitTR.size * 0.4)) + 'px sans-serif';
+                            var arrowTxtTR = (movement === 'B2T') ? '↑' : '↓';
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = arrowFontTR; ctx.textBaseline = 'top';
+                            var awTR = ctx.measureText(arrowTxtTR).width;
+                            ctx.fillText(arrowTxtTR, boxX + (boxW - awTR) / 2, boxY + 2);
+                            ctx.restore();
+
+                            var clipX0TR = Math.max(boxX, gutterOriginX), clipY0TR = Math.max(boxY, gutterOriginY);
+                            var clipX1TR = Math.min(boxX + boxW, gutterOriginX + modelPxW), clipY1TR = Math.min(boxY + boxH, gutterOriginY + modelPxH);
+                            if (clipX1TR > clipX0TR && clipY1TR > clipY0TR) {
+                                ctx.save();
+                                ctx.beginPath(); ctx.rect(clipX0TR, clipY0TR, clipX1TR - clipX0TR, clipY1TR - clipY0TR); ctx.clip();
+                                ctx.translate(dxTR + rotatedW / 2, posTR + rotatedH / 2);
+                                ctx.rotate(-Math.PI / 2);
+                                ctx.textBaseline = 'alphabetic';
+                                ctx.fillStyle = getLineColor(i);
+                                ctx.fillText(lineText, -rawWTR / 2, (fitTR.ascent - fitTR.descent) / 2);
+                                ctx.restore();
+                            }
+                        } else if (scrolling && orientation === 'vertical_stacked' && scrollY) {
+                            // T2B/B2T with stacked text: each character stays upright, one per
+                            // row, and the whole stack travels vertically through the box --
+                            // same simulation approach as the rotated branch above, just with
+                            // the stack's own total height as the "moving" extent and no
+                            // rotate transform.
+                            var charsVS = lineText.split('');
+                            var fitVS = fitStackedTextSize(charsVS, fontName, boxW, Infinity);
+                            var totalHVS = fitVS.lineHeight * charsVS.length;
+
+                            var lineSpeedVS = (window._lineSpeeds && window._lineSpeeds[i]) || 50;
+                            var stepPxModelVS = Math.max(1, Math.max(10, lineSpeedVS * 2) / 30);
+                            var stepPxCanvasVS = stepPxModelVS * modelScaleY;
+                            var loopStartVS = (movement === 'B2T') ? (boxY + boxH) : (boxY - totalHVS);
+                            var loopEndVS   = (movement === 'B2T') ? (boxY - totalHVS) : (boxY + boxH);
+                            var dirSignVS   = (movement === 'B2T') ? -1 : 1;
+                            var frameCountVS = Math.round((window._scrubSeconds || 0) * 30);
+                            var posVS = loopStartVS;
+                            for (var sfVS = 0; sfVS < frameCountVS; sfVS++) {
+                                posVS += dirSignVS * stepPxCanvasVS;
+                                if ((dirSignVS < 0 && posVS < loopEndVS) || (dirSignVS > 0 && posVS > loopEndVS)) {
+                                    posVS = loopStartVS;
+                                }
+                            }
+
+                            var arrowFontVS = 'bold ' + Math.max(8, Math.round(fitVS.size * 0.4)) + 'px sans-serif';
+                            var arrowTxtVS = (movement === 'B2T') ? '↑' : '↓';
+                            ctx.save();
+                            ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = arrowFontVS; ctx.textBaseline = 'top';
+                            var awVS = ctx.measureText(arrowTxtVS).width;
+                            ctx.fillText(arrowTxtVS, boxX + (boxW - awVS) / 2, boxY + 2);
+                            ctx.restore();
+
+                            var clipX0VS = Math.max(boxX, gutterOriginX), clipY0VS = Math.max(boxY, gutterOriginY);
+                            var clipX1VS = Math.min(boxX + boxW, gutterOriginX + modelPxW), clipY1VS = Math.min(boxY + boxH, gutterOriginY + modelPxH);
+                            if (clipX1VS > clipX0VS && clipY1VS > clipY0VS) {
+                                ctx.save();
+                                ctx.beginPath(); ctx.rect(clipX0VS, clipY0VS, clipX1VS - clipX0VS, clipY1VS - clipY0VS); ctx.clip();
+                                ctx.font = fitVS.size + 'px "' + fontName + '", sans-serif';
+                                ctx.textBaseline = 'alphabetic';
+                                ctx.fillStyle = getLineColor(i);
+                                for (var ciVS = 0; ciVS < charsVS.length; ciVS++) {
+                                    var cwVS = ctx.measureText(charsVS[ciVS]).width;
+                                    var cxVS = boxX + Math.max(0, (boxW - cwVS) / 2);
+                                    var cyVS = posVS + ciVS * fitVS.lineHeight + fitVS.ascent;
+                                    ctx.fillText(charsVS[ciVS], cxVS, cyVS);
+                                }
+                                ctx.restore();
+                            }
+                        } else if (orientation === 'vertical_rotated') {
+                            // Both axes constrained: raw width (becomes the rotated block's
+                            // VERTICAL extent) must fit boxH, and raw height (becomes the
+                            // rotated block's horizontal extent/thickness) must fit boxW --
+                            // same "stays inside the bounding box" contract as horizontal/
+                            // stacked. Leaving boxW unconstrained let short strings (e.g. a
+                            // single character) pick an oversized font whose thickness blew
+                            // past the box's width.
+                            var fitR = fitTextSize(lineText, fontName, boxH, boxW);
+                            ctx.font = fitR.size + 'px "' + fontName + '", sans-serif';
+                            var rawW = ctx.measureText(lineText).width;
+                            ctx.save();
+                            ctx.translate(boxX + boxW / 2, boxY + boxH / 2);
+                            ctx.rotate(-Math.PI / 2);
+                            ctx.textBaseline = 'alphabetic';
+                            ctx.fillStyle = getLineColor(i);
+                            // Centers the (unrotated) text on the box's center: horizontally
+                            // by its own width, vertically by the midpoint of its ascent/descent.
+                            ctx.fillText(lineText, -rawW / 2, (fitR.ascent - fitR.descent) / 2);
+                            ctx.restore();
+                        } else if (orientation === 'vertical_stacked') {
+                            var chars = lineText.split('');
+                            var fitS = fitStackedTextSize(chars, fontName, boxW, boxH);
+                            ctx.font = fitS.size + 'px "' + fontName + '", sans-serif';
+                            ctx.textBaseline = 'alphabetic';
+                            ctx.fillStyle = getLineColor(i);
+                            var totalH = fitS.lineHeight * chars.length;
+                            var stackTop = boxY + Math.max(0, (boxH - totalH) / 2);
+                            for (var ci = 0; ci < chars.length; ci++) {
+                                var cw = ctx.measureText(chars[ci]).width;
+                                var cx = boxX + Math.max(0, (boxW - cw) / 2);
+                                var cy = stackTop + ci * fitS.lineHeight + fitS.ascent;
+                                ctx.fillText(chars[ci], cx, cy);
+                            }
                         } else {
-                            drawX = lp.x < 0 ? (canvas.width - lw2) / 2 : lp.x * canvas.width / mw;
-                            drawY = lp.y < 0 ? thisStackY : lp.y * canvas.height / mh;
-                            drawX = Math.max(0, Math.min(canvas.width - lw2, drawX));
-                            drawY = Math.max(0, Math.min(canvas.height - lh2, drawY));
-                            if (i === selectedLine)
-                                posLabel = (lp.x < 0 && lp.y < 0)
-                                    ? 'Line ' + (i+1) + ': auto-stacked'
-                                    : 'Line ' + (i+1) + ':  X:' + lp.x + '  Y:' + lp.y;
+                            var fitH = fitTextSize(lineText, fontName, boxW, boxH);
+                            ctx.font = fitH.size + 'px "' + fontName + '", sans-serif';
+                            var textWH = ctx.measureText(lineText).width;
+                            var textHH = fitH.ascent + fitH.descent;
+                            var drawXH = boxX + Math.max(0, (boxW - textWH) / 2);
+                            var drawBaselineH = boxY + Math.max(0, (boxH - textHH) / 2) + fitH.ascent;
+                            ctx.textBaseline = 'alphabetic';
+                            ctx.fillStyle = getLineColor(i);
+                            ctx.fillText(lineText, drawXH, drawBaselineH);
                         }
 
-                        ctx.font = scaledFont + 'px "' + fontName + '", sans-serif'; ctx.textBaseline = 'top';
-                        lineRects[i] = {x: drawX, y: drawY, w: lw2, h: lh2};
-                        drawLineDecoration(drawX, drawY, lw2, lh2, i);
-                        ctx.fillStyle = getLineColor(i); ctx.fillText(lineText, drawX, drawY);
-                        cumulativeY += lineH;
+                        if (i === selectedLine) {
+                            posLabel = 'Line ' + (i+1) + (
+                                (b.x === -1 && b.y === -1) ? ': auto position' : (': X:' + b.x + ' Y:' + b.y)
+                            ) + '  •  ' + b.w + '×' + b.h + ' box';
+                        }
+                        cumulativeY += boxHeights[i];
+                    }
+
+                    // Draw all box decorations (dashed border + resize handles) after every
+                    // line's text so they're always on top and never hidden behind glyphs.
+                    for (var di = 0; di < 4; di++) {
+                        if (lineRects[di]) drawBoxDecoration(lineRects[di].x, lineRects[di].y, lineRects[di].w, lineRects[di].h, di);
                     }
 
                     var posEl = document.getElementById('pos_display');
@@ -3131,74 +3795,128 @@ def index():
                     return -1;
                 }
 
+                // canvas.width/height are the fixed bitmap resolution (see canvas.width = 640
+                // above); the element itself is CSS-stretched to width:100% of its container.
+                // Every hit-test and drawn coordinate downstream operates in bitmap space, so
+                // clientX/Y must be scaled from CSS pixels into that space here -- otherwise
+                // mouse position drifts further from the drawn handles the wider the container
+                // is than 640px (which is any real page layout), making them unreliable to grab.
                 function canvasXY(e) {
                     var rect = canvas.getBoundingClientRect();
-                    return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
+                    var scaleX = canvas.width / rect.width;
+                    var scaleY = canvas.height / rect.height;
+                    return { cx: (e.clientX - rect.left) * scaleX, cy: (e.clientY - rect.top) * scaleY };
                 }
 
-                function dragCursor(pos) {
-                    return (pos === 'L2R' || pos === 'R2L') ? 'ns-resize' :
-                           (pos === 'T2B' || pos === 'B2T') ? 'ew-resize' : 'grabbing';
+                // Boxes are always freely movable + resizable in both dimensions now,
+                // regardless of movement type. Any of the 8 handles (4 corners + 4 edges)
+                // on the selected line's box can be grabbed — corners resize both width and
+                // height together, edges resize just one dimension, like a normal image
+                // resize in Word/PowerPoint.
+                function hitTestHandle(cx, cy) {
+                    if (selectedLine < 0) return null;
+                    var r = lineRects[selectedLine];
+                    if (!r) return null;
+                    var pts = getHandlePoints(r);
+                    var PAD = 9;
+                    // Corners first so they win over edges on small boxes where zones overlap
+                    var order = ['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'];
+                    for (var idx = 0; idx < order.length; idx++) {
+                        var key = order[idx], p = pts[key];
+                        if (Math.abs(cx - p.x) <= PAD && Math.abs(cy - p.y) <= PAD) return key;
+                    }
+                    return null;
                 }
-                function hoverCursor(pos) {
-                    return (pos === 'L2R' || pos === 'R2L') ? 'ns-resize' :
-                           (pos === 'T2B' || pos === 'B2T') ? 'ew-resize' : 'grab';
-                }
+
+                var resizing = false;
+                var resizeHandle = null;
+                var resizeFixed = null; // {left, right, top, bottom} in MODEL space, captured at drag start
 
                 canvas.addEventListener('mousedown', function(e) {
                     var c = canvasXY(e);
+                    var handle = hitTestHandle(c.cx, c.cy);
+                    if (handle) {
+                        var r = lineRects[selectedLine];
+                        var b = window._lineBoxes[selectedLine];
+                        // Resolve any -1 (auto) position to concrete model coords from the
+                        // last render — resizing needs a real edge to anchor against.
+                        var curX = b.x === -1 ? Math.round(r.x / modelScaleX) : b.x;
+                        var curY = b.y === -1 ? Math.round(r.y / modelScaleY) : b.y;
+                        b.x = curX; b.y = curY;
+                        resizing = true;
+                        resizeHandle = handle;
+                        resizeFixed = {left: curX, right: curX + b.w, top: curY, bottom: curY + b.h};
+                        canvas.style.cursor = getHandlePoints(r)[handle].cursor;
+                        e.preventDefault();
+                        return;
+                    }
                     var hit = hitTestLine(c.cx, c.cy);
                     selectedLine = hit;
                     if (hit >= 0) {
                         dragging = true;
-                        var r   = lineRects[hit];
-                        var lp  = window._linePositions[hit];
-                        var mw2 = window._canvasModelW || 640;
-                        var mh2 = window._canvasModelH || 360;
-                        // For L2R/R2L: anchor Y offset; for T2B/B2T: anchor X; static: both
-                        dragOffX = c.cx - (lp.x < 0 ? r.x : lp.x * canvas.width  / mw2);
-                        dragOffY = c.cy - (lp.y < 0 ? r.y : lp.y * canvas.height / mh2);
-                        canvas.style.cursor = dragCursor(getLineMovement(hit));
+                        var r2 = lineRects[hit];
+                        dragOffX = c.cx - r2.x;
+                        dragOffY = c.cy - r2.y;
+                        canvas.style.cursor = 'grabbing';
                     }
                     renderCanvasPreview();
                     e.preventDefault();
                 });
 
                 canvas.addEventListener('mousemove', function(e) {
-                    var mw2 = window._canvasModelW || 640;
-                    var mh2 = window._canvasModelH || 360;
                     var c   = canvasXY(e);
-                    if (dragging && selectedLine >= 0) {
-                        var r  = lineRects[selectedLine] || {w: 20, h: 20};
-                        var lp = window._linePositions[selectedLine];
-                        var movement = getLineMovement(selectedLine);
-                        var newX = Math.round(Math.max(0, Math.min(canvas.width  - r.w, c.cx - dragOffX)) * mw2 / canvas.width);
-                        var newY = Math.round(Math.max(0, Math.min(canvas.height - r.h, c.cy - dragOffY)) * mh2 / canvas.height);
-                        if (movement === 'L2R' || movement === 'R2L') {
-                            window._linePositions[selectedLine] = {x: lp.x, y: newY};
-                        } else if (movement === 'T2B' || movement === 'B2T') {
-                            window._linePositions[selectedLine] = {x: newX, y: lp.y};
-                        } else {
-                            window._linePositions[selectedLine] = {x: newX, y: newY};
-                        }
+                    var MIN_SIZE = 10;
+                    if (resizing && selectedLine >= 0) {
+                        var b = window._lineBoxes[selectedLine];
+                        // Clamp the raw mouse position in canvas-px to the model area first,
+                        // then convert once to model units.
+                        var cxClamped = Math.max(0, Math.min(canvas.width,  c.cx));
+                        var cyClamped = Math.max(0, Math.min(canvas.height, c.cy));
+                        var mx = cxClamped / modelScaleX, my = cyClamped / modelScaleY;
+                        var hasW = resizeHandle.indexOf('w') >= 0, hasE = resizeHandle.indexOf('e') >= 0;
+                        var hasN = resizeHandle.indexOf('n') >= 0, hasS = resizeHandle.indexOf('s') >= 0;
+                        var newLeft   = hasW ? Math.min(mx, resizeFixed.right - MIN_SIZE)  : resizeFixed.left;
+                        var newRight  = hasE ? Math.max(mx, resizeFixed.left + MIN_SIZE)   : resizeFixed.right;
+                        var newTop    = hasN ? Math.min(my, resizeFixed.bottom - MIN_SIZE) : resizeFixed.top;
+                        var newBottom = hasS ? Math.max(my, resizeFixed.top + MIN_SIZE)    : resizeFixed.bottom;
+                        b.x = Math.round(newLeft);  if (b.x === -1) b.x = -2; // -1 is the auto-position sentinel
+                        b.w = Math.round(newRight - newLeft);
+                        b.y = Math.round(newTop);   if (b.y === -1) b.y = -2;
+                        b.h = Math.round(newBottom - newTop);
                         renderCanvasPreview();
-                    } else if (!dragging) {
+                    } else if (dragging && selectedLine >= 0) {
+                        var r2 = lineRects[selectedLine] || {w: 20, h: 20};
+                        var pxX = Math.max(0, Math.min(canvas.width  - r2.w, c.cx - dragOffX));
+                        var pxY = Math.max(0, Math.min(canvas.height - r2.h, c.cy - dragOffY));
+                        var newX = Math.round(pxX / modelScaleX);
+                        var newY = Math.round(pxY / modelScaleY);
+                        if (newX === -1) newX = -2; // -1 is the auto-position sentinel
+                        if (newY === -1) newY = -2;
+                        window._lineBoxes[selectedLine].x = newX;
+                        window._lineBoxes[selectedLine].y = newY;
+                        renderCanvasPreview();
+                    } else if (!dragging && !resizing) {
+                        var overHandle = hitTestHandle(c.cx, c.cy);
                         var prev = hoveredLine;
                         hoveredLine = hitTestLine(c.cx, c.cy);
-                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(getLineMovement(hoveredLine)) : 'default';
+                        if (overHandle) {
+                            canvas.style.cursor = getHandlePoints(lineRects[selectedLine])[overHandle].cursor;
+                        } else {
+                            canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default';
+                        }
                         if (hoveredLine !== prev) renderCanvasPreview();
                     }
                 });
 
                 window.addEventListener('mouseup', function() {
-                    if (dragging) {
-                        dragging = false;
-                        canvas.style.cursor = hoveredLine >= 0 ? hoverCursor(getLineMovement(hoveredLine)) : 'default';
+                    if (dragging || resizing) {
+                        dragging = false; resizing = false; resizeHandle = null; resizeFixed = null;
+                        canvas.style.cursor = hoveredLine >= 0 ? 'grab' : 'default';
                         saveConfig();
                     }
                 });
                 canvas.addEventListener('mouseleave', function() {
-                    if (!dragging) { hoveredLine = -1; canvas.style.cursor = 'default'; renderCanvasPreview(); }
+                    if (!dragging && !resizing) { hoveredLine = -1; canvas.style.cursor = 'default'; renderCanvasPreview(); }
                 });
 
                 // Arrow key nudging — moves selected line 1px per press, 10px with Shift
@@ -3209,54 +3927,45 @@ def index():
                     var arrows = {ArrowLeft:1, ArrowRight:1, ArrowUp:1, ArrowDown:1};
                     if (!arrows[e.key]) return;
                     e.preventDefault();
-                    var movement = getLineMovement(selectedLine);
                     var mw2  = window._canvasModelW || 640;
                     var mh2  = window._canvasModelH || 360;
-                    var lp   = window._linePositions[selectedLine];
+                    var b    = window._lineBoxes[selectedLine];
                     var step = e.shiftKey ? 10 : 1;
                     // Resolve auto (-1) positions from the rendered rect so the
                     // first keypress anchors from the visual position, not from 0
-                    var curX = lp.x, curY = lp.y;
+                    var curX = b.x, curY = b.y;
                     var r = lineRects[selectedLine];
-                    if (curX < 0 && r) curX = Math.round(r.x * mw2 / canvas.width);
-                    if (curY < 0 && r) curY = Math.round(r.y * mh2 / canvas.height);
-                    if (curX < 0) curX = Math.round(mw2 / 2);
-                    if (curY < 0) curY = Math.round(mh2 / 2);
-                    if (movement === 'L2R' || movement === 'R2L') {
-                        if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
-                        if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
-                        window._linePositions[selectedLine] = {x: lp.x, y: curY};
-                    } else if (movement === 'T2B' || movement === 'B2T') {
-                        if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
-                        if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
-                        window._linePositions[selectedLine] = {x: curX, y: lp.y};
-                    } else {
-                        if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
-                        if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
-                        if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
-                        if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
-                        window._linePositions[selectedLine] = {x: curX, y: curY};
-                    }
+                    if (curX === -1 && r) curX = Math.round(r.x / modelScaleX);
+                    if (curY === -1 && r) curY = Math.round(r.y / modelScaleY);
+                    if (curX === -1) curX = Math.round(mw2 / 2);
+                    if (curY === -1) curY = Math.round(mh2 / 2);
+                    if (e.key === 'ArrowLeft')  curX = Math.max(0, curX - step);
+                    if (e.key === 'ArrowRight') curX = Math.min(mw2 - 1, curX + step);
+                    if (e.key === 'ArrowUp')    curY = Math.max(0, curY - step);
+                    if (e.key === 'ArrowDown')  curY = Math.min(mh2 - 1, curY + step);
+                    if (curX === -1) curX = -2; // -1 is the auto-position sentinel
+                    if (curY === -1) curY = -2;
+                    b.x = curX; b.y = curY;
                     renderCanvasPreview();
                     clearTimeout(_arrowSaveTimer);
                     _arrowSaveTimer = setTimeout(saveConfig, 300);
                 });
 
                 window.resetLine = function(i) {
-                    window._linePositions[i] = {x: -1, y: -1};
+                    window._lineBoxes[i].x = -1;
+                    window._lineBoxes[i].y = -1;
                     renderCanvasPreview(); saveConfig();
                 };
                 window.resetAllLines = function() {
-                    window._linePositions = [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}];
+                    window._lineBoxes.forEach(function(b) { b.x = -1; b.y = -1; });
                     selectedLine = -1;
                     renderCanvasPreview(); saveConfig();
                 };
 
-                // Re-render on text / color / font / font-size changes
+                // Re-render on text / color / font changes
                 for (var li = 1; li <= 4; li++) {
                     (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li));
                     (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_color'));
-                    (function(el) { if (el) el.addEventListener('input', renderCanvasPreview); })(document.getElementById('line_' + li + '_font_size'));
                 }
 
                 updateBadges();
@@ -3354,14 +4063,22 @@ def index():
                                     loadEl.textContent = '\u26a0 Overlay model not found \u2014 verify model name in settings';
                                     loadEl.style.color = '#ff9800';
                                 }
-                                var totalSec = Math.max(1, Math.floor(data.duration_ms / 1000));
+                                // The background always restarts from 0 and is cut off after
+                                // display_duration seconds each time a message shows (see
+                                // send_to_fpp/display loop) -- anything past that point in the
+                                // FSEQ is never actually seen behind a message, so cap the
+                                // scrubber there instead of the file's full length.
+                                var displayDur = parseInt(document.getElementById('display_duration').value) || 30;
+                                var totalSec = Math.min(displayDur, Math.max(1, Math.floor(data.duration_ms / 1000)));
                                 var scrubber = document.getElementById('fseq_scrubber');
                                 scrubber.max = totalSec;
                                 scrubber.value = 0;
+                                window._scrubSeconds = 0;
                                 document.getElementById('fseq_scrubber_row').style.display = '';
                                 document.getElementById('fseq_time_display').textContent =
-                                    '0:00 / ' + fmtTime(data.duration_ms);
+                                    '0:00 / ' + fmtTime(totalSec * 1000);
                                 doFseqFetch(0);
+                                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                             })
                             .catch(function(e) {
                                 loadEl.textContent = '\u2717 ' + e;
@@ -3372,19 +4089,26 @@ def index():
                         // ---- Video: show scrubber (time in seconds), fetch frames ----
                         loadEl.textContent = '';
                         var scrubber = document.getElementById('fseq_scrubber');
-                        scrubber.max = 300;  // assume up to 5 min; user can scrub
+                        // Capped to display_duration, not the video's own length -- playback
+                        // always restarts from 0 and is cut off after display_duration seconds
+                        // each time a message shows, so nothing past that point is ever seen.
+                        scrubber.max = parseInt(document.getElementById('display_duration').value) || 30;
                         scrubber.value = 0;
+                        window._scrubSeconds = 0;
                         document.getElementById('fseq_scrubber_row').style.display = '';
                         document.getElementById('fseq_time_display').textContent = '0:00';
                         document.getElementById('fseq_status').textContent =
                             'Scrub to preview different parts of the video';
                         doMediaFetch(0);
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
 
                     } else {
                         // ---- Image: load once, no scrubber ----
                         loadEl.textContent = '';
                         document.getElementById('fseq_scrubber_row').style.display = 'none';
+                        window._scrubSeconds = 0;
                         doMediaFetch(0);
+                        if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     }
                 }
 
@@ -3458,6 +4182,11 @@ def index():
                 }
 
                 window.fseqScrub = function(seconds) {
+                    // Drives the scrolling-text preview too (see renderCanvasPreview) --
+                    // updated immediately, unlike the network-bound background frame fetch
+                    // below which stays debounced.
+                    window._scrubSeconds = parseFloat(seconds) || 0;
+                    if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                     var loadEl = document.getElementById('fseq_load_status');
                     if (_contentType === 'seq') {
                         if (!_fseqMeta) return;
@@ -3498,7 +4227,7 @@ def index():
             setupAutoSave();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
-            for (var _li = 0; _li < 4; _li++) updateLineSpeedRowVisibility(_li);
+            for (var _li = 0; _li < 4; _li++) { updateLineSpeedRowVisibility(_li); updateLineOrientationRowVisibility(_li); }
             initValignButtons();
             (function() {
                 var w = parseInt(document.getElementById('overlay_model_width').value) || 0;
@@ -3724,10 +4453,6 @@ var _saveTimer = null;
                         var el = document.getElementById('line_' + (i + 1) + '_font');
                         return el && el.value ? el.value : 'FreeSans';
                     }),
-                    line_font_sizes: [0, 1, 2, 3].map(function(i) {
-                        var el = document.getElementById('line_' + (i + 1) + '_font_size');
-                        return el ? (parseInt(el.value) || 48) : 48;
-                    }),
                     overlay_model_width: parseInt(document.getElementById('overlay_model_width').value) || 0,
                     overlay_model_height: parseInt(document.getElementById('overlay_model_height').value) || 0,
                     message_lines: [
@@ -3736,13 +4461,14 @@ var _saveTimer = null;
                         document.getElementById('line_3').value,
                         document.getElementById('line_4').value,
                     ],
-                    line_positions: window._linePositions || [{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1},{x:-1,y:-1}],
+                    line_boxes: window._lineBoxes || [{x:-1,y:-1,w:300,h:60},{x:-1,y:-1,w:300,h:60},{x:-1,y:-1,w:300,h:60},{x:-1,y:-1,w:300,h:60}],
                     line_colors: [0, 1, 2, 3].map(function(i) {
                         var el = document.getElementById('line_' + (i + 1) + '_color');
                         return el ? el.value.toUpperCase() : '#FF0000';
                     }),
                     line_movements: window._lineMovements || ['Center','Center','Center','Center'],
-                    line_speeds: window._lineSpeeds || [5,5,5,5],
+                    line_speeds: window._lineSpeeds || [50,50,50,50],
+                    line_orientations: window._lineOrientations || ['horizontal','horizontal','horizontal','horizontal'],
                     custom_colors: window._customColors || [],
                     {% if sms_responses_enabled %}
                     sms_response_show_not_live: document.getElementById('sms_response_show_not_live').checked,
@@ -3812,6 +4538,12 @@ var _saveTimer = null;
                         if (window.toggleFseqPreview) window.toggleFseqPreview();
                         updateNameDisplayWarning();
                     });
+                });
+                // The scrubber's range is capped to Display Duration (see loadBgPreview) —
+                // reload it on change so that cap stays in sync with the field.
+                var displayDurationEl = document.getElementById('display_duration');
+                if (displayDurationEl) displayDurationEl.addEventListener('change', function() {
+                    if (window.toggleFseqPreview) window.toggleFseqPreview();
                 });
 
                 // Text, number inputs — save when user clicks away
