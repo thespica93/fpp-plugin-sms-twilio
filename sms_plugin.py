@@ -692,14 +692,23 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
             # several times or cuts a long name off mid-scroll), time one complete
             # pass to span the whole display duration -- the text enters at the start
             # and fully exits right as the display window ends, regardless of length.
-            fit_to_time = (speed == 0)
+            # speed <= 0 encodes fit-to-time: 0 or -1 = one pass, -N = N passes.
+            # (Negative because it shares the one speed field with the positive manual
+            # px/s speeds -- no separate config key needed.)
+            fit_to_time = (speed <= 0)
+            fit_passes = max(1, -int(speed)) if speed < 0 else 1
             entry['fit'] = fit_to_time
+            entry['fit_passes'] = fit_passes
+            entry['wraps'] = 0
+            entry['done'] = False
 
             def _step_for(loop_start, loop_end):
-                # Fit: cover the whole loop_start->loop_end travel in `duration`
-                # seconds (one pass). Otherwise: fixed px/s from the speed value.
+                # Fit: cover fit_passes complete passes over the whole `duration`
+                # (each pass = one loop_start->loop_end traversal), so the text makes
+                # exactly that many passes and fully exits right as the window ends.
+                # Otherwise: fixed px/s from the speed value.
                 if fit_to_time:
-                    total = abs(loop_end - loop_start)
+                    total = abs(loop_end - loop_start) * fit_passes
                     return max(0.1, total / max(1.0, duration * fps))
                 return max(1.0, max(10, speed * 2) / fps)
 
@@ -772,14 +781,23 @@ def animate_lines_via_shm(items, model_name, width, height, duration):
                     pass
                 for e in prepared:
                     if e['movement'] in ('L2R', 'R2L', 'T2B', 'B2T'):
+                        if e.get('done'):
+                            continue  # fit passes all completed -- hold fully exited
                         e['pos'] += e['dir'] * e['step_px']
                         overshot = (e['dir'] < 0 and e['pos'] < e['loop_end']) or (e['dir'] > 0 and e['pos'] > e['loop_end'])
                         if overshot:
-                            # Fixed-speed: loop (snap back and repeat for the rest of the
-                            # window). Fit-to-time: it's a single pass sized to the window,
-                            # so hold it fully exited at loop_end instead of snapping back
-                            # for a jarring last-frame flash.
-                            e['pos'] = e['loop_end'] if e.get('fit') else e['loop_start']
+                            # A pass just completed. Fixed-speed loops forever (snap back
+                            # and repeat for the rest of the window). Fit-to-time snaps back
+                            # for passes 1..N-1, then on the Nth pass holds fully exited at
+                            # loop_end (no jarring snap-back flash at the very end).
+                            if e.get('fit'):
+                                e['wraps'] += 1
+                                if e['wraps'] >= e['fit_passes']:
+                                    e['pos'] = e['loop_end']; e['done'] = True
+                                else:
+                                    e['pos'] = e['loop_start']
+                            else:
+                                e['pos'] = e['loop_start']
                 _time.sleep(1.0 / fps)
 
         _scroll_thread = threading.Thread(target=_animate, daemon=True)
@@ -1729,7 +1747,11 @@ def send_to_fpp(name):
             if not line_color.startswith('#'):
                 line_color = '#' + line_color
             movement = line_movements_cfg[i] if i < len(line_movements_cfg) and line_movements_cfg[i] else 'Center'
-            speed = line_speeds_cfg[i] if i < len(line_speeds_cfg) and line_speeds_cfg[i] else global_scroll_speed
+            # NOTE: guard on `is not None`, not truthiness -- speed 0 (and negative values)
+            # are the fit-to-display-time encoding: 0/-1 = one pass, -N = N passes. A plain
+            # `and line_speeds_cfg[i]` would treat 0 as "unset" and fall back to the global
+            # fixed speed, silently disabling fit mode on the real device.
+            speed = line_speeds_cfg[i] if (i < len(line_speeds_cfg) and line_speeds_cfg[i] is not None) else global_scroll_speed
             font_name = line_fonts_cfg[i] if i < len(line_fonts_cfg) and line_fonts_cfg[i] else global_font
             orientation = line_orientations_cfg[i] if i < len(line_orientations_cfg) and line_orientations_cfg[i] else 'horizontal'
             rendered_lines.append((rendered, box.get('x', -1), box.get('y', -1), box.get('w', 300), box.get('h', 60),
@@ -2656,14 +2678,20 @@ def index():
                             .line-speed-row { display:flex; align-items:center; gap:6px; }
                             .line-speed-row label { margin:0; font-weight:normal; font-size:12px; color:#aaa; }
                             .line-speed-row input[type="number"] { width:56px; margin-bottom:0; padding:6px; }
-                            .line-speed-row input[type="number"]:disabled { opacity:0.45; }
                             .line-speed-auto { display:inline-flex; align-items:center; gap:4px; cursor:pointer; white-space:nowrap; }
                             .line-speed-auto input[type="checkbox"] { width:auto; margin:0; cursor:pointer; }
+                            .line-speed-sub { display:inline-flex; align-items:center; gap:6px; }
                         </style>
                         {% set ml = config.get('message_lines') or ['Merry Christmas', '{name}!', '', ''] %}
                         {% set lc = config.get('line_colors') or ['', '', '', ''] %}
                         {% set lm = config.get('line_movements') or ['Center', 'Center', 'Center', 'Center'] %}
                         {% set ls = config.get('line_speeds') or [50, 50, 50, 50] %}
+                        {# Per-line speed value with a safe fallback. speed <= 0 encodes
+                           fit-to-time: 0/-1 = 1 pass, -N = N passes. #}
+                        {% set s0 = ls[0] if ls|length > 0 else 50 %}
+                        {% set s1 = ls[1] if ls|length > 1 else 50 %}
+                        {% set s2 = ls[2] if ls|length > 2 else 50 %}
+                        {% set s3 = ls[3] if ls|length > 3 else 50 %}
                         {% set lf = config.get('line_fonts') or ['FreeSans', 'FreeSans', 'FreeSans', 'FreeSans'] %}
                         {% set lo = config.get('line_orientations') or ['horizontal', 'horizontal', 'horizontal', 'horizontal'] %}
                         <div id="message_lines_section">
@@ -2690,9 +2718,15 @@ def index():
                                             <option value="B2T" {{ 'selected' if lm[0] == 'B2T' else '' }}>Scroll Bottom to Top</option>
                                         </select>
                                         <div id="line_1_speed_row" class="line-speed-row" style="{{ '' if lm[0] != 'Center' else 'display:none;' }}">
-                                            <label class="line-speed-auto" title="Time one scroll pass to the whole display duration — text enters at the start and fully exits at the end, whatever its length."><input type="checkbox" id="line_1_speed_auto" {{ 'checked' if ls|length > 0 and ls[0] == 0 else '' }} onchange="onLineSpeedAutoChange(0)"> Fit to time</label>
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_1_speed" min="1" max="100" step="1" {{ 'disabled' if ls|length > 0 and ls[0] == 0 else '' }} value="{{ ls[0] if ls|length > 0 and ls[0] else 50 }}" onchange="onLineSpeedChange(0)">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_1_speed_auto" {{ 'checked' if s0 <= 0 else '' }} onchange="onLineSpeedAutoChange(0)"> Fit to time</label>
+                                            <span id="line_1_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s0 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_1_speed" min="1" max="100" step="1" value="{{ s0 if s0 > 0 else 50 }}" onchange="onLineSpeedChange(0)">
+                                            </span>
+                                            <span id="line_1_passes_wrap" class="line-speed-sub" style="{{ '' if s0 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_1_passes" min="1" max="20" step="1" value="{{ (-s0) if s0 < 0 else 1 }}" onchange="onLinePassesChange(0)">
+                                            </span>
                                         </div>
                                         <span id="line_1_orientation_row" style="display:{{ 'inline-flex' if lm[0] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2736,9 +2770,15 @@ def index():
                                             <option value="B2T" {{ 'selected' if lm[1] == 'B2T' else '' }}>Scroll Bottom to Top</option>
                                         </select>
                                         <div id="line_2_speed_row" class="line-speed-row" style="{{ '' if lm[1] != 'Center' else 'display:none;' }}">
-                                            <label class="line-speed-auto" title="Time one scroll pass to the whole display duration — text enters at the start and fully exits at the end, whatever its length."><input type="checkbox" id="line_2_speed_auto" {{ 'checked' if ls|length > 1 and ls[1] == 0 else '' }} onchange="onLineSpeedAutoChange(1)"> Fit to time</label>
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_2_speed" min="1" max="100" step="1" {{ 'disabled' if ls|length > 1 and ls[1] == 0 else '' }} value="{{ ls[1] if ls|length > 1 and ls[1] else 50 }}" onchange="onLineSpeedChange(1)">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_2_speed_auto" {{ 'checked' if s1 <= 0 else '' }} onchange="onLineSpeedAutoChange(1)"> Fit to time</label>
+                                            <span id="line_2_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s1 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_2_speed" min="1" max="100" step="1" value="{{ s1 if s1 > 0 else 50 }}" onchange="onLineSpeedChange(1)">
+                                            </span>
+                                            <span id="line_2_passes_wrap" class="line-speed-sub" style="{{ '' if s1 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_2_passes" min="1" max="20" step="1" value="{{ (-s1) if s1 < 0 else 1 }}" onchange="onLinePassesChange(1)">
+                                            </span>
                                         </div>
                                         <span id="line_2_orientation_row" style="display:{{ 'inline-flex' if lm[1] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2782,9 +2822,15 @@ def index():
                                             <option value="B2T" {{ 'selected' if lm[2] == 'B2T' else '' }}>Scroll Bottom to Top</option>
                                         </select>
                                         <div id="line_3_speed_row" class="line-speed-row" style="{{ '' if lm[2] != 'Center' else 'display:none;' }}">
-                                            <label class="line-speed-auto" title="Time one scroll pass to the whole display duration — text enters at the start and fully exits at the end, whatever its length."><input type="checkbox" id="line_3_speed_auto" {{ 'checked' if ls|length > 2 and ls[2] == 0 else '' }} onchange="onLineSpeedAutoChange(2)"> Fit to time</label>
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_3_speed" min="1" max="100" step="1" {{ 'disabled' if ls|length > 2 and ls[2] == 0 else '' }} value="{{ ls[2] if ls|length > 2 and ls[2] else 50 }}" onchange="onLineSpeedChange(2)">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_3_speed_auto" {{ 'checked' if s2 <= 0 else '' }} onchange="onLineSpeedAutoChange(2)"> Fit to time</label>
+                                            <span id="line_3_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s2 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_3_speed" min="1" max="100" step="1" value="{{ s2 if s2 > 0 else 50 }}" onchange="onLineSpeedChange(2)">
+                                            </span>
+                                            <span id="line_3_passes_wrap" class="line-speed-sub" style="{{ '' if s2 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_3_passes" min="1" max="20" step="1" value="{{ (-s2) if s2 < 0 else 1 }}" onchange="onLinePassesChange(2)">
+                                            </span>
                                         </div>
                                         <span id="line_3_orientation_row" style="display:{{ 'inline-flex' if lm[2] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -2828,9 +2874,15 @@ def index():
                                             <option value="B2T" {{ 'selected' if lm[3] == 'B2T' else '' }}>Scroll Bottom to Top</option>
                                         </select>
                                         <div id="line_4_speed_row" class="line-speed-row" style="{{ '' if lm[3] != 'Center' else 'display:none;' }}">
-                                            <label class="line-speed-auto" title="Time one scroll pass to the whole display duration — text enters at the start and fully exits at the end, whatever its length."><input type="checkbox" id="line_4_speed_auto" {{ 'checked' if ls|length > 3 and ls[3] == 0 else '' }} onchange="onLineSpeedAutoChange(3)"> Fit to time</label>
-                                            <label>Speed:</label>
-                                            <input type="number" id="line_4_speed" min="1" max="100" step="1" {{ 'disabled' if ls|length > 3 and ls[3] == 0 else '' }} value="{{ ls[3] if ls|length > 3 and ls[3] else 50 }}" onchange="onLineSpeedChange(3)">
+                                            <label class="line-speed-auto" title="Time the scroll to the whole display duration — the text enters at the start and finishes right at the end, whatever its length. Set how many full passes to make in that window."><input type="checkbox" id="line_4_speed_auto" {{ 'checked' if s3 <= 0 else '' }} onchange="onLineSpeedAutoChange(3)"> Fit to time</label>
+                                            <span id="line_4_speed_wrap" class="line-speed-sub" style="{{ 'display:none;' if s3 <= 0 else '' }}">
+                                                <label>Speed:</label>
+                                                <input type="number" id="line_4_speed" min="1" max="100" step="1" value="{{ s3 if s3 > 0 else 50 }}" onchange="onLineSpeedChange(3)">
+                                            </span>
+                                            <span id="line_4_passes_wrap" class="line-speed-sub" style="{{ '' if s3 <= 0 else 'display:none;' }}">
+                                                <label>Times:</label>
+                                                <input type="number" id="line_4_passes" min="1" max="20" step="1" value="{{ (-s3) if s3 < 0 else 1 }}" onchange="onLinePassesChange(3)">
+                                            </span>
                                         </div>
                                         <span id="line_4_orientation_row" style="display:{{ 'inline-flex' if lm[3] == 'Center' else 'none' }}; align-items:center; gap:6px;">
                                             <span class="line-mini-label">Style:</span>
@@ -3246,9 +3298,8 @@ def index():
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
-            // Per-line Speed input. Manual speed is 1-100 -- 0 is reserved as the "fit to
-            // display time" sentinel, set via the Fit-to-time checkbox (onLineSpeedAutoChange),
-            // not typed here.
+            // Per-line manual Speed input (1-100 px/s). Fit-to-time uses a separate encoding
+            // (speed <= 0) set via the checkbox / Times box below, never typed here.
             function onLineSpeedChange(i) {
                 var el = document.getElementById('line_' + (i + 1) + '_speed');
                 if (!el) return;
@@ -3260,22 +3311,44 @@ def index():
                 if (typeof saveConfig === 'function') saveConfig();
             }
 
-            // Per-line "Fit to display time" checkbox. Checked stores speed 0 (the
-            // fit-to-time sentinel read by the preview + backend) and disables the manual
-            // speed input; unchecked restores the manual value shown in that input.
+            // Per-line "Fit to display time" checkbox. Checked swaps the Speed box for the
+            // Times (pass count) box and stores speed = -times (fit-to-time encoding, read
+            // by the preview + backend). Unchecked restores the manual px/s speed.
             function onLineSpeedAutoChange(i) {
                 var auto = document.getElementById('line_' + (i + 1) + '_speed_auto');
-                var numEl = document.getElementById('line_' + (i + 1) + '_speed');
                 if (!auto) return;
+                var speedWrap = document.getElementById('line_' + (i + 1) + '_speed_wrap');
+                var passesWrap = document.getElementById('line_' + (i + 1) + '_passes_wrap');
                 window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
                 if (auto.checked) {
-                    if (numEl) numEl.disabled = true;
-                    window._lineSpeeds[i] = 0;
+                    if (speedWrap) speedWrap.style.display = 'none';
+                    if (passesWrap) passesWrap.style.display = '';
+                    var pEl = document.getElementById('line_' + (i + 1) + '_passes');
+                    var p = pEl ? Math.round(Math.min(20, Math.max(1, parseInt(pEl.value, 10) || 1))) : 1;
+                    if (pEl) pEl.value = p;
+                    window._lineSpeeds[i] = -p;  // negative = fit-to-time, N passes
                 } else {
-                    var v = numEl ? Math.round(Math.min(100, Math.max(1, parseInt(numEl.value, 10) || 50))) : 50;
-                    if (numEl) { numEl.disabled = false; numEl.value = v; }
+                    if (speedWrap) speedWrap.style.display = '';
+                    if (passesWrap) passesWrap.style.display = 'none';
+                    var sEl = document.getElementById('line_' + (i + 1) + '_speed');
+                    var v = sEl ? Math.round(Math.min(100, Math.max(1, parseInt(sEl.value, 10) || 50))) : 50;
+                    if (sEl) sEl.value = v;
                     window._lineSpeeds[i] = v;
                 }
+                if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
+                if (typeof saveConfig === 'function') saveConfig();
+            }
+
+            // Per-line "Times" (pass count) input, shown only in fit-to-time mode. Stores
+            // speed = -times so the backend/preview make that many complete passes over the
+            // display duration.
+            function onLinePassesChange(i) {
+                var el = document.getElementById('line_' + (i + 1) + '_passes');
+                if (!el) return;
+                var p = Math.round(Math.min(20, Math.max(1, parseInt(el.value, 10) || 1)));
+                el.value = p;
+                window._lineSpeeds = window._lineSpeeds || [50,50,50,50];
+                window._lineSpeeds[i] = -p;
                 if (typeof window.renderCanvasPreview === 'function') window.renderCanvasPreview();
                 if (typeof saveConfig === 'function') saveConfig();
             }
@@ -3464,34 +3537,42 @@ def index():
                     return best;
                 }
 
-                // Per-line scroll speed, defaulting to 50 -- but 0 is a REAL value (the
-                // "fit to display time" sentinel), so this must not use `|| 50`, which
-                // would coerce 0 back to 50 and silently disable fit mode.
+                // Per-line scroll speed, defaulting to 50. speed <= 0 is REAL (fit-to-time:
+                // 0/-1 = one pass, -N = N passes), so this must not use `|| 50`, which would
+                // coerce 0 back to 50 and silently disable fit mode.
                 function getLineSpeed(i) {
                     var v = window._lineSpeeds && window._lineSpeeds[i];
                     return (v === undefined || v === null) ? 50 : v;
                 }
+                function isFitSpeed(lineSpeed) { return lineSpeed <= 0; }
+                function fitPassCount(lineSpeed) { return lineSpeed < 0 ? -lineSpeed : 1; }
                 // Per-frame scroll step (in the same coordinate space as loopStart/loopEnd).
-                // speed 0 = fit-to-time: cover the whole loopStart->loopEnd travel in exactly
-                // `displayDur` seconds (one pass spanning the display window). Otherwise a
-                // fixed px/s speed, scaled from model space to that coordinate space by
-                // axisScale. Mirrors _step_for() in animate_lines_via_shm.
+                // Fit-to-time (speed <= 0): cover `passes` complete loopStart->loopEnd
+                // traversals across the whole `displayDur`, so it makes exactly that many
+                // passes in the window. Otherwise a fixed px/s speed, scaled from model
+                // space to that coordinate space by axisScale. Mirrors _step_for().
                 function scrollStepPx(lineSpeed, loopStart, loopEnd, displayDur, fps, axisScale) {
-                    if (lineSpeed === 0) {
-                        return Math.max(0.1, Math.abs(loopEnd - loopStart) / Math.max(1, displayDur * fps));
+                    if (isFitSpeed(lineSpeed)) {
+                        var total = Math.abs(loopEnd - loopStart) * fitPassCount(lineSpeed);
+                        return Math.max(0.1, total / Math.max(1, displayDur * fps));
                     }
                     return Math.max(1, Math.max(10, lineSpeed * 2) / fps) * axisScale;
                 }
                 // Simulate scroll position at the current scrub time. Fixed-speed loops
-                // (snap back to loopStart); fit-to-time is one pass, held at loopEnd once
-                // exited. Mirrors the per-frame advance in animate_lines_via_shm's _animate.
-                function scrollPosAt(loopStart, loopEnd, dirSign, stepPx, scrubSeconds, fps, fitMode) {
+                // forever (snap back to loopStart). Fit-to-time loops for passes 1..N-1 then
+                // holds at loopEnd once all N passes are done. Mirrors _animate's per-frame
+                // advance in animate_lines_via_shm.
+                function scrollPosAt(loopStart, loopEnd, dirSign, stepPx, scrubSeconds, fps, fitMode, passes) {
                     var frames = Math.round((scrubSeconds || 0) * fps);
-                    var pos = loopStart;
+                    var pos = loopStart, wraps = 0, done = false;
                     for (var f = 0; f < frames; f++) {
+                        if (done) { pos = loopEnd; continue; }
                         pos += dirSign * stepPx;
                         var overshot = (dirSign < 0 && pos < loopEnd) || (dirSign > 0 && pos > loopEnd);
-                        if (overshot) pos = fitMode ? loopEnd : loopStart;
+                        if (overshot) {
+                            if (fitMode && ++wraps >= passes) { pos = loopEnd; done = true; }
+                            else pos = loopStart;
+                        }
                     }
                     return pos;
                 }
@@ -3643,7 +3724,7 @@ def index():
                             // else here) so it stays proportionally correct at any preview size.
                             var scrollFps = 30;
                             var lineSpeed = getLineSpeed(i);
-                            var fitMode = (lineSpeed === 0);
+                            var fitMode = isFitSpeed(lineSpeed);
                             var horizScroll = scrollX; // scrollX/scrollY already computed above
                             var loopStart, loopEnd, dirSign;
                             if (horizScroll) {
@@ -3658,7 +3739,7 @@ def index():
                             var stepPxCanvas = scrollStepPx(lineSpeed, loopStart, loopEnd,
                                 getDisplayDuration(), scrollFps, horizScroll ? modelScaleX : modelScaleY);
                             var scrollPos = scrollPosAt(loopStart, loopEnd, dirSign, stepPxCanvas,
-                                window._scrubSeconds, scrollFps, fitMode);
+                                window._scrubSeconds, scrollFps, fitMode, fitPassCount(lineSpeed));
 
                             var drawX = horizScroll ? scrollPos : (boxX + Math.max(0, (boxW - textW) / 2));
                             // drawTop is the visual top of the text; fillText itself (baseline
@@ -3715,14 +3796,14 @@ def index():
                             var rotatedW = rawHTR, rotatedH = rawWTR; // dims after rotation
 
                             var lineSpeedTR = getLineSpeed(i);
-                            var fitModeTR = (lineSpeedTR === 0);
+                            var fitModeTR = isFitSpeed(lineSpeedTR);
                             var loopStartTR = (movement === 'B2T') ? (boxY + boxH) : (boxY - rotatedH);
                             var loopEndTR   = (movement === 'B2T') ? (boxY - rotatedH) : (boxY + boxH);
                             var dirSignTR   = (movement === 'B2T') ? -1 : 1;
                             var stepPxCanvasTR = scrollStepPx(lineSpeedTR, loopStartTR, loopEndTR,
                                 getDisplayDuration(), 30, modelScaleY);
                             var posTR = scrollPosAt(loopStartTR, loopEndTR, dirSignTR, stepPxCanvasTR,
-                                window._scrubSeconds, 30, fitModeTR);
+                                window._scrubSeconds, 30, fitModeTR, fitPassCount(lineSpeedTR));
                             var dxTR = boxX + Math.max(0, (boxW - rotatedW) / 2);
 
                             var arrowFontTR = 'bold ' + Math.max(8, Math.round(fitTR.size * 0.4)) + 'px sans-serif';
@@ -3756,14 +3837,14 @@ def index():
                             var totalHVS = fitVS.lineHeight * charsVS.length;
 
                             var lineSpeedVS = getLineSpeed(i);
-                            var fitModeVS = (lineSpeedVS === 0);
+                            var fitModeVS = isFitSpeed(lineSpeedVS);
                             var loopStartVS = (movement === 'B2T') ? (boxY + boxH) : (boxY - totalHVS);
                             var loopEndVS   = (movement === 'B2T') ? (boxY - totalHVS) : (boxY + boxH);
                             var dirSignVS   = (movement === 'B2T') ? -1 : 1;
                             var stepPxCanvasVS = scrollStepPx(lineSpeedVS, loopStartVS, loopEndVS,
                                 getDisplayDuration(), 30, modelScaleY);
                             var posVS = scrollPosAt(loopStartVS, loopEndVS, dirSignVS, stepPxCanvasVS,
-                                window._scrubSeconds, 30, fitModeVS);
+                                window._scrubSeconds, 30, fitModeVS, fitPassCount(lineSpeedVS));
 
                             var arrowFontVS = 'bold ' + Math.max(8, Math.round(fitVS.size * 0.4)) + 'px sans-serif';
                             var arrowTxtVS = (movement === 'B2T') ? '↑' : '↓';
