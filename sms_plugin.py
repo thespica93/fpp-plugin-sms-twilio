@@ -2937,7 +2937,7 @@ def index():
                             <option value="google_voice" {{ 'selected' if config.get('message_source','twilio') == 'google_voice' else '' }}>Google Voice (Gmail)</option>
                         </select>
                         <p class="help-text">Choose where incoming text messages come from. Twilio uses its API; Google Voice scans the Gmail inbox that Voice forwards texts to.</p>
-                        <p class="help-text">▶️ The show is started and stopped by the <strong>Start</strong> / <strong>Stop</strong> scheduler commands — no manual enable needed once credentials are saved.</p>
+                        <p class="help-text">▶️ The show is started and stopped by the <strong>Start</strong> / <strong>Stop</strong> scheduler commands.</p>
 
                         <!-- Twilio credentials — shown when Message Source = Twilio -->
                         <div id="twilio_creds">
