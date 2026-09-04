@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-FPP SMS Plugin v2.5 - Twilio Integration
+Text My Lights - FPP plugin: viewers text a name that appears on your display.
+Supports Twilio and Google Voice as message sources.
 """
 
 from flask import Flask, request, jsonify, render_template_string, Response
@@ -44,7 +45,7 @@ _scroll_thread = None   # background PIL scroll animation thread
 PLUGIN_DIR      = os.path.dirname(os.path.abspath(__file__))
 
 # All runtime data lives under one plugin folder
-PLUGIN_DATA_DIR = "/home/fpp/media/plugin.fpp-sms-twilio"
+PLUGIN_DATA_DIR = "/home/fpp/media/plugin.fpp-textmylights"
 CONFIG_FILE     = os.path.join(PLUGIN_DATA_DIR, "plugin.json")
 LOG_FILE        = os.path.join(PLUGIN_DATA_DIR, "logs", "sms_plugin.log")
 QUEUE_FILE      = os.path.join(PLUGIN_DATA_DIR, "queue_pending.json")
@@ -2854,7 +2855,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>FPP SMS Plugin Configuration</title>
+        <title>Text My Lights — Configuration</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #ffffff; color: #333; }
             h1 { color: #4CAF50; }
@@ -6785,7 +6786,7 @@ def status_page():
         </style>
     </head>
     <body><script>if('scrollRestoration'in history)history.scrollRestoration='manual';function _toTop(){{window.scrollTo(0,0);document.documentElement.scrollTop=0;document.body.scrollTop=0;try{{window.parent.postMessage({{type:'scrollTop'}},'*');}}catch(e){{}}}}_toTop();document.addEventListener('DOMContentLoaded',_toTop);window.addEventListener('load',_toTop);</script>
-        <h1>🔧 FPP SMS Plugin Status v2.5</h1>
+        <h1>🔧 Text My Lights — Status</h1>
         <button onclick="location.href='/'">← Back</button>
         <button onclick="location.reload()">🔄 Refresh</button>
         
@@ -7154,7 +7155,7 @@ def api_deactivate():
 if __name__ == '__main__':
     # Migrate files from old scattered paths to the new plugin data directory
     _migrations = [
-        ("/home/fpp/media/config/plugin.fpp-sms-twilio.json", CONFIG_FILE),
+        ("/home/fpp/media/config/plugin.fpp-textmylights.json", CONFIG_FILE),
         ("/home/fpp/media/config/blocked_phones.json",         BLOCKLIST_FILE),
         ("/home/fpp/media/config/last_message_sid.txt",        LAST_SID_FILE),
         ("/home/fpp/media/config/queue_pending.json",          QUEUE_FILE),
@@ -7203,5 +7204,5 @@ if __name__ == '__main__':
             start_default_playlist()
         threading.Thread(target=_start_default, daemon=True).start()
 
-    logging.info("FPP SMS Plugin v2.5 starting...")
+    logging.info("Text My Lights plugin starting...")
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

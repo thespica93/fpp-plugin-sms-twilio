@@ -1,7 +1,7 @@
 <?php
-// FPP SMS Plugin - Help / Documentation page
-$pluginName = "fpp-plugin-sms-twilio";
-$githubBase = "https://github.com/thespica93/fpp-plugin-sms-twilio";
+// Text My Lights - Help / Documentation page
+$pluginName = "fpp-plugin-textmylights";
+$githubBase = "https://github.com/thespica93/fpp-plugin-textmylights";
 ?>
 <style>
     .sms-help { max-width: 860px; margin: 0 auto; font-family: Arial, sans-serif; line-height: 1.5; }
@@ -26,11 +26,11 @@ $githubBase = "https://github.com/thespica93/fpp-plugin-sms-twilio";
 
 <div class="sms-help">
 
-    <h2>📱 SMS Plugin — Help</h2>
+    <h2>📱 Text My Lights — Help</h2>
     <p>Visitors text their name to your number and it appears on your pixel display. Messages can come from <strong>Twilio</strong> or <strong>Google Voice</strong> — pick one under <em>Settings → Message Source</em>.</p>
 
-    <a href="plugin.php?_menu=content&plugin=fpp-plugin-sms-twilio&page=ui.php" target="_top" class="ui-link">🔧 Open Config UI</a>
-    <a href="plugin.php?_menu=content&plugin=fpp-plugin-sms-twilio&page=messages.php" target="_top" class="ui-link secondary">📋 View Message Queue</a>
+    <a href="plugin.php?_menu=content&plugin=fpp-plugin-textmylights&page=ui.php" target="_top" class="ui-link">🔧 Open Config UI</a>
+    <a href="plugin.php?_menu=content&plugin=fpp-plugin-textmylights&page=messages.php" target="_top" class="ui-link secondary">📋 View Message Queue</a>
 
     <!-- ================= TWILIO ================= -->
     <h2>📞 Configure Twilio</h2>
@@ -61,9 +61,9 @@ $githubBase = "https://github.com/thespica93/fpp-plugin-sms-twilio";
     <h3>Settings tab</h3>
     <div class="ref"><table>
         <tr><th>Setting</th><th>What it does</th></tr>
-        <tr><td>Message Source</td><td>Twilio or Google Voice. Changing it swaps which credential fields are shown.</td></tr>
-        <tr><td>Enable Plugin</td><td>Turns SMS polling on/off. Normally controlled by the <code>Start</code> / <code>Stop</code> scheduler commands.</td></tr>
-        <tr><td>Credentials</td><td>Twilio: Account SID, Auth Token, Phone Number. Google Voice: Gmail Address, App Password, IMAP Host.</td></tr>
+        <tr><td>Message Source</td><td>Twilio or Google Voice. Changing it swaps which credential fields are shown, the rate-limit default, and the allowed responses.</td></tr>
+        <tr><td>Start / Stop</td><td>The show is started and stopped by the <code>Start</code> / <code>Stop</code> scheduler commands — no manual enable toggle.</td></tr>
+        <tr><td>Credentials</td><td>Twilio: Account SID, Auth Token, Phone Number. Google Voice: Gmail Address + App Password.</td></tr>
         <tr><td>Poll Interval</td><td>How often (seconds) to check for new messages. 2–5 is typical.</td></tr>
         <tr><td>Default “Waiting” Content</td><td><strong>Required.</strong> The playlist/sequence that loops while waiting for texts.</td></tr>
         <tr><td>Name Display Content</td><td>Optional content to play while a name is on screen (defaults to the waiting content).</td></tr>

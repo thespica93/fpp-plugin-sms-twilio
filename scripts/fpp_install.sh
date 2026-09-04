@@ -10,7 +10,7 @@
 mkdir -p /home/fpp/media/config /home/fpp/media/logs
 
 LOG="/home/fpp/media/logs/sms_plugin_install.log"
-PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-sms-twilio"
+PLUGIN_DIR="/home/fpp/media/plugins/fpp-plugin-textmylights"
 
 # Log to both file and stdout so FPP UI shows progress
 log_and_show() {

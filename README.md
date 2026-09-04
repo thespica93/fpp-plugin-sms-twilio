@@ -1,6 +1,6 @@
-# FPP SMS Twilio Plugin
+# Text My Lights
 
-> Let your audience text their name and watch it light up on your display!
+> Let your audience text their name and watch it light up on your display! Works with **Twilio** or **Google Voice**.
 
 The FPP SMS Twilio Plugin connects your [Falcon Player (FPP)](https://falconchristmas.com/) LED display to Twilio's SMS platform. Visitors text their name to your Twilio number, and it appears on your pixel display — no interruptions, no bad words, fully automatic.
 
@@ -75,8 +75,8 @@ Visitor texts name → Twilio → Plugin polls & receives → Filters applied �
 
 | File | Path |
 |------|------|
-| Plugin directory | `/opt/fpp/plugins/fpp-plugin-sms-twilio/` |
-| Configuration | `/home/fpp/media/config/plugin.fpp-sms-twilio.json` |
+| Plugin directory | `/opt/fpp/plugins/fpp-plugin-textmylights/` |
+| Configuration | `/home/fpp/media/config/plugin.fpp-textmylights.json` |
 | Whitelist | `[plugin dir]/whitelist.txt` |
 | Blacklist | `[plugin dir]/blacklist.txt` |
 | Blocked phones | `[plugin dir]/blocked_phones.json` |
@@ -102,7 +102,7 @@ Visitor texts name → Twilio → Plugin polls & receives → Filters applied �
 
 ## Support
 
-- **Issues:** [GitHub Issues](https://github.com/thespica93/fpp-plugin-sms-twilio/issues)
+- **Issues:** [GitHub Issues](https://github.com/thespica93/fpp-plugin-textmylights/issues)
 - **FPP Community:** [FalconChristmas.com Forums](https://falconchristmas.com/)
 - **Logs:** `/home/fpp/media/logs/sms_plugin.log`
 
