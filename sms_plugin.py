@@ -17,6 +17,10 @@ from collections import deque
 import os
 import struct
 import io
+import imaplib
+import email
+import email.utils
+from email.header import decode_header, make_header
 
 # PIL/Pillow for pixel-accurate text rendering (optional — falls back to FPP text API if unavailable)
 try:
@@ -45,6 +49,7 @@ LOG_FILE        = os.path.join(PLUGIN_DATA_DIR, "logs", "sms_plugin.log")
 QUEUE_FILE      = os.path.join(PLUGIN_DATA_DIR, "queue_pending.json")
 MESSAGES_DIR    = os.path.join(PLUGIN_DATA_DIR, "logs", "messages")
 LAST_SID_FILE   = os.path.join(PLUGIN_DATA_DIR, "last_message_sid.txt")
+LAST_GV_UID_FILE = os.path.join(PLUGIN_DATA_DIR, "last_gv_uid.txt")
 BLOCKLIST_FILE  = os.path.join(PLUGIN_DATA_DIR, "blocked_phones.json")
 
 FSEQ_SEQUENCE_PATH = '/home/fpp/media/sequences'
@@ -120,9 +125,18 @@ FPP_HOST = 'http://127.0.0.1'
 # Default configuration
 DEFAULT_CONFIG = {
     "enabled": False,
+    # Which inbound message source feeds the pipeline: "twilio" | "google_voice"
+    "message_source": "twilio",
     "twilio_account_sid": "",
     "twilio_auth_token": "",
     "twilio_phone_number": "",
+    # Google Voice source: scans the Gmail inbox that Voice forwards SMS to.
+    # No public GV API exists; requires "Forward messages to email" enabled in
+    # Google Voice and a Google App Password (2-Step Verification must be on).
+    "gv_email": "",
+    "gv_app_password": "",
+    "gv_imap_host": "imap.gmail.com",
+    "gv_imap_folder": "INBOX",
     "poll_interval": 2,
     "display_duration": 10,
     "max_messages_per_phone": 5,
@@ -181,7 +195,10 @@ DEFAULT_CONFIG = {
 config = DEFAULT_CONFIG.copy()
 twilio_client = None
 last_message_sid = None
+last_gv_uid = None
 polling_thread = None
+polling_source = None      # which message source the live polling_thread serves
+polling_generation = 0     # bumped to retire an obsolete poller when source changes
 display_thread = None
 stop_polling = False
 stop_display = False
@@ -193,7 +210,7 @@ queue_lock = threading.Lock()
 
 def load_config():
     """Load configuration from file, merging with defaults so new settings survive updates"""
-    global config, twilio_client, last_message_sid
+    global config, twilio_client, last_message_sid, last_gv_uid
     try:
         with open(CONFIG_FILE, 'r') as f:
             loaded = json.load(f)
@@ -281,6 +298,10 @@ def load_config():
                 logging.info(f"Loaded last message SID: {last_message_sid}")
         except:
             last_message_sid = None
+
+        # Resume Google Voice dedup marker across restarts (None => anchor to
+        # newest on first poll so the whole inbox isn't replayed)
+        last_gv_uid = load_last_gv_uid()
 
         logging.info("Configuration loaded successfully")
     except FileNotFoundError:
@@ -1368,6 +1389,11 @@ def is_on_whitelist(name):
 
 def send_sms_response(to_phone, message_type):
     """Send an SMS response to the user based on message type"""
+    # Google Voice is inbound-only (v1): no outbound auto-responses. Scanning the
+    # forwarded Gmail gives no reliable outbound path, so short-circuit here.
+    if config.get('message_source') == 'google_voice':
+        return False
+
     if not config.get(f'sms_response_{message_type}', False):
         return False
     
@@ -1626,6 +1652,23 @@ def save_last_sid(sid):
             f.write(sid)
     except Exception as e:
         logging.error(f"Error saving last SID: {e}")
+
+def save_last_gv_uid(uid):
+    """Persist the last processed Google Voice IMAP UID for dedup across restarts"""
+    try:
+        with open(LAST_GV_UID_FILE, 'w') as f:
+            f.write(str(uid))
+    except Exception as e:
+        logging.error(f"Error saving last GV UID: {e}")
+
+def load_last_gv_uid():
+    """Read the persisted Google Voice IMAP UID, or None if not set yet"""
+    try:
+        with open(LAST_GV_UID_FILE, 'r') as f:
+            val = f.read().strip()
+            return val or None
+    except Exception:
+        return None
 
 def log_message(phone, message, name, status):
     """Log received message to today's daily log file."""
@@ -2213,6 +2256,72 @@ def get_queue_status():
     
     return status
 
+def process_incoming_message(from_number, body):
+    """Run one inbound message through the full pipeline: show-live check →
+    blocked → name extraction → rate limit → duplicate → whitelist → profanity
+    → queue, sending the appropriate auto-response along the way.
+
+    Source-agnostic — used by both poll_twilio() and poll_google_voice(). Only
+    needs the sender identity and message text; per-source dedup bookkeeping
+    (SID / IMAP UID) stays in the caller. Behavior is identical to the logic
+    that previously lived inline in poll_twilio()."""
+    if not config.get('enabled', False):
+        # Show not live — reply if enabled, then discard
+        if not is_blocked(from_number):
+            send_sms_response(from_number, "show_not_live")
+            log_message(from_number, body, "", "show_not_live")
+            logging.info(f"🔴 Show not live reply sent to {from_number[-4:]}")
+        return
+
+    # Exactly one branch fires — only one SMS response is ever sent per message
+    if is_blocked(from_number):
+        logging.info(f"🚫 Blocked: {from_number[-4:]}")
+        log_message(from_number, body, "", "blocked")
+        send_sms_response(from_number, "blocked")
+
+    else:
+        name = extract_name(body)
+        logging.debug(f"👤 Extracted name: '{name}'")
+        max_msgs = config.get('max_messages_per_phone', 0)
+        msg_count = get_message_count(from_number) if max_msgs > 0 else 0
+        is_valid, _ = is_valid_name(name)
+
+        if max_msgs > 0 and msg_count >= max_msgs:
+            logging.info(f"⛔ Rate limited: {from_number[-4:]}")
+            log_message(from_number, body, "", "rate_limited")
+            send_sms_response(from_number, "rate_limited")
+
+        elif not config.get('allow_duplicate_names', False) and has_sent_name_today(from_number, name):
+            logging.info(f"🔄 Duplicate name: {name}")
+            log_message(from_number, body, name, "duplicate_name_today")
+            send_sms_response(from_number, "duplicate")
+
+        elif not is_valid and not config.get('use_whitelist', False):
+            logging.info(f"❌ Invalid format: '{body[:20]}'")
+            log_message(from_number, body, name, "invalid_format")
+            send_sms_response(from_number, "invalid_format")
+
+        elif not is_on_whitelist(name):
+            logging.info(f"❌ Not on whitelist: {name}")
+            log_message(from_number, body, name, "not_on_whitelist")
+            send_sms_response(from_number, "not_whitelisted")
+
+        elif config['profanity_filter'] and contains_profanity(body):
+            logging.info(f"❌ Profanity rejected")
+            log_message(from_number, body, name, "profanity")
+            send_sms_response(from_number, "profanity")
+
+        else:
+            success = add_to_queue(name, from_number, body)
+            if success:
+                logging.info(f"✅ Queued: {name}")
+                log_message(from_number, body, name, "queued")
+                send_sms_response(from_number, "success")
+            else:
+                logging.warning(f"❌ Queue error: {name}")
+                log_message(from_number, body, name, "error")
+
+
 def poll_twilio():
     """Poll Twilio for new messages"""
     global last_message_sid, stop_polling
@@ -2221,8 +2330,9 @@ def poll_twilio():
     first_run = last_message_sid is None
     thread_start_time = datetime.now(timezone.utc)  # used to skip pre-start messages on first run
     _current_day = datetime.now().date()
+    my_gen = polling_generation  # exit if a source switch retires this poller
 
-    while not stop_polling:
+    while not stop_polling and my_gen == polling_generation:
         try:
             # Midnight cleanup — delete daily log files older than 7 days
             today = datetime.now().date()
@@ -2284,64 +2394,9 @@ def poll_twilio():
                 logging.info(f"📱 SMS from {from_number[-4:]}: '{body[:30]}'")  # keep at INFO — new message is significant
 
                 try:
-                    if not config.get('enabled', False):
-                        # Show not live — reply if enabled, then discard
-                        if not is_blocked(from_number):
-                            send_sms_response(from_number, "show_not_live")
-                            log_message(from_number, body, "", "show_not_live")
-                            logging.info(f"🔴 Show not live reply sent to {from_number[-4:]}")
-                        last_message_sid = msg.sid
-                        save_last_sid(msg.sid)
-                        continue
-
-                    # Exactly one branch fires — only one SMS response is ever sent per message
-                    if is_blocked(from_number):
-                        logging.info(f"🚫 Blocked: {from_number[-4:]}")
-                        log_message(from_number, body, "", "blocked")
-                        send_sms_response(from_number, "blocked")
-
-                    else:
-                        name = extract_name(body)
-                        logging.debug(f"👤 Extracted name: '{name}'")
-                        max_msgs = config.get('max_messages_per_phone', 0)
-                        msg_count = get_message_count(from_number) if max_msgs > 0 else 0
-                        is_valid, _ = is_valid_name(name)
-
-                        if max_msgs > 0 and msg_count >= max_msgs:
-                            logging.info(f"⛔ Rate limited: {from_number[-4:]}")
-                            log_message(from_number, body, "", "rate_limited")
-                            send_sms_response(from_number, "rate_limited")
-
-                        elif not config.get('allow_duplicate_names', False) and has_sent_name_today(from_number, name):
-                            logging.info(f"🔄 Duplicate name: {name}")
-                            log_message(from_number, body, name, "duplicate_name_today")
-                            send_sms_response(from_number, "duplicate")
-
-                        elif not is_valid and not config.get('use_whitelist', False):
-                            logging.info(f"❌ Invalid format: '{body[:20]}'")
-                            log_message(from_number, body, name, "invalid_format")
-                            send_sms_response(from_number, "invalid_format")
-
-                        elif not is_on_whitelist(name):
-                            logging.info(f"❌ Not on whitelist: {name}")
-                            log_message(from_number, body, name, "not_on_whitelist")
-                            send_sms_response(from_number, "not_whitelisted")
-
-                        elif config['profanity_filter'] and contains_profanity(body):
-                            logging.info(f"❌ Profanity rejected")
-                            log_message(from_number, body, name, "profanity")
-                            send_sms_response(from_number, "profanity")
-
-                        else:
-                            success = add_to_queue(name, from_number, body)
-                            if success:
-                                logging.info(f"✅ Queued: {name}")
-                                log_message(from_number, body, name, "queued")
-                                send_sms_response(from_number, "success")
-                            else:
-                                logging.warning(f"❌ Queue error: {name}")
-                                log_message(from_number, body, name, "error")
-
+                    process_incoming_message(from_number, body)
+                    # Advance the dedup marker only on success — an exception
+                    # leaves the SID unsaved so the message is retried next poll.
                     last_message_sid = msg.sid
                     save_last_sid(msg.sid)
                     logging.debug(f"💾 Saved SID: {msg.sid[:10]}...")
@@ -2355,8 +2410,239 @@ def poll_twilio():
             logging.error(f"💥 Error polling Twilio: {e}")
         
         time.sleep(config['poll_interval'])
-    
+
     logging.info("🛑 Twilio polling stopped")
+
+
+# ============================================================================
+# GOOGLE VOICE SOURCE (Gmail IMAP scanning)
+# ----------------------------------------------------------------------------
+# Google Voice has no public API. When "Forward messages to email" is enabled in
+# Voice settings, each incoming SMS is emailed to the linked Gmail account from
+# an @txt.voice.google.com address. We scan that inbox over IMAP and feed parsed
+# messages through the same process_incoming_message() pipeline as Twilio.
+# Inbound-only in v1: no outbound auto-responses (see send_sms_response()).
+# ============================================================================
+
+# Markers that begin the Google Voice footer appended below the actual SMS text.
+# The message body is everything before the earliest marker found.
+_GV_FOOTER_MARKERS = (
+    "To respond to this text message",
+    "YOUR ACCOUNT",
+    "This message was sent to you",
+    "https://voice.google.com",
+    "http://voice.google.com",
+)
+
+
+def _gv_decode_header(value):
+    """Decode an RFC 2047 encoded header (e.g. a UTF-8 sender name) to str."""
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value))).strip()
+    except Exception:
+        return str(value).strip()
+
+
+def _gv_get_plain_body(msg):
+    """Return the text/plain body of an email.message.Message, decoded to str."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain' and \
+               'attachment' not in str(part.get('Content-Disposition', '')).lower():
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or 'utf-8'
+                    return payload.decode(charset, errors='replace')
+        return ''
+    payload = msg.get_payload(decode=True)
+    if payload is None:
+        return msg.get_payload() or ''
+    charset = msg.get_content_charset() or 'utf-8'
+    return payload.decode(charset, errors='replace')
+
+
+def parse_gv_email(raw_bytes):
+    """Parse a Google Voice SMS-forwarding email into (from_id, body).
+
+    The forwarding format is undocumented and can change, so this is deliberately
+    defensive and logs the raw email on failure so drift is diagnosable. Returns
+    None for mail that isn't a parseable GV SMS.
+
+    Sender identity: the From display name is the saved contact name, or — for an
+    unknown sender — the raw phone number. When it looks like a number we
+    normalize it to digits so blocklist / rate-limit keys line up with how a
+    number would be stored; otherwise the contact name is used as the key.
+    """
+    try:
+        msg = email.message_from_bytes(raw_bytes)
+
+        # Only handle mail actually forwarded by Google Voice
+        from_hdr = str(msg.get('From', ''))
+        if 'voice.google.com' not in from_hdr.lower():
+            return None
+
+        display_name, _addr = email.utils.parseaddr(from_hdr)
+        display_name = _gv_decode_header(display_name)
+
+        text = _gv_get_plain_body(msg)
+
+        # Strip the GV footer: cut at the earliest known footer marker
+        cut = len(text)
+        for marker in _GV_FOOTER_MARKERS:
+            idx = text.find(marker)
+            if idx != -1:
+                cut = min(cut, idx)
+        body = text[:cut].strip()
+
+        if not body:
+            logging.warning("GV email parsed but message body was empty; raw logged at debug")
+            logging.debug(f"GV raw (empty body): {raw_bytes[:2000]!r}")
+            return None
+
+        # Normalize a numeric display name to digits (E.164-ish); otherwise keep
+        # the contact name as the sender key.
+        from_id = display_name or "Guest"
+        if display_name and re.fullmatch(r'[\d\s\-\.\(\)\+]+', display_name):
+            digits = re.sub(r'\D', '', display_name)
+            if len(digits) >= 7:
+                from_id = ('+' if display_name.strip().startswith('+') else '') + digits
+
+        return from_id, body
+    except Exception as e:
+        logging.error(f"Error parsing GV email: {e}")
+        logging.debug(f"GV raw (parse error): {raw_bytes[:2000]!r}")
+        return None
+
+
+def poll_google_voice():
+    """Poll a Gmail inbox (IMAP) for Google Voice SMS-forwarding emails and feed
+    them through the shared processing pipeline. Mirrors poll_twilio()'s loop
+    shape (midnight cleanup, first-run anchoring, per-message dedup)."""
+    global last_gv_uid, stop_polling
+
+    logging.info("🚀 Google Voice polling started")
+    first_run = last_gv_uid is None
+    _current_day = datetime.now().date()
+    my_gen = polling_generation  # exit if a source switch retires this poller
+
+    while not stop_polling and my_gen == polling_generation:
+        try:
+            # Midnight cleanup — delete daily log files older than 7 days
+            today = datetime.now().date()
+            if today != _current_day:
+                _current_day = today
+                try:
+                    cleanup_old_logs()
+                    logging.error(f"🌙 Midnight: old daily logs cleaned up for {today}")
+                except Exception as e:
+                    logging.error(f"Error during midnight cleanup: {e}")
+
+            email_addr = config.get('gv_email', '').strip()
+            app_pw = config.get('gv_app_password', '').strip()
+            if not email_addr or not app_pw:
+                time.sleep(config.get('poll_interval', 2))
+                continue
+
+            imap = None
+            try:
+                imap = imaplib.IMAP4_SSL(config.get('gv_imap_host', 'imap.gmail.com'))
+                imap.login(email_addr, app_pw)
+                imap.select(config.get('gv_imap_folder', 'INBOX'))
+
+                # UIDs of all Google Voice messages (IMAP FROM matches a substring)
+                typ, data = imap.uid('search', None, 'FROM', 'txt.voice.google.com')
+                raw_uids = data[0].split() if (typ == 'OK' and data and data[0]) else []
+                uids = [u.decode() if isinstance(u, bytes) else str(u) for u in raw_uids]
+
+                # Keep only UIDs newer than the last processed one (UIDs are
+                # monotonic within a mailbox)
+                if last_gv_uid:
+                    try:
+                        last_int = int(last_gv_uid)
+                        uids = [u for u in uids if int(u) > last_int]
+                    except ValueError:
+                        pass
+
+                if first_run:
+                    # Anchor to the newest UID so we don't replay the inbox backlog
+                    if uids:
+                        newest = max(int(u) for u in uids)
+                        last_gv_uid = str(newest)
+                        save_last_gv_uid(last_gv_uid)
+                    first_run = False
+                    uids = []
+                    logging.info("⚙️ GV first run: baseline UID set, backlog skipped")
+
+                for uid in sorted(uids, key=int):
+                    try:
+                        typ, msg_data = imap.uid('fetch', uid, '(RFC822)')
+                        if typ == 'OK' and msg_data and msg_data[0]:
+                            raw = msg_data[0][1]
+                            parsed = parse_gv_email(raw)
+                            if parsed:
+                                from_id, body = parsed
+                                logging.info(f"📱 GV SMS from {from_id[-4:]}: '{body[:30]}'")
+                                process_incoming_message(from_id, body)
+                    except Exception as e:
+                        logging.error(f"💥 EXCEPTION processing GV message {uid}: {e}")
+                        import traceback
+                        logging.error(traceback.format_exc())
+                    # Advance the dedup marker even for skipped/unparseable mail so
+                    # the same UID isn't fetched again forever
+                    last_gv_uid = uid
+                    save_last_gv_uid(uid)
+            finally:
+                if imap is not None:
+                    try:
+                        imap.logout()
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logging.error(f"💥 Error polling Google Voice: {e}")
+
+        time.sleep(config.get('poll_interval', 2))
+
+    logging.info("🛑 Google Voice polling stopped")
+
+
+def start_polling_if_needed():
+    """Ensure the polling thread for the currently selected message source is
+    running (and that no poller for the *other* source is). Returns True if a
+    poller is (or is now) running for the selected source.
+
+    If a poller for a different source is already live, its generation is bumped
+    so it exits on its next loop, and a fresh poller is started — this lets the
+    provider be switched from the UI without a service restart."""
+    global polling_thread, polling_source, polling_generation
+
+    source = config.get('message_source', 'twilio')
+    if source == 'google_voice':
+        if not (config.get('gv_email') and config.get('gv_app_password')):
+            logging.warning("⚠️  Google Voice selected but email/app password not set; polling not started")
+            return False
+        target = poll_google_voice
+    else:
+        if not twilio_client:
+            return False
+        target = poll_twilio
+
+    # Correct poller already running — nothing to do
+    if polling_thread and polling_thread.is_alive() and polling_source == source:
+        return True
+
+    # Bumping the generation retires any poller currently running for the other
+    # source (it sees my_gen != polling_generation and exits its loop).
+    polling_generation += 1
+    polling_thread = threading.Thread(target=target, daemon=True)
+    polling_source = source
+    polling_thread.start()
+    logging.info(f"▶️  Polling started ({source})")
+    return True
+
+
 @app.route('/')
 def index():
     """Main configuration page"""
@@ -2442,25 +2728,61 @@ def index():
                 <!-- LEFT COLUMN: Twilio + FPP Display + Message Settings -->
                 <div class="column">
                     <div class="section">
-                        <h2>Twilio Settings</h2>
+                        <h2>Message Source</h2>
+                        <label>SMS Provider:</label>
+                        <select id="message_source">
+                            <option value="twilio" {{ 'selected' if config.get('message_source','twilio') != 'google_voice' else '' }}>Twilio</option>
+                            <option value="google_voice" {{ 'selected' if config.get('message_source','twilio') == 'google_voice' else '' }}>Google Voice (Gmail)</option>
+                        </select>
+                        <p class="help-text">Choose where incoming text messages come from. Twilio uses its API; Google Voice scans the Gmail inbox that Voice forwards texts to.</p>
+
                         <label>Enable Plugin:</label>
                         <label class="toggle-switch"><input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}><span class="toggle-slider"></span></label>
                         <label class="checkbox-label">Enable SMS polling</label>
 
-                        <label>Twilio Account SID:</label>
-                        <input type="text" id="account_sid" value="{{ config.twilio_account_sid }}" placeholder="Starts with AC...">
+                        <!-- Twilio credentials — shown when Message Source = Twilio -->
+                        <div id="twilio_creds">
+                            <h3 style="margin:14px 0 6px;">Twilio Settings</h3>
+                            <label>Twilio Account SID:</label>
+                            <input type="text" id="account_sid" value="{{ config.twilio_account_sid }}" placeholder="Starts with AC...">
 
-                        <label>Twilio Auth Token:</label>
-                        <input type="password" id="auth_token" value="{{ config.twilio_auth_token }}">
+                            <label>Twilio Auth Token:</label>
+                            <input type="password" id="auth_token" value="{{ config.twilio_auth_token }}">
 
-                        <label>Twilio Phone Number:</label>
-                        <input type="text" id="phone_number" value="{{ config.twilio_phone_number }}" placeholder="+1234567890">
+                            <label>Twilio Phone Number:</label>
+                            <input type="text" id="phone_number" value="{{ config.twilio_phone_number }}" placeholder="+1234567890">
+
+                            <button class="test-btn" onclick="testConnection()">🔌 Test Twilio Connection</button>
+                            <div id="twilio_test_result" style="margin-top: 8px; font-size: 14px;"></div>
+                        </div>
+
+                        <!-- Google Voice credentials — shown when Message Source = Google Voice -->
+                        <div id="gv_creds" style="display:none;">
+                            <h3 style="margin:14px 0 6px;">Google Voice Settings</h3>
+                            <div style="background:#e3f2fd; color:#0d47a1; border-radius:5px; padding:8px 12px; margin-bottom:10px; font-size:13px;">
+                                <strong>One-time setup:</strong>
+                                <ol style="margin:6px 0 0 18px; padding:0;">
+                                    <li>In <a href="https://voice.google.com/settings" target="_blank">Google Voice → Settings → Messages</a>, turn on <em>“Forward messages to email.”</em></li>
+                                    <li>On your Google account, turn on <a href="https://myaccount.google.com/signinoptions/two-step-verification" target="_blank">2-Step Verification</a>, then create an <a href="https://myaccount.google.com/apppasswords" target="_blank">App Password</a> (16 characters).</li>
+                                    <li>Enter your Gmail address and paste the app password below, then click Test.</li>
+                                </ol>
+                            </div>
+                            <label>Gmail Address:</label>
+                            <input type="text" id="gv_email" value="{{ config.get('gv_email','') }}" placeholder="you@gmail.com">
+
+                            <label>App Password:</label>
+                            <input type="password" id="gv_app_password" value="{{ config.get('gv_app_password','') }}" placeholder="16-character app password">
+
+                            <label>IMAP Host <span style="color:#888;font-size:12px;">(advanced — leave default)</span>:</label>
+                            <input type="text" id="gv_imap_host" value="{{ config.get('gv_imap_host','imap.gmail.com') }}" placeholder="imap.gmail.com">
+
+                            <button class="test-btn" onclick="testGoogleVoice()">🔌 Test Google Voice Connection</button>
+                            <div id="gv_test_result" style="margin-top: 8px; font-size: 14px;"></div>
+                            <p class="help-text" style="margin-top:8px;">ℹ️ Google Voice is inbound-only: names are displayed, but automatic SMS replies (below) are not sent in this mode.</p>
+                        </div>
 
                         <label>Poll Interval (seconds):</label>
                         <input type="number" id="poll_interval" value="{{ config.poll_interval }}" min="1" max="60">
-
-                        <button class="test-btn" onclick="testConnection()">🔌 Test Twilio Connection</button>
-                        <div id="twilio_test_result" style="margin-top: 8px; font-size: 14px;"></div>
 
                         <hr style="border: none; border-top: 1px solid #ddd; margin: 15px 0;">
                         <h2 style="margin-top: 0;">FPP Display Settings</h2>
@@ -4586,9 +4908,13 @@ var _saveTimer = null;
                 status.textContent = 'Saving...';
 
                 const data = {
+                    message_source: document.getElementById('message_source').value,
                     twilio_account_sid: document.getElementById('account_sid').value,
                     twilio_auth_token: document.getElementById('auth_token').value,
                     twilio_phone_number: document.getElementById('phone_number').value,
+                    gv_email: document.getElementById('gv_email').value,
+                    gv_app_password: document.getElementById('gv_app_password').value,
+                    gv_imap_host: document.getElementById('gv_imap_host').value || 'imap.gmail.com',
                     poll_interval: parseInt(document.getElementById('poll_interval').value),
                     display_duration: parseInt(document.getElementById('display_duration').value),
                     max_messages_per_phone: parseInt(document.getElementById('max_messages').value),
@@ -4669,6 +4995,20 @@ var _saveTimer = null;
                     });
                 });
 
+                // Message source selector — swap the visible credential block and save
+                var srcEl = document.getElementById('message_source');
+                if (srcEl) srcEl.addEventListener('change', function() {
+                    updateSourceUI();
+                    saveConfig();
+                });
+                // Google Voice credential fields — save on blur (like Twilio creds)
+                ['gv_email','gv_app_password','gv_imap_host'].forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (el) el.addEventListener('blur', saveConfig);
+                });
+                // Reflect the saved source on initial load
+                updateSourceUI();
+
                 // Checkboxes, selects, color picker — save immediately on change
                 ['profanity_filter','use_whitelist','allow_duplicate_names',
                  'default_playlist','name_display_playlist','overlay_model_name',
@@ -4721,6 +5061,38 @@ var _saveTimer = null;
                         result.innerHTML = '<span style="color:#f44336;">❌ Connection failed: ' + data.error + '</span>';
                     }
                 });
+            }
+
+            // Show the credential block for the selected message source, hide the other.
+            function updateSourceUI() {
+                var srcEl = document.getElementById('message_source');
+                if (!srcEl) return;
+                var isGV = srcEl.value === 'google_voice';
+                var tw = document.getElementById('twilio_creds');
+                var gv = document.getElementById('gv_creds');
+                if (tw) tw.style.display = isGV ? 'none' : '';
+                if (gv) gv.style.display = isGV ? '' : 'none';
+            }
+
+            function testGoogleVoice() {
+                var result = document.getElementById('gv_test_result');
+                result.innerHTML = '<span style="color:#555;">Saving &amp; testing...</span>';
+                // Save first so the server tests the latest credentials, then test.
+                saveConfig();
+                setTimeout(function() {
+                    fetch('/api/test_gv')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.success) {
+                            result.innerHTML = '<span style="color:#4CAF50;">✅ Google Voice inbox connected!</span>';
+                        } else {
+                            result.innerHTML = '<span style="color:#f44336;">❌ ' + data.error + '</span>';
+                        }
+                    })
+                    .catch(function() {
+                        result.innerHTML = '<span style="color:#f44336;">❌ Test request failed.</span>';
+                    });
+                }, 600);
             }
 
             function viewMessages() {
@@ -4916,17 +5288,17 @@ def update_config():
 
         save_config()
 
+        # Keep the Twilio client in sync whenever credentials are present, so the
+        # Twilio path works exactly as before regardless of the selected source.
         if config['twilio_account_sid'] and config['twilio_auth_token']:
             twilio_client = Client(
                 config['twilio_account_sid'],
                 config['twilio_auth_token']
             )
-            # Start polling thread if not already running (e.g. credentials entered
-            # after TwilioStart was called, or updated mid-show)
-            if not polling_thread or not polling_thread.is_alive():
-                polling_thread = threading.Thread(target=poll_twilio, daemon=True)
-                polling_thread.start()
-                logging.error("▶️ Polling thread started after credential update")
+
+        # Start the poller for the selected source if not already running (e.g.
+        # credentials entered after TwilioStart, or updated mid-show).
+        start_polling_if_needed()
 
         return jsonify({"success": True})
     except Exception as e:
@@ -5274,9 +5646,34 @@ def test_twilio():
     try:
         if not twilio_client:
             return jsonify({"success": False, "error": "Twilio client not initialized"})
-        
+
         account = twilio_client.api.accounts(config['twilio_account_sid']).fetch()
         return jsonify({"success": True, "account": account.friendly_name})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route('/api/test_gv')
+def test_google_voice_conn():
+    """Verify the Google Voice Gmail IMAP login works (used by the config UI)."""
+    email_addr = config.get('gv_email', '').strip()
+    app_pw = config.get('gv_app_password', '').strip()
+    if not email_addr or not app_pw:
+        return jsonify({"success": False, "error": "Enter your Gmail address and app password first."})
+    try:
+        imap = imaplib.IMAP4_SSL(config.get('gv_imap_host', 'imap.gmail.com'))
+        try:
+            imap.login(email_addr, app_pw)
+            imap.select(config.get('gv_imap_folder', 'INBOX'))
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+        return jsonify({"success": True})
+    except imaplib.IMAP4.error as e:
+        return jsonify({"success": False,
+                        "error": f"Login failed ({e}). Use a Google App Password (not your normal password), "
+                                 "with 2-Step Verification enabled and IMAP turned on in Gmail."})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -6412,14 +6809,9 @@ def api_activate():
     stop_polling = False
     save_config()
 
-    # Start polling thread if not already running
-    if twilio_client:
-        if not polling_thread or not polling_thread.is_alive():
-            polling_thread = threading.Thread(target=poll_twilio, daemon=True)
-            polling_thread.start()
-            logging.info("▶️  Activate: SMS polling started")
-    else:
-        logging.warning("⚠️  Activate: Twilio credentials not configured, polling not started")
+    # Start the poller for the selected message source if not already running
+    if not start_polling_if_needed():
+        logging.warning("⚠️  Activate: message source not configured, polling not started")
 
     # Start the default waiting playlist
     result = start_default_playlist()
@@ -6506,11 +6898,10 @@ if __name__ == '__main__':
     display_thread = threading.Thread(target=display_worker, daemon=True)
     display_thread.start()
 
-    # Polling thread starts if Twilio is configured — runs in standby (show_not_live
-    # replies) when disabled, and processes names normally when enabled
-    if twilio_client:
-        polling_thread = threading.Thread(target=poll_twilio, daemon=True)
-        polling_thread.start()
+    # Polling thread starts if the selected source is configured — runs in
+    # standby (show_not_live replies) when disabled, and processes names normally
+    # when enabled. Picks Twilio or Google Voice based on message_source.
+    start_polling_if_needed()
 
     # Start the default waiting playlist on launch if the plugin is already enabled
     if config['enabled']:
