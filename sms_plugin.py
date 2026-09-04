@@ -2424,14 +2424,15 @@ def poll_twilio():
 # Inbound-only in v1: no outbound auto-responses (see send_sms_response()).
 # ============================================================================
 
-# Markers that begin the Google Voice footer appended below the actual SMS text.
-# The message body is everything before the earliest marker found.
+# Markers that begin the Google Voice footer, which sits BELOW the SMS text.
+# Everything from the earliest marker onward is footer and is discarded. These
+# must be strings that only ever appear in the footer — NOT the bare
+# "voice.google.com" URL, which also appears in the logo link ABOVE the message.
 _GV_FOOTER_MARKERS = (
-    "To respond to this text message",
     "YOUR ACCOUNT",
+    "To respond to this text message",
+    "This email was sent to you",
     "This message was sent to you",
-    "https://voice.google.com",
-    "http://voice.google.com",
 )
 
 
@@ -2445,22 +2446,69 @@ def _gv_decode_header(value):
         return str(value).strip()
 
 
-def _gv_get_plain_body(msg):
-    """Return the text/plain body of an email.message.Message, decoded to str."""
+def _gv_get_part_body(msg, want_type):
+    """Return the decoded body of the first part matching want_type
+    ('text/plain' or 'text/html'), or '' if none."""
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == 'text/plain' and \
+            if part.get_content_type() == want_type and \
                'attachment' not in str(part.get('Content-Disposition', '')).lower():
                 payload = part.get_payload(decode=True)
                 if payload:
                     charset = part.get_content_charset() or 'utf-8'
                     return payload.decode(charset, errors='replace')
         return ''
-    payload = msg.get_payload(decode=True)
-    if payload is None:
-        return msg.get_payload() or ''
-    charset = msg.get_content_charset() or 'utf-8'
-    return payload.decode(charset, errors='replace')
+    if msg.get_content_type() == want_type:
+        payload = msg.get_payload(decode=True)
+        if payload is None:
+            return msg.get_payload() or ''
+        charset = msg.get_content_charset() or 'utf-8'
+        return payload.decode(charset, errors='replace')
+    return ''
+
+
+def _gv_html_to_text(html):
+    """Crudely convert HTML to text for the fallback path: drop <style>/<script>,
+    replace tags with spaces, and unescape entities."""
+    import html as _html_mod
+    html = re.sub(r'(?is)<(style|script|head).*?</\1>', ' ', html)
+    text = re.sub(r'(?s)<[^>]+>', ' ', html)
+    return _html_mod.unescape(text)
+
+
+def _gv_extract_message(text):
+    """Pull just the SMS text out of a Google Voice forwarding-email body.
+
+    The GV plain-text layout is:
+        <blank lines>
+        <https://voice.google.com>       <- logo link (skip)
+        the actual message               <- one or more lines (keep)
+        YOUR ACCOUNT <...> HELP CENTER   <- footer starts here (cut)
+    So: cut everything from the footer down, then drop leading blank lines and
+    any bare <URL> logo/link lines, and join what's left."""
+    if not text:
+        return ""
+    # Cut the footer (and everything after it)
+    cut = len(text)
+    for marker in _GV_FOOTER_MARKERS:
+        idx = text.find(marker)
+        if idx != -1:
+            cut = min(cut, idx)
+    head = text[:cut]
+
+    message_lines = []
+    for ln in head.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        # Skip the Google Voice logo/link line(s): a line that is only a <URL>
+        if re.fullmatch(r'<https?://[^>]+>', s):
+            continue
+        # Skip any leftover bare voice.google.com link fragments
+        if 'voice.google.com' in s and re.fullmatch(r'[<>\s]*https?://\S+[<>\s]*', s):
+            continue
+        message_lines.append(s)
+    return ' '.join(message_lines).strip()
 
 
 def parse_gv_email(raw_bytes):
@@ -2486,15 +2534,11 @@ def parse_gv_email(raw_bytes):
         display_name, _addr = email.utils.parseaddr(from_hdr)
         display_name = _gv_decode_header(display_name)
 
-        text = _gv_get_plain_body(msg)
-
-        # Strip the GV footer: cut at the earliest known footer marker
-        cut = len(text)
-        for marker in _GV_FOOTER_MARKERS:
-            idx = text.find(marker)
-            if idx != -1:
-                cut = min(cut, idx)
-        body = text[:cut].strip()
+        # The message text lives in the text/plain part, between the logo link
+        # and the footer. Fall back to the HTML part if plain yields nothing.
+        body = _gv_extract_message(_gv_get_part_body(msg, 'text/plain'))
+        if not body:
+            body = _gv_extract_message(_gv_html_to_text(_gv_get_part_body(msg, 'text/html')))
 
         if not body:
             logging.warning("GV email parsed but message body was empty; raw logged at debug")
