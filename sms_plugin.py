@@ -2972,9 +2972,6 @@ def index():
                             <label>App Password:</label>
                             <input type="password" id="gv_app_password" value="{{ config.get('gv_app_password','') }}" placeholder="16-character app password">
 
-                            <label>IMAP Host <span style="color:#888;font-size:12px;">(advanced — leave default)</span>:</label>
-                            <input type="text" id="gv_imap_host" value="{{ config.get('gv_imap_host','imap.gmail.com') }}" placeholder="imap.gmail.com">
-
                             <button class="test-btn" onclick="testGoogleVoice()">🔌 Test Google Voice Connection</button>
                             <div id="gv_test_result" style="margin-top: 8px; font-size: 14px;"></div>
                             <p class="help-text" style="margin-top:8px;">ℹ️ Replies are sent by emailing Google Voice back (the app password must allow SMTP). Auto-responses on the <strong>SMS Responses</strong> tab work in this mode. Reply delivery via Google Voice is best-effort and may be rate-limited.</p>
@@ -5158,7 +5155,6 @@ var _saveTimer = null;
                     twilio_phone_number: document.getElementById('phone_number').value,
                     gv_email: document.getElementById('gv_email').value,
                     gv_app_password: document.getElementById('gv_app_password').value,
-                    gv_imap_host: document.getElementById('gv_imap_host').value || 'imap.gmail.com',
                     poll_interval: parseInt(document.getElementById('poll_interval').value),
                     display_duration: parseInt(document.getElementById('display_duration').value),
                     max_messages_per_phone: parseInt(document.getElementById('max_messages').value),
@@ -5249,7 +5245,7 @@ var _saveTimer = null;
                     saveConfig();
                 });
                 // Google Voice credential fields — save on blur (like Twilio creds)
-                ['gv_email','gv_app_password','gv_imap_host'].forEach(function(id) {
+                ['gv_email','gv_app_password'].forEach(function(id) {
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('blur', saveConfig);
                 });
