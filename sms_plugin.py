@@ -349,13 +349,15 @@ def _apply_source_policy():
             if key.startswith('sms_response_'):
                 config[key] = False
 
-    # Dependent response locks (apply to whichever source)
+    # Dependent response locks: force off ONLY the source-tied ones (rate limit /
+    # duplicates are set by the source, so their state isn't a user choice to keep).
+    # Invalid-format is NOT forced off here — the whitelist only greys it in the UI
+    # and the send path already skips it while the whitelist is on, so the user's
+    # on/off choice is preserved for when the whitelist is turned back off.
     if config.get('max_messages_per_phone', 0) == 0:
         config['sms_response_rate_limited'] = False
     if config.get('allow_duplicate_names', False):
         config['sms_response_duplicate'] = False
-    if config.get('use_whitelist', False):
-        config['sms_response_invalid_format'] = False
 
 _font_path_cache = {}
 
@@ -3165,16 +3167,17 @@ def index():
                     var cb = document.getElementById('sms_response_invalid_format');
                     var warn = document.getElementById('invalid_format_disabled_warning');
                     if (!row) return;  // SMS-responses tab not parsed yet (init runs later)
+                    // Only disable/grey the row — never change the checkbox's own state,
+                    // so toggling the whitelist off restores the prior on/off choice.
+                    if (cb) cb.disabled = whitelistOn;
+                    if (warn) warn.style.display = whitelistOn ? '' : 'none';
                     if (whitelistOn) {
                         row.classList.add('locked');
                         row.classList.remove('enabled');
-                        if (cb) { cb.checked = false; cb.disabled = true; }
                     } else {
                         row.classList.remove('locked');
-                        if (cb) cb.disabled = false;
-                        toggleResp('invalid_format');
+                        toggleResp('invalid_format');  // reflect the preserved state
                     }
-                    if (warn) warn.style.display = whitelistOn ? '' : 'none';
                 }
                 // Rate-Limited response is meaningless when Max Messages Per Phone is 0
                 // (unlimited) — no one is ever rate limited. Lock the row live.
@@ -3526,15 +3529,18 @@ def index():
             <div class="section" style="border: 2px solid #2196F3; margin-top: 20px;">
                 <h2>📱 SMS Auto-Response Settings</h2>
                 <p class="help-text">💡 Enable a response for each event type individually. Only one response is ever sent per incoming message.</p>
-                <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:10px 14px; margin:10px 0; font-size:13px;">
-                    ⚠️ <strong>Message &amp; data rates may apply.</strong>
-                </div>
-                <div style="background:#f8d7da; border:2px solid #f5c6cb; color:#721c24; border-radius:6px; padding:12px 16px; margin:10px 0; font-size:14px; font-weight:bold;">
-                    ⛔ SMS responses will NOT be delivered unless your Twilio number is registered:<br>
-                    <span style="font-weight:normal; font-size:13px; display:block; margin-top:6px;">
-                        • <strong>Local 10-digit number</strong> — requires a valid A2P 10DLC brand &amp; campaign approval<br>
-                        • <strong>Toll-free number</strong> — requires a completed toll-free verification (recommended)
-                    </span>
+                <!-- Twilio-specific delivery warnings — hidden when Google Voice is the source -->
+                <div id="twilio_sms_warnings">
+                    <div style="background:#fff3cd; border:1px solid #ffc107; color:#856404; border-radius:5px; padding:10px 14px; margin:10px 0; font-size:13px;">
+                        ⚠️ <strong>Message &amp; data rates may apply.</strong>
+                    </div>
+                    <div style="background:#f8d7da; border:2px solid #f5c6cb; color:#721c24; border-radius:6px; padding:12px 16px; margin:10px 0; font-size:14px; font-weight:bold;">
+                        ⛔ SMS responses will NOT be delivered unless your Twilio number is registered:<br>
+                        <span style="font-weight:normal; font-size:13px; display:block; margin-top:6px;">
+                            • <strong>Local 10-digit number</strong> — requires a valid A2P 10DLC brand &amp; campaign approval<br>
+                            • <strong>Toll-free number</strong> — requires a completed toll-free verification (recommended)
+                        </span>
+                    </div>
                 </div>
 
                 <style>
@@ -3600,7 +3606,7 @@ def index():
                 <div id="row_invalid_format" class="resp-row{% if config.get('use_whitelist', False) %} locked{% endif %}">
                     <div class="resp-toggle">
                         <label class="toggle-switch"><input type="checkbox" id="sms_response_invalid_format"
-                               {{ 'checked' if config.get('sms_response_invalid_format', False) and not config.get('use_whitelist', False) else '' }}
+                               {{ 'checked' if config.get('sms_response_invalid_format', False) else '' }}
                                {{ 'disabled' if config.get('use_whitelist', False) else '' }}
                                onchange="toggleResp('invalid_format')"><span class="toggle-slider"></span></label>
                         <label for="sms_response_invalid_format" style="margin-left:10px;vertical-align:middle;">❌ Invalid Format — Send Response</label>
@@ -5193,7 +5199,7 @@ var _saveTimer = null;
                     sms_response_profanity: document.getElementById('sms_response_profanity').checked,
                     sms_response_rate_limited: document.getElementById('sms_response_rate_limited').checked,
                     sms_response_duplicate: document.getElementById('sms_response_duplicate').checked,
-                    sms_response_invalid_format: !document.getElementById('use_whitelist').checked && document.getElementById('sms_response_invalid_format').checked,
+                    sms_response_invalid_format: document.getElementById('sms_response_invalid_format').checked,
                     sms_response_not_whitelisted: document.getElementById('sms_response_not_whitelisted').checked,
                     sms_response_blocked: document.getElementById('sms_response_blocked').checked,
                     response_success: document.getElementById('response_success').value,
@@ -5330,6 +5336,9 @@ var _saveTimer = null;
                         if (setBtn) showTab('settings', setBtn);
                     }
                 }
+                // Twilio A2P/registration warnings are irrelevant for Google Voice
+                var twWarn = document.getElementById('twilio_sms_warnings');
+                if (twWarn) twWarn.style.display = isGV ? 'none' : '';
             }
 
             function testGoogleVoice() {
