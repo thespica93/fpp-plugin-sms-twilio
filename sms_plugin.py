@@ -308,6 +308,10 @@ def load_config():
         # newest on first poll so the whole inbox isn't replayed)
         last_gv_uid = load_last_gv_uid()
 
+        # Enforce source-tied settings on startup (rate limit, Twilio responses off)
+        _apply_source_policy()
+        save_config()
+
         logging.info("Configuration loaded successfully")
     except FileNotFoundError:
         save_config()
@@ -323,6 +327,35 @@ def save_config():
         logging.info("Configuration saved")
     except Exception as e:
         logging.error(f"Error saving config: {e}")
+
+
+def _apply_source_policy():
+    """Enforce settings tied to the selected message source, and lock responses
+    whose trigger can't fire — so config stays consistent however it was set:
+      - Google Voice: unlimited inbound (rate limit 0), duplicate names allowed
+      - Twilio: rate limit 5, duplicates disallowed, auto-responses OFF (untested)
+      - A response is force-disabled when its condition can never happen:
+          rate-limited (limit 0), duplicate (duplicates allowed),
+          invalid-format (whitelist on)
+    Mutates `config` in place; caller is responsible for saving."""
+    source = config.get('message_source', 'twilio')
+    if source == 'google_voice':
+        config['max_messages_per_phone'] = 0
+        config['allow_duplicate_names'] = True
+    else:  # twilio
+        config['max_messages_per_phone'] = 5
+        config['allow_duplicate_names'] = False
+        for key in list(config.keys()):
+            if key.startswith('sms_response_'):
+                config[key] = False
+
+    # Dependent response locks (apply to whichever source)
+    if config.get('max_messages_per_phone', 0) == 0:
+        config['sms_response_rate_limited'] = False
+    if config.get('allow_duplicate_names', False):
+        config['sms_response_duplicate'] = False
+    if config.get('use_whitelist', False):
+        config['sms_response_invalid_format'] = False
 
 _font_path_cache = {}
 
@@ -2867,7 +2900,7 @@ def index():
         <div class="tabs" style="display:flex; align-items:center; gap:2px;">
             <button class="tab-btn active" onclick="showTab('settings', this)">⚙️ Settings</button>
             <button class="tab-btn" onclick="showTab('display', this)">🖥️ Display</button>
-            <button class="tab-btn" onclick="showTab('sms', this)">📱 SMS Responses</button>
+            <button class="tab-btn" id="tabbtn-sms" onclick="showTab('sms', this)">📱 SMS Responses</button>
             <button class="tab-btn" onclick="showTab('testing', this)">🧪 Testing</button>
             <button class="view-btn" onclick="viewMessages()" style="margin:0 0 0 10px; padding:7px 14px; font-size:13px;">📋 View Message Queue</button>
             <span id="autosave_status" style="font-size:13px; margin-left:8px;"></span>
@@ -2995,6 +3028,7 @@ def index():
 
                         <label>Max Messages Per Phone (0 = unlimited):</label>
                         <input type="number" id="max_messages" value="{{ config.max_messages_per_phone }}" min="0" max="100">
+                        <p class="help-text">⚙️ Set automatically by Message Source: Google Voice = unlimited (0), Twilio = 5.</p>
 
                         <div id="max_length_section">
                             <label>Max Message Length:</label>
@@ -3030,7 +3064,7 @@ def index():
 
                         <hr style="border:none; border-top:1px solid #444; margin:15px 0;">
 
-                        <label class="toggle-switch"><input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); saveConfig();"><span class="toggle-slider"></span></label>
+                        <label class="toggle-switch"><input type="checkbox" id="use_whitelist" {{ 'checked' if config.get('use_whitelist', False) else '' }} onchange="updateFormatRules(); checkFiltersState(); checkWhitelistResponseState(); saveConfig();"><span class="toggle-slider"></span></label>
                         <label class="checkbox-label">Enable Name Whitelist — only allow approved names</label><br>
                         <button class="view-btn" onclick="location.href='/whitelist'" style="margin-top:6px;">📋 Manage Whitelist</button>
                     </div>
@@ -3127,6 +3161,46 @@ def index():
                     document.getElementById('max_length_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
                     document.getElementById('blacklist_disabled_warning').style.display = whitelistOn ? 'block' : 'none';
                     document.getElementById('profanity_disabled_warning').style.display = (!whitelistOn && !profanityOn) ? 'block' : 'none';
+                }
+                // Invalid-Format response is meaningless when the whitelist is on
+                // (names are validated against the list, not format rules). Lock the
+                // row live when whitelist is enabled, and restore it when disabled.
+                function checkWhitelistResponseState() {
+                    var whitelistOn = document.getElementById('use_whitelist').checked;
+                    var row = document.getElementById('row_invalid_format');
+                    var cb = document.getElementById('sms_response_invalid_format');
+                    var warn = document.getElementById('invalid_format_disabled_warning');
+                    if (!row) return;  // SMS-responses tab not parsed yet (init runs later)
+                    if (whitelistOn) {
+                        row.classList.add('locked');
+                        row.classList.remove('enabled');
+                        if (cb) { cb.checked = false; cb.disabled = true; }
+                    } else {
+                        row.classList.remove('locked');
+                        if (cb) cb.disabled = false;
+                        toggleResp('invalid_format');
+                    }
+                    if (warn) warn.style.display = whitelistOn ? '' : 'none';
+                }
+                // Rate-Limited response is meaningless when Max Messages Per Phone is 0
+                // (unlimited) — no one is ever rate limited. Lock the row live.
+                function checkRateLimitResponseState() {
+                    var mmEl = document.getElementById('max_messages');
+                    var unlimited = !mmEl || parseInt(mmEl.value || '0', 10) === 0;
+                    var row = document.getElementById('row_rate_limited');
+                    var cb = document.getElementById('sms_response_rate_limited');
+                    var warn = document.getElementById('rate_limited_disabled_warning');
+                    if (!row) return;  // SMS-responses tab not parsed yet (init runs later)
+                    if (unlimited) {
+                        row.classList.add('locked');
+                        row.classList.remove('enabled');
+                        if (cb) { cb.checked = false; cb.disabled = true; }
+                    } else {
+                        row.classList.remove('locked');
+                        if (cb) cb.disabled = false;
+                        toggleResp('rate_limited');
+                    }
+                    if (warn) warn.style.display = unlimited ? '' : 'none';
                 }
                 updateFormatRules();
                 checkFiltersState();
@@ -3537,17 +3611,19 @@ def index():
                                onchange="toggleResp('invalid_format')"><span class="toggle-slider"></span></label>
                         <label for="sms_response_invalid_format" style="margin-left:10px;vertical-align:middle;">❌ Invalid Format — Send Response</label>
                     </div>
-                    {% if config.get('use_whitelist', False) %}
-                    <p class="resp-locked-note">⚠️ Invalid Format responses are disabled when the whitelist is active — all names are validated against the whitelist instead of format rules.</p>
-                    {% endif %}
+                    <p id="invalid_format_disabled_warning" class="resp-locked-note" style="{{ '' if config.get('use_whitelist', False) else 'display:none;' }}">⚠️ Invalid Format responses are disabled when the whitelist is active — all names are validated against the whitelist instead of format rules.</p>
                     <textarea id="response_invalid_format" rows="2">{{ config.get('response_invalid_format', 'Please send only a name (1-2 words, no sentences).') }}</textarea>
                 </div>
 
-                <div id="row_rate_limited" class="resp-row">
+                <div id="row_rate_limited" class="resp-row{% if config.get('max_messages_per_phone', 0) == 0 %} locked{% endif %}">
                     <div class="resp-toggle">
-                        <label class="toggle-switch"><input type="checkbox" id="sms_response_rate_limited" {{ 'checked' if config.get('sms_response_rate_limited', False) else '' }} onchange="toggleResp('rate_limited')"><span class="toggle-slider"></span></label>
+                        <label class="toggle-switch"><input type="checkbox" id="sms_response_rate_limited"
+                               {{ 'checked' if config.get('sms_response_rate_limited', False) and config.get('max_messages_per_phone', 0) != 0 else '' }}
+                               {{ 'disabled' if config.get('max_messages_per_phone', 0) == 0 else '' }}
+                               onchange="toggleResp('rate_limited')"><span class="toggle-slider"></span></label>
                         <label for="sms_response_rate_limited" style="margin-left:10px;vertical-align:middle;">⛔ Rate Limited — Send Response</label>
                     </div>
+                    <p id="rate_limited_disabled_warning" class="resp-locked-note" style="{{ '' if config.get('max_messages_per_phone', 0) == 0 else 'display:none;' }}">⚠️ Rate-Limited responses are disabled when Max Messages Per Phone is 0 (unlimited) — no one is ever rate limited.</p>
                     <textarea id="response_rate_limited" rows="2">{{ config.get('response_rate_limited', "You've reached the maximum number of messages allowed. Please try again tomorrow!") }}</textarea>
                 </div>
 
@@ -4867,6 +4943,8 @@ def index():
             loadFonts();
             loadFPPData();
             initRespRows();
+            checkWhitelistResponseState();
+            checkRateLimitResponseState();
             setupAutoSave();
             updateLiveStatus();
             setInterval(updateLiveStatus, 5000);
@@ -5164,10 +5242,20 @@ var _saveTimer = null;
                     });
                 });
 
-                // Message source selector — swap the visible credential block and save
+                // Message source selector — swap the visible credential block, apply
+                // the source's rate-limit default, and save.
                 var srcEl = document.getElementById('message_source');
                 if (srcEl) srcEl.addEventListener('change', function() {
+                    var isGV = this.value === 'google_voice';
+                    // Google Voice: unlimited (0) + allow duplicate names.
+                    // Twilio: rate limit 5 + disallow duplicates.
+                    var mm = document.getElementById('max_messages');
+                    if (mm) mm.value = isGV ? 0 : 5;
+                    var dup = document.getElementById('allow_duplicate_names');
+                    if (dup) dup.checked = isGV;
                     updateSourceUI();
+                    checkDuplicateState();          // grey the duplicate response accordingly
+                    checkRateLimitResponseState();  // grey the rate-limited response accordingly
                     saveConfig();
                 });
                 // Google Voice credential fields — save on blur (like Twilio creds)
@@ -5175,6 +5263,9 @@ var _saveTimer = null;
                     var el = document.getElementById(id);
                     if (el) el.addEventListener('blur', saveConfig);
                 });
+                // Keep the Rate-Limited response lock in sync when the limit changes
+                var mmEl = document.getElementById('max_messages');
+                if (mmEl) mmEl.addEventListener('input', checkRateLimitResponseState);
                 // Reflect the saved source on initial load
                 updateSourceUI();
 
@@ -5233,6 +5324,7 @@ var _saveTimer = null;
             }
 
             // Show the credential block for the selected message source, hide the other.
+            // Also hide the SMS Responses tab for Twilio (untested there for now).
             function updateSourceUI() {
                 var srcEl = document.getElementById('message_source');
                 if (!srcEl) return;
@@ -5241,6 +5333,17 @@ var _saveTimer = null;
                 var gv = document.getElementById('gv_creds');
                 if (tw) tw.style.display = isGV ? 'none' : '';
                 if (gv) gv.style.display = isGV ? '' : 'none';
+
+                // SMS Responses are only exposed for Google Voice right now
+                var smsBtn = document.getElementById('tabbtn-sms');
+                if (smsBtn) {
+                    smsBtn.style.display = isGV ? '' : 'none';
+                    // If Twilio is selected while the SMS tab is open, jump to Settings
+                    if (!isGV && smsBtn.classList.contains('active')) {
+                        var setBtn = document.querySelector('.tab-btn[onclick*="settings"]');
+                        if (setBtn) showTab('settings', setBtn);
+                    }
+                }
             }
 
             function testGoogleVoice() {
@@ -5458,6 +5561,9 @@ def update_config():
         # Normalize phone number to E.164 (strip spaces, dashes, parens — keep + and digits)
         if config.get('twilio_phone_number'):
             config['twilio_phone_number'] = re.sub(r'[^\d+]', '', config['twilio_phone_number'])
+
+        # Enforce source-tied settings (rate limit, Twilio responses off)
+        _apply_source_policy()
 
         save_config()
 
