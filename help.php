@@ -45,7 +45,7 @@ $githubBase = "https://github.com/thespica93/fpp-plugin-sms-twilio";
 
     <!-- ================= GOOGLE VOICE ================= -->
     <h2>🟢 Configure Google Voice</h2>
-    <p>Google Voice is <strong>free</strong>. It has no API, so the plugin reads the Gmail inbox that Google Voice forwards texts to. <strong>Inbound only</strong> — names are displayed, but no automatic SMS replies are sent in this mode.</p>
+    <p>Google Voice is <strong>free</strong>. It has no API, so the plugin reads the Gmail inbox that Google Voice forwards texts to. Automatic replies are supported by emailing Google Voice back (best-effort; may be rate-limited).</p>
     <ol>
         <li><strong>Turn on email forwarding.</strong> In <a href="https://voice.google.com/settings" target="_blank">Google Voice → Settings → Messages</a>, enable <em>“Forward messages to email.”</em></li>
         <li><strong>Turn on 2-Step Verification.</strong> On your Google Account, open <a href="https://myaccount.google.com/signinoptions/two-step-verification" target="_blank">Security → 2-Step Verification</a> and enable it (required for the next step).</li>
@@ -85,13 +85,13 @@ $githubBase = "https://github.com/thespica93/fpp-plugin-sms-twilio";
         <tr><td>Display Duration</td><td>How many seconds each name stays on screen.</td></tr>
     </table></div>
 
-    <h3>SMS Responses tab <span style="font-weight:normal;font-size:12px;color:#888;">(Twilio only)</span></h3>
+    <h3>SMS Responses tab</h3>
     <div class="ref"><table>
         <tr><th>Setting</th><th>What it does</th></tr>
         <tr><td>Response toggles</td><td>Turn each automatic reply on/off: success, blocked, rate-limited, duplicate, invalid format, not whitelisted, show-not-live.</td></tr>
         <tr><td>Response text</td><td>The message sent back for each case. Customize to your show.</td></tr>
     </table></div>
-    <div class="note"><strong>Google Voice:</strong> auto-responses are not sent in Google Voice mode — this tab has no effect there.</div>
+    <div class="note">Works with both sources. Twilio sends via its API; Google Voice sends by emailing a reply back through Google Voice (best-effort, may be rate-limited).</div>
 
     <h3>How a message gets approved</h3>
     <div class="ref"><table>

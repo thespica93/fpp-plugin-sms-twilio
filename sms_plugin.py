@@ -18,6 +18,7 @@ import os
 import struct
 import io
 import imaplib
+import smtplib
 import email
 import email.utils
 from email.header import decode_header, make_header
@@ -137,6 +138,9 @@ DEFAULT_CONFIG = {
     "gv_app_password": "",
     "gv_imap_host": "imap.gmail.com",
     "gv_imap_folder": "INBOX",
+    # SMTP is used only for Google Voice outbound replies (reply-to-email trick)
+    "gv_smtp_host": "smtp.gmail.com",
+    "gv_smtp_port": 587,
     "poll_interval": 2,
     "display_duration": 10,
     "max_messages_per_phone": 5,
@@ -199,6 +203,7 @@ last_gv_uid = None
 polling_thread = None
 polling_source = None      # which message source the live polling_thread serves
 polling_generation = 0     # bumped to retire an obsolete poller when source changes
+_gv_reply_ctx = None       # reply target/headers for the GV message being processed
 display_thread = None
 stop_polling = False
 stop_display = False
@@ -1388,27 +1393,31 @@ def is_on_whitelist(name):
     return name_lower in whitelist
 
 def send_sms_response(to_phone, message_type):
-    """Send an SMS response to the user based on message type"""
-    # Google Voice is inbound-only (v1): no outbound auto-responses. Scanning the
-    # forwarded Gmail gives no reliable outbound path, so short-circuit here.
-    if config.get('message_source') == 'google_voice':
-        return False
+    """Send an SMS response to the user based on message type.
 
+    Twilio: sends via the Twilio API. Google Voice: sends by replying to the
+    forwarding email (Google Voice converts an email reply into an outbound SMS),
+    using the reply context captured by the poller for the current message."""
     if not config.get(f'sms_response_{message_type}', False):
         return False
-    
-    if not twilio_client:
-        logging.warning("Cannot send SMS response: Twilio client not initialized")
-        return False
-    
+
     # Get the appropriate response message
     response_key = f"response_{message_type}"
     response_message = config.get(response_key, "")
-    
+
     if not response_message:
         logging.warning(f"No response message configured for type: {message_type}")
         return False
-    
+
+    # Google Voice: reply-to-email path
+    if config.get('message_source') == 'google_voice':
+        return send_gv_reply(response_message, message_type)
+
+    # Twilio: REST API path
+    if not twilio_client:
+        logging.warning("Cannot send SMS response: Twilio client not initialized")
+        return False
+
     try:
         twilio_client.messages.create(
             body=response_message,
@@ -1419,6 +1428,53 @@ def send_sms_response(to_phone, message_type):
         return True
     except Exception as e:
         logging.error(f"Error sending SMS response: {e}")
+        return False
+
+
+def send_gv_reply(text, message_type=""):
+    """Send an outbound SMS via Google Voice by replying to the forwarding email.
+
+    Replying to the notification email from the same Gmail account causes Google
+    Voice to deliver the reply body as an SMS to the original sender. Uses the
+    reply context (target address + threading headers) captured by the poller
+    for the message currently being processed."""
+    ctx = _gv_reply_ctx
+    if not ctx or not ctx.get('to'):
+        logging.warning("GV reply: no reply context for current message; cannot respond")
+        return False
+
+    email_addr = config.get('gv_email', '').strip()
+    app_pw = config.get('gv_app_password', '').strip()
+    if not email_addr or not app_pw:
+        logging.warning("GV reply: Gmail address / app password not configured")
+        return False
+
+    try:
+        from email.mime.text import MIMEText
+        reply = MIMEText(text, 'plain', 'utf-8')
+        reply['From'] = email_addr
+        reply['To'] = ctx['to']
+        subj = ctx.get('subject', '') or "Re: text message"
+        reply['Subject'] = subj if subj[:3].lower() == 're:' else ('Re: ' + subj)
+        # Thread the reply to the original so Google Voice associates it with the
+        # right conversation.
+        if ctx.get('message_id'):
+            reply['In-Reply-To'] = ctx['message_id']
+            refs = (ctx.get('references', '') + ' ' + ctx['message_id']).strip()
+            reply['References'] = refs
+
+        host = config.get('gv_smtp_host', 'smtp.gmail.com')
+        port = int(config.get('gv_smtp_port', 587))
+        with smtplib.SMTP(host, port, timeout=20) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(email_addr, app_pw)
+            s.sendmail(email_addr, [ctx['to']], reply.as_string())
+        logging.info(f"📤 Sent Google Voice reply ({message_type}) to {ctx['to']}")
+        return True
+    except Exception as e:
+        logging.error(f"Error sending Google Voice reply: {e}")
         return False
 
 def extract_name(message):
@@ -2606,7 +2662,17 @@ def parse_gv_email(raw_bytes):
         # key on the real number whether or not the sender is a saved contact.
         from_id = _gv_sender_id(msg, display_name)
 
-        return from_id, body
+        # Reply context: how to answer this message via the reply-to-email trick.
+        # Replying to the From address (with the original threading headers) makes
+        # Google Voice deliver the reply body as an SMS to the sender.
+        reply_ctx = {
+            'to': _addr,
+            'message_id': str(msg.get('Message-ID', '')).strip(),
+            'references': str(msg.get('References', '')).strip(),
+            'subject': _gv_decode_header(str(msg.get('Subject', ''))),
+        }
+
+        return from_id, body, reply_ctx
     except Exception as e:
         logging.error(f"Error parsing GV email: {e}")
         logging.debug(f"GV raw (parse error): {raw_bytes[:2000]!r}")
@@ -2617,7 +2683,7 @@ def poll_google_voice():
     """Poll a Gmail inbox (IMAP) for Google Voice SMS-forwarding emails and feed
     them through the shared processing pipeline. Mirrors poll_twilio()'s loop
     shape (midnight cleanup, first-run anchoring, per-message dedup)."""
-    global last_gv_uid, stop_polling
+    global last_gv_uid, stop_polling, _gv_reply_ctx
 
     logging.info("🚀 Google Voice polling started")
     first_run = last_gv_uid is None
@@ -2679,9 +2745,15 @@ def poll_google_voice():
                             raw = msg_data[0][1]
                             parsed = parse_gv_email(raw)
                             if parsed:
-                                from_id, body = parsed
+                                from_id, body, reply_ctx = parsed
                                 logging.info(f"📱 GV SMS from {from_id[-4:]}: '{body[:30]}'")
-                                process_incoming_message(from_id, body)
+                                # Make the reply target available to send_sms_response
+                                # for the duration of this message's processing.
+                                _gv_reply_ctx = reply_ctx
+                                try:
+                                    process_incoming_message(from_id, body)
+                                finally:
+                                    _gv_reply_ctx = None
                     except Exception as e:
                         logging.error(f"💥 EXCEPTION processing GV message {uid}: {e}")
                         import traceback
@@ -2875,7 +2947,7 @@ def index():
 
                             <button class="test-btn" onclick="testGoogleVoice()">🔌 Test Google Voice Connection</button>
                             <div id="gv_test_result" style="margin-top: 8px; font-size: 14px;"></div>
-                            <p class="help-text" style="margin-top:8px;">ℹ️ Google Voice is inbound-only: names are displayed, but automatic SMS replies (below) are not sent in this mode.</p>
+                            <p class="help-text" style="margin-top:8px;">ℹ️ Replies are sent by emailing Google Voice back (the app password must allow SMTP). Auto-responses on the <strong>SMS Responses</strong> tab work in this mode. Reply delivery via Google Voice is best-effort and may be rate-limited.</p>
                         </div>
 
                         <label>Poll Interval (seconds):</label>
@@ -5181,7 +5253,11 @@ var _saveTimer = null;
                     .then(r => r.json())
                     .then(data => {
                         if (data.success) {
-                            result.innerHTML = '<span style="color:#4CAF50;">✅ Google Voice inbox connected!</span>';
+                            var reply = data.reply_ready
+                                ? ' &nbsp;·&nbsp; ✅ replies enabled'
+                                : ' &nbsp;·&nbsp; ⚠️ replies unavailable (outbound SMTP blocked)';
+                            result.innerHTML = '<span style="color:#4CAF50;">✅ Inbox connected!</span>' +
+                                '<span style="color:' + (data.reply_ready ? '#4CAF50' : '#e65100') + ';">' + reply + '</span>';
                         } else {
                             result.innerHTML = '<span style="color:#f44336;">❌ ' + data.error + '</span>';
                         }
@@ -5751,11 +5827,14 @@ def test_twilio():
 
 @app.route('/api/test_gv')
 def test_google_voice_conn():
-    """Verify the Google Voice Gmail IMAP login works (used by the config UI)."""
+    """Verify Google Voice connectivity: IMAP (inbound, required) and SMTP
+    (outbound replies, optional). Used by the config UI."""
     email_addr = config.get('gv_email', '').strip()
     app_pw = config.get('gv_app_password', '').strip()
     if not email_addr or not app_pw:
         return jsonify({"success": False, "error": "Enter your Gmail address and app password first."})
+
+    # IMAP — required for reading incoming texts
     try:
         imap = imaplib.IMAP4_SSL(config.get('gv_imap_host', 'imap.gmail.com'))
         try:
@@ -5766,13 +5845,28 @@ def test_google_voice_conn():
                 imap.logout()
             except Exception:
                 pass
-        return jsonify({"success": True})
     except imaplib.IMAP4.error as e:
         return jsonify({"success": False,
                         "error": f"Login failed ({e}). Use a Google App Password (not your normal password), "
                                  "with 2-Step Verification enabled and IMAP turned on in Gmail."})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+    # SMTP — only needed for outbound auto-responses; report but don't fail on it
+    reply_ready = False
+    reply_error = ""
+    try:
+        with smtplib.SMTP(config.get('gv_smtp_host', 'smtp.gmail.com'),
+                          int(config.get('gv_smtp_port', 587)), timeout=15) as s:
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
+            s.login(email_addr, app_pw)
+        reply_ready = True
+    except Exception as e:
+        reply_error = str(e)
+
+    return jsonify({"success": True, "reply_ready": reply_ready, "reply_error": reply_error})
 
 @app.route('/api/messages')
 def get_messages():
