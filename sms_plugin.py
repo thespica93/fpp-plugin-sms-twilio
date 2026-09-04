@@ -2937,10 +2937,7 @@ def index():
                             <option value="google_voice" {{ 'selected' if config.get('message_source','twilio') == 'google_voice' else '' }}>Google Voice (Gmail)</option>
                         </select>
                         <p class="help-text">Choose where incoming text messages come from. Twilio uses its API; Google Voice scans the Gmail inbox that Voice forwards texts to.</p>
-
-                        <label>Enable Plugin:</label>
-                        <label class="toggle-switch"><input type="checkbox" id="enabled" {{ 'checked' if config.enabled else '' }}><span class="toggle-slider"></span></label>
-                        <label class="checkbox-label">Enable SMS polling</label>
+                        <p class="help-text">▶️ The show is started and stopped by the <strong>Start</strong> / <strong>Stop</strong> scheduler commands — no manual enable needed once credentials are saved.</p>
 
                         <!-- Twilio credentials — shown when Message Source = Twilio -->
                         <div id="twilio_creds">
@@ -5231,16 +5228,9 @@ var _saveTimer = null;
             }
 
             function setupAutoSave() {
-                // enabled has its own handler — saves only itself so it never
-                // clobbers the runtime state set by TwilioStart/TwilioStop
-                var enabledEl = document.getElementById('enabled');
-                if (enabledEl) enabledEl.addEventListener('change', function() {
-                    fetch('/api/config', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({enabled: this.checked})
-                    });
-                });
+                // The show's live state (config.enabled) is owned by the Start/Stop
+                // scheduler commands (api_activate / api_deactivate) — there is no
+                // manual enable toggle, so config saves here never touch it.
 
                 // Message source selector — swap the visible credential block, apply
                 // the source's rate-limit default, and save.
