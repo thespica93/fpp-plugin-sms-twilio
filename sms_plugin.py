@@ -2511,6 +2511,62 @@ def _gv_extract_message(text):
     return ' '.join(message_lines).strip()
 
 
+def _gv_normalize_phone(text):
+    """Pull the first phone-number-looking run out of text and return it in
+    E.164-ish form (+1XXXXXXXXXX for US), or None."""
+    if not text:
+        return None
+    m = re.search(r'\+?\d[\d\-\.\s()]{6,}\d', text)
+    if not m:
+        return None
+    digits = re.sub(r'\D', '', m.group(0))
+    if len(digits) == 11 and digits.startswith('1'):
+        return '+' + digits
+    if len(digits) == 10:
+        return '+1' + digits
+    if len(digits) >= 7:
+        return '+' + digits
+    return None
+
+
+def _gv_sender_id(msg, display_name):
+    """Resolve the sender's phone number for a Google Voice forward, so the key
+    used for display / blocklist / rate-limiting is the actual number regardless
+    of whether the sender is a saved contact.
+
+    Sources, most reliable first:
+      1. Subject: "New text message from <name> (610) 809-3236" (sender only)
+      2. From local-part: "<yourGVnum>.<sendernum>.<token>@txt.voice.google.com"
+      3. The display name (contact name, or the raw number for unknown senders)
+    """
+    # 1) Subject line — contains only the sender's number
+    subj = _gv_decode_header(str(msg.get('Subject', '')))
+    num = _gv_normalize_phone(subj)
+    if num:
+        return num
+
+    # 2) From address local-part — segments are <GVnum>.<sendernum>.<token>;
+    #    the sender's number is the 2nd all-digit segment (1st is your own GV number)
+    _n, addr = email.utils.parseaddr(str(msg.get('From', '')))
+    local = addr.split('@', 1)[0]
+    numeric_segs = [s for s in local.split('.') if s.isdigit() and len(s) >= 10]
+    if len(numeric_segs) >= 2:
+        num = _gv_normalize_phone(numeric_segs[1])
+        if num:
+            return num
+    if len(numeric_segs) == 1:
+        num = _gv_normalize_phone(numeric_segs[0])
+        if num:
+            return num
+
+    # 3) Fall back to the display name (already the raw number for unknown senders)
+    if display_name and re.fullmatch(r'[\d\s\-\.\(\)\+]+', display_name):
+        n = _gv_normalize_phone(display_name)
+        if n:
+            return n
+    return display_name or "Guest"
+
+
 def parse_gv_email(raw_bytes):
     """Parse a Google Voice SMS-forwarding email into (from_id, body).
 
@@ -2545,13 +2601,10 @@ def parse_gv_email(raw_bytes):
             logging.debug(f"GV raw (empty body): {raw_bytes[:2000]!r}")
             return None
 
-        # Normalize a numeric display name to digits (E.164-ish); otherwise keep
-        # the contact name as the sender key.
-        from_id = display_name or "Guest"
-        if display_name and re.fullmatch(r'[\d\s\-\.\(\)\+]+', display_name):
-            digits = re.sub(r'\D', '', display_name)
-            if len(digits) >= 7:
-                from_id = ('+' if display_name.strip().startswith('+') else '') + digits
+        # Resolve the sender's actual phone number (Subject / From address),
+        # falling back to the display name — so blocklist / rate-limit / display
+        # key on the real number whether or not the sender is a saved contact.
+        from_id = _gv_sender_id(msg, display_name)
 
         return from_id, body
     except Exception as e:
